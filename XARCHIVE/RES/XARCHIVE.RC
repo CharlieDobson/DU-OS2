@@ -1,0 +1,203 @@
+/*===========================================================================
+ * XARCHIVE.RC  -  XArchive (OS/2 PM) resource script
+ * Compile with:  wrc -bt=os2 -r ...
+ *
+ * OS/2 resource grammar: POPUP is SUBMENU and needs an ID, a dialog is a
+ * DLGTEMPLATE wrapping a DIALOG statement, EDITTEXT is ENTRYFIELD,
+ * accelerators live in their own ACCELTABLE, "&" mnemonics are "~", and
+ * dialog coordinates are dialog units measured from the BOTTOM-left.
+ * There is no VERSIONINFO equivalent.
+ *
+ * ID_XARCHIVE is the frame's window ID: FCF_MENU, FCF_ICON and
+ * FCF_ACCELTABLE all find their resource by it, so the MENU, the ICON and
+ * the ACCELTABLE must every one carry that same number.
+ *===========================================================================*/
+#include <os2.h>
+#include "resource.h"
+
+/* WC_MLE is defined in pmwin.h as ((PSZ)0xffff000a); the cast makes it
+ * unusable in a CONTROL statement's class field, which wants a plain
+ * number, so the constant is written out here. */
+#define RC_WC_MLE   0xffff000a
+
+/*---------------------------------------------------------------------------
+ * Icon.  Must be an OS/2-format icon, not a Windows .ICO -- BUILD\MKOS2.CMD
+ * converts ..\RES\XARCHIVE.ICO into XARCHIVE.PTR next to itself before this
+ * script is compiled.  wrc will happily embed a Windows .ICO here and say
+ * nothing; PM then cannot load it and you get the default program icon.
+ *-------------------------------------------------------------------------*/
+
+ICON ID_XARCHIVE "XARCHIVE.PTR"
+
+/*---------------------------------------------------------------------------
+ * Menu bar
+ *-------------------------------------------------------------------------*/
+
+MENU ID_XARCHIVE
+BEGIN
+    SUBMENU "~File", IDM_FILE
+    BEGIN
+        MENUITEM "~Open...\tCtrl+O",        IDM_FILE_OPEN
+        MENUITEM "~Close",                  IDM_FILE_CLOSE
+        MENUITEM SEPARATOR
+        MENUITEM "E~xit\tF3",               IDM_FILE_EXIT
+    END
+
+    SUBMENU "~Archive", IDM_ARCHIVE
+    BEGIN
+        MENUITEM "~Extract...\tCtrl+E",     IDM_ARCHIVE_EXTRACT
+        MENUITEM "~Test integrity\tCtrl+T", IDM_ARCHIVE_TEST
+        MENUITEM SEPARATOR
+        MENUITEM "~Info...\tCtrl+I",        IDM_ARCHIVE_INFO
+    END
+
+    SUBMENU "~Help", IDM_HELP
+    BEGIN
+        MENUITEM "~About XArchive...",      IDM_HELP_ABOUT
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Accelerators (FCF_ACCELTABLE).
+ *
+ * PM has no virtual keys for letters, so Ctrl chords must be CHAR entries -
+ * and PM matches a CHAR entry against the character carried by the key
+ * event, which for Ctrl+O is 0x0F, not 'O'.  The control codes are therefore
+ * written out numerically.  Do NOT write them as "^O": wrc accepts that
+ * spelling but compiles it the Windows way (AF_CHAR | AF_CONTROL with the
+ * key left as 'O'), which no PM key event can ever match, and reports
+ * nothing.
+ *
+ * F3 is the OS/2 convention for File / Exit.
+ *-------------------------------------------------------------------------*/
+
+ACCELTABLE ID_XARCHIVE
+BEGIN
+    15,     IDM_FILE_OPEN,          CHAR, CONTROL    /* Ctrl+O */
+    5,      IDM_ARCHIVE_EXTRACT,    CHAR, CONTROL    /* Ctrl+E */
+    20,     IDM_ARCHIVE_TEST,       CHAR, CONTROL    /* Ctrl+T */
+    9,      IDM_ARCHIVE_INFO,       CHAR, CONTROL    /* Ctrl+I */
+    VK_F3,  IDM_FILE_EXIT,          VIRTUALKEY
+END
+
+/*---------------------------------------------------------------------------
+ * About box.  The Windows version showed the program icon beside the text;
+ * OS/2's ICON statement is the top-level icon declaration, so that control
+ * is dropped here rather than fought with.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_ABOUT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "About XArchive", IDD_ABOUT, 24, 24, 228, 72,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "XArchive - File Extractor",
+                                    IDC_STATIC,  12, 54, 204,  8
+        LTEXT   "Extracts 7-Zip, Zip, RAR and FAT images.",
+                                    IDC_STATIC,  12, 42, 204,  8
+        LTEXT   "Copyright (C) Charlie Dobson 2026",
+                                    IDC_STATIC,  12, 30, 204,  8
+        LTEXT   "All Rights Reserved.",
+                                    IDC_STATIC,  12, 18, 204,  8
+        DEFPUSHBUTTON "OK",         DID_OK,     178,  4,  40, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Progress box (modeless).
+ *
+ * IDC_PROG_BAR is only a placeholder: PMMAIN.C queries its position, throws
+ * it away and puts a window of its own "XArcBar" class in the same place, so
+ * the bar can repaint itself from WM_PAINT during a tight extract loop.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_PROGRESS LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Extracting", IDD_PROGRESS, 24, 24, 228, 66,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "Extracting:",      IDC_PROG_LABEL,   8, 50,  52,  8
+        LTEXT   "",                 IDC_PROG_FILE,   62, 50, 158,  8
+        LTEXT   "",                 IDC_PROG_BAR,     8, 32, 212, 12
+        DEFPUSHBUTTON "Cancel",     DID_CANCEL,      88,  8,  52, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Archive information.  A read-only MLE, given a monospaced presentation
+ * font at run time so the space-aligned report lines up.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_INFO LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Archive Information", IDD_INFO, 24, 24, 252, 168,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        CONTROL "", IDC_INFO_TEXT, 8, 28, 236, 132, RC_WC_MLE,
+                MLS_READONLY | MLS_VSCROLL | MLS_BORDER |
+                WS_GROUP | WS_TABSTOP | WS_VISIBLE
+        DEFPUSHBUTTON "OK",         DID_OK,     106,  6,  40, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Extract destination
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_EXTRACT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Extract To", IDD_EXTRACT, 24, 24, 276, 70,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT      "Extract to folder:", IDC_STATIC,      8, 52, 260,  8
+        ENTRYFIELD "",                   IDC_EXT_PATH,    8, 36, 260, 12,
+                                         ES_MARGIN | ES_AUTOSCROLL
+        PUSHBUTTON "~Browse...",         IDC_EXT_BROWSE,  8,  8,  60, 14
+        PUSHBUTTON "~New folder...",     IDC_EXT_NEWDIR, 72,  8,  68, 14
+        DEFPUSHBUTTON "OK",              DID_OK,        148,  8,  52, 14
+        PUSHBUTTON "Cancel",             DID_CANCEL,    208,  8,  52, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * New folder name
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_NEWFOLDER LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "New Folder", IDD_NEWFOLDER, 24, 24, 208, 76,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT      "Name of the new folder:", IDC_STATIC,       8, 56, 192,  8
+        ENTRYFIELD "",                  IDC_NEWDIR_NAME,        8, 40, 192, 12,
+                                        ES_MARGIN | ES_AUTOSCROLL
+        DEFPUSHBUTTON "OK",             DID_OK,                88,  8,  52, 14
+        PUSHBUTTON "Cancel",            DID_CANCEL,           148,  8,  52, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Destination folder browser.  PM has no DlgDirList, so PMMAIN.C fills this
+ * listbox itself from DosQueryCurrentDisk (drives) and DosFindFirst
+ * (subdirectories).
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_FOLDERPICK LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Select Destination Folder", IDD_FOLDERPICK, 24, 24, 220, 186,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "Folder:",          IDC_STATIC,   8, 170,  32,  8
+        LTEXT   "",                 IDC_FP_PATH, 42, 170, 168,  8
+        LISTBOX                     IDC_FP_LIST,  8,  32, 204, 132,
+                                    LS_NOADJUSTPOS | WS_GROUP | WS_TABSTOP
+        DEFPUSHBUTTON "OK",         DID_OK,     100,   8,  52, 14
+        PUSHBUTTON "Cancel",        DID_CANCEL, 158,   8,  52, 14
+    END
+END

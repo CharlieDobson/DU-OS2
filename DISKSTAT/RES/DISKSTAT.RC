@@ -1,0 +1,95 @@
+/*===========================================================================
+ * DISKSTAT.RC  -  DiskStat (OS/2 PM) resource script
+ * Compile with:  wrc -bt=os2 -r ...
+ *
+ * OS/2 resource grammar: POPUP is SUBMENU and needs an ID, a dialog is a
+ * DLGTEMPLATE wrapping a DIALOG, accelerators live in their own ACCELTABLE,
+ * and "&" mnemonics are "~".  Dialog coordinates are in dialog units measured
+ * from the BOTTOM-left.  There is no VERSIONINFO equivalent.
+ *===========================================================================*/
+#include <os2.h>
+#include "resource.h"
+
+/*---------------------------------------------------------------------------
+ * Icon.  Must be an OS/2-format icon, not a Windows .ICO -- BUILD\MKOS2.CMD
+ * converts ..\RES\DISKSTAT.ICO into DISKSTAT.PTR next to itself before this
+ * script is compiled.
+ *-------------------------------------------------------------------------*/
+
+ICON ID_DISKSTAT "DISKSTAT.PTR"
+
+/*---------------------------------------------------------------------------
+ * Menu bar.  The ID must match the frame's window ID for FCF_MENU to find it.
+ *-------------------------------------------------------------------------*/
+
+MENU ID_DISKSTAT
+BEGIN
+    SUBMENU "~File", IDM_FILE
+    BEGIN
+        MENUITEM "~Refresh\tF5",        IDM_FILE_REFRESH
+        MENUITEM SEPARATOR
+        MENUITEM "E~xit\tF3",           IDM_FILE_EXIT
+    END
+
+    SUBMENU "~Help", IDM_HELP
+    BEGIN
+        MENUITEM "~About...",  IDM_HELP_ABOUT
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Accelerators (FCF_ACCELTABLE).  F5 rescans; F3 is the OS/2 convention for
+ * File / Exit.
+ *-------------------------------------------------------------------------*/
+
+ACCELTABLE ID_DISKSTAT
+BEGIN
+    VK_F5,  IDM_FILE_REFRESH,   VIRTUALKEY
+    VK_F3,  IDM_FILE_EXIT,      VIRTUALKEY
+END
+
+/*---------------------------------------------------------------------------
+ * About box
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_ABOUT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "About Disk Statistics", IDD_ABOUT, 24, 24, 216, 76,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "Disk Statistics - Dobson Utilities",
+                                        IDC_STATIC,  12, 58, 190,  8
+        LTEXT   "A drive space and folder-size visualizer.",
+                                        IDC_STATIC,  12, 46, 190,  8
+        LTEXT   "Copyright (C) Charlie Dobson 1992 - 2026",
+                                        IDC_STATIC,  12, 34, 190,  8
+        LTEXT   "All Rights Reserved.",
+                                        IDC_STATIC,  12, 22, 190,  8
+        DEFPUSHBUTTON "OK",             DID_OK,     166,  4,  40, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Modeless "Scanning" notice, put up for the duration of a scan
+ *
+ * The scan runs on a worker thread, so this is live: IDC_SCANPATH is
+ * refreshed from a timer with the directory the worker is in, and Cancel
+ * raises the worker's cancel flag.
+ *
+ * IDC_SCANPATH is deliberately wide and the dialog sized so a long HPFS path
+ * has somewhere to go; the text is clipped by the control rather than
+ * resizing the dialog under the user.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_SCANNING LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Disk Statistics", IDD_SCANNING, 40, 40, 240, 62,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR
+    BEGIN
+        CTEXT   "Scanning drive ...",   IDC_SCANTEXT, 10, 44, 220, 10
+        CTEXT   "",                     IDC_SCANPATH, 10, 30, 220,  8
+        PUSHBUTTON "Cancel",            DID_CANCEL,   96,  6,  48, 14
+    END
+END

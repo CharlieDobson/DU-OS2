@@ -1,0 +1,384 @@
+Open Watcom Linker Version 1.9
+Portions Copyright (c) 1985-2002 Sybase, Inc. All Rights Reserved.
+Created on:       26/08/05 05:19:07
+Executable Image: ENHNOTE.EXE
+creating an OS/2 32-bit Presentation Manager executable
+
+
+                        +------------+
+                        |   Groups   |
+                        +------------+
+
+Group                           Address              Size
+=====                           =======              ====
+
+DGROUP                          0002:00000000        00040700
+
+
+
+                        +--------------+
+                        |   Segments   |
+                        +--------------+
+
+Segment                Class          Group          Address         Size
+=======                =====          =====          =======         ====
+
+BEGTEXT                CODE           AUTO           0001:00000000   00000007
+_TEXT                  CODE           AUTO           0001:00000010   000070c6
+_NULL                  BEGDATA        DGROUP         0002:00000000   00000004
+_AFTERNULL             BEGDATA        DGROUP         0002:00000004   00000000
+CONST                  DATA           DGROUP         0002:00000004   0000021c
+CONST2                 DATA           DGROUP         0002:00000220   0000000c
+_DATA                  DATA           DGROUP         0002:0000022c   00000105
+XIB                    DATA           DGROUP         0002:00000332   00000000
+XI                     DATA           DGROUP         0002:00000332   0000000c
+XIE                    DATA           DGROUP         0002:0000033e   00000000
+YIB                    DATA           DGROUP         0002:0000033e   00000000
+YI                     DATA           DGROUP         0002:0000033e   00000006
+YIE                    DATA           DGROUP         0002:00000344   00000000
+TIB                    DATA           DGROUP         0002:00000344   00000000
+TI                     DATA           DGROUP         0002:00000344   00000000
+TIE                    DATA           DGROUP         0002:00000344   00000000
+DATA                   DATA           DGROUP         0002:00000344   00000000
+_BSS                   BSS            DGROUP         0002:00000344   000003b9
+STACK                  STACK          DGROUP         0002:00000700   00040000
+
+
+                        +----------------+
+                        |   Memory Map   |
+                        +----------------+
+
+* = unreferenced symbol
++ = symbol only referenced locally
+
+Address        Symbol
+=======        ======
+
+Module: PMMAIN.obj(S:\CPP\OS2\ENHNOTE\PMMAIN.C)
+0001:000001c0  main_
+0001:00000970+ ClientWndProc
+0001:00000d40+ FindDlgProc
+0001:00000e30+ AboutDlgProc
+Module: EDITCTL.obj(S:\CPP\OS2\ENHNOTE\EDITCTL.C)
+0001:000032e0+ EditWndProc
+0001:00003730  EditRegister_
+0001:00003760  EditLoad_
+0001:000037f0  EditSave_
+0001:00003820  EditNewFile_
+0001:00003890  EditIsModified_
+0001:000038b0* EditSetModified_
+0001:000038d0  EditSetWordWrap_
+0001:00003950  EditGetWordWrap_
+0001:00003970  EditCanUndo_
+0001:00003990  EditCanRedo_
+0001:000039b0  EditUndo_
+0001:00003a00  EditRedo_
+0001:00003a50  EditHasSel_
+0001:00003a80  EditCanPaste_
+0001:00003ab0  EditSelectAll_
+0001:00003b00  EditCopy_
+0001:00003c40  EditPaste_
+0001:00003d60  EditDeleteSel_
+0001:00003da0  EditCut_
+0001:00003dc0  EditFindNext_
+Module: GAPBUF.obj(S:\CPP\OS2\ENHNOTE\GAPBUF.C)
+0001:000043b0  TbInit_
+0001:00004490  TbFree_
+0001:000044d0  TbClear_
+0001:00004500  TbLength_
+0001:00004510* TbLineCount_
+0001:00004520  TbIsModified_
+0001:00004530  TbSetModified_
+0001:00004540  TbCharAt_
+0001:00004560  TbLineStart_
+0001:00004590  TbLineEnd_
+0001:000045b0* TbLineLength_
+0001:000045d0  TbLineFromPos_
+0001:00004630+ TbGetRange_
+0001:000046e0  TbBreakUndo_
+0001:000046f0  TbInsert_
+0001:00004830  TbDelete_
+0001:000048f0  TbCanUndo_
+0001:00004900  TbCanRedo_
+0001:00004930  TbUndo_
+0001:000049b0  TbRedo_
+0001:00004a40* TbReindex_
+0001:00004b00  TbLoadFile_
+0001:00004d70  TbSaveFile_
+0001:00004e70  TbFind_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(sprintf.c)
+0001:00004f60  sprintf_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(memset.c)
+0001:00004f90  memset_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(cstart)
+0001:00004fa8  _cstart_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(argcv.c)
+0002:000004c8  __argc
+0002:000004cc  __argv
+0002:000004d0  ___argc
+0002:000004d4  ___argv
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nmalloc.c)
+0001:00005010  _nmalloc_
+0001:00005010  malloc_
+0002:00000278  ___nheapbeg
+0002:0000027c  ___MiniHeapRover
+0002:00000280  ___LargestSizeB4MiniHeapRover
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nfree.c)
+0001:00005110  _nfree_
+0001:00005110  free_
+0002:000004d8  ___MiniHeapFreeRover
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nrealloc.c)
+0001:00005220* _nrealloc_
+0001:00005220  realloc_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(memmove.c)
+0001:000052a0  memmove_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(vsprintf.c)
+0001:00005320  vsprintf_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(__stos)
+0001:00005340  __STOSB
+0001:00005377* __STOSD
+Module: C:\WATCOM/lib386/os2\clib3r.lib(main2o32.c)
+0001:000053f0  __OS2Main
+Module: C:\WATCOM/lib386/os2\clib3r.lib(segdefns)
+0001:00000003  ___begtext
+0002:00000000* __nullarea
+0002:00000332  __Start_XI
+0002:0000033e  __End_XI
+0002:0000033e  __Start_YI
+0002:00000344  __End_YI
+Module: C:\WATCOM/lib386/os2\clib3r.lib(initargv.c)
+0001:00005460  __Init_Argv_
+0001:000054b0+ _getargv_
+0001:00005650  __Fini_Argv_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(maino32.c)
+0002:00000284+ ___FirstThreadData
+0002:00000288+ ___GetThreadPtr
+0002:0000028c* __AccessFileH
+0002:00000290* __ReleaseFileH
+0002:00000294* __AccessIOB
+0002:00000298* __ReleaseIOB
+0002:0000029c  __AccessNHeap
+0002:000002a0* __AccessFHeap
+0002:000002a4  __ReleaseNHeap
+0002:000002a8* __ReleaseFHeap
+0001:00005664  __threadstack_
+0001:0000566b* __threadid_
+0001:00005672  __OS2MainInit_
+0001:000056e1+ __OS2Init_
+0001:0000571f* __OS2Fini_
+0001:00005727* __shutdown_stack_checking_
+0001:0000573c  __exit_
+0002:000002ac* __AccessTDList
+0002:000002b0* __ReleaseTDList
+0002:000002b4+ ___sig_init_rtn
+0002:000002b8* ___sig_fini_rtn
+0002:000002bc* __threadstksize
+0002:000002c0  ___process_fini
+0002:000004e0  ___Is_DLL
+0002:000004e4+ ___saved_CS
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nmemneed.c)
+0001:00005780  __nmemneed_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mem.c)
+0001:00005790  __MemAllocator
+0001:00005840  __MemFree
+Module: C:\WATCOM/lib386/os2\clib3r.lib(grownear.c)
+0001:00005ae0  __ExpandDGROUP_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nmsize.c)
+0001:00005b00  _nmsize_
+0001:00005b00* _msize_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nexpand.c)
+0001:00005b10  _nexpand_
+0001:00005b10* _expand_
+0001:00005b50+ __HeapManager_expand_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(prtf.c)
+0001:00005d10  __prtf_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(initrtns.c)
+0001:000069f0  __InitRtns
+0001:00006a40  __FiniRtns
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mthrdini.c)
+0001:00006aa0  __InitThreadData_
+0002:000002c4  ___ThreadDataSize
+Module: C:\WATCOM/lib386/os2\clib3r.lib(cmain386.c)
+0001:00006ac0  __CMain
+Module: C:\WATCOM/lib386/os2\clib3r.lib(dosseg)
+0000:00001234  __DOSseg__
+Module: C:\WATCOM/lib386/os2\clib3r.lib(crwdata)
+0002:0000030c  __osmajor
+0002:0000030d  __osminor
+0002:000002d8* __LpDllName
+0002:000002dc* __LpwCmdLine
+0002:000002e0* __LpwPgmName
+0002:000002e4* __LpwDllName
+0002:000002d0  __LpCmdLine
+0002:000002d4  __LpPgmName
+0002:000002c8* __dynend
+0002:000002cc  __curbrk
+0002:000002e8* __STACKLOW
+0002:000002ec* __STACKTOP
+0002:000002f0  __ASTACKSIZ
+0002:000002f4  __ASTACKPTR
+0002:000002f8* __cbyte
+0002:000002fc* __cbyte2
+0002:00000300* __child
+0002:00000306  __Envptr
+0002:0000030a* __Envseg
+0002:00000304* __no87
+0002:0000030e* ___FPE_handler
+Module: C:\WATCOM/lib386/os2\clib3r.lib(histsplt.c)
+0002:000005e8  ___historical_splitparms
+Module: C:\WATCOM/lib386/os2\clib3r.lib(___argc.c)
+0002:000005ec  ____Argc
+0002:000005f0  ____Argv
+Module: C:\WATCOM/lib386/os2\clib3r.lib(cinit.c)
+0001:00006b10  __CommonInit_
+0002:000005f4  ___hmodule
+Module: C:\WATCOM/lib386/os2\clib3r.lib(amblksiz.c)
+0002:00000314  __amblksiz
+Module: C:\WATCOM/lib386/os2\clib3r.lib(heapen.c)
+0001:00006b20* _heapenable_
+0002:00000318  ___heap_enabled
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nheapmin.c)
+0001:00006b50  _nheapshrink_
+0001:00006b50* _nheapmin_
+0001:00006b50* _heapmin_
+0001:00006b50* _heapshrink_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(wctomb.c)
+0001:00006c40  wctomb_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(itoa.c)
+0001:00006c70+ utoa_
+0001:00006cc0  itoa_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(strupr.c)
+0001:00006cf0  strupr_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(noefgfmt.c)
+0002:0000031c  ___EFG_printf
+0002:00000320* ___EFG_scanf
+Module: C:\WATCOM/lib386/os2\clib3r.lib(lltoa.c)
+0001:00006d60  ulltoa_
+0001:00006dd0* lltoa_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(ltoa.c)
+0001:00006e00  ultoa_
+0001:00006e50* ltoa_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mbisdbcs.c)
+0002:000005f8  ___IsDBCS
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mbislead.c)
+0001:00006e80* _ismbblead_
+0002:000005fc  ___MBCSIsTable
+Module: C:\WATCOM/lib386/os2\clib3r.lib(exit.c)
+0001:00006e97+ __null_int23_exit_
+0001:00006e98  exit_
+0001:00006ee8* _exit_
+0002:00000324+ ___int23_exit
+0002:00000328+ ___FPE_handler_exit
+Module: C:\WATCOM/lib386/os2\clib3r.lib(alphabet.c)
+0002:000001f8  ___Alphabet
+Module: C:\WATCOM/lib386/os2\clib3r.lib(xmsgo32.c)
+0001:00006f00+ __exit_with_msg_
+0001:00006f50  __fatal_runtime_error_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mbinit.c)
+0001:00006faa  __mbinit_
+0002:0000032c+ ___MBCodePage
+Module: C:\WATCOM/lib386/os2\clib3r.lib(enterdb.c)
+0001:000070b0  __EnterWVIDEO_
+0002:00000330+ ___WD_Present
+
+
+                        +----------------------+
+                        |   Imported Symbols   |
+                        +----------------------+
+
+Symbol                              Module
+======                              ======
+
+WinCreateStdWindow                  PMWIN
+WinGetLastError                     PMWIN
+WinInitialize                       PMWIN
+WinCreateMsgQueue                   PMWIN
+DosError                            DOSCALLS
+WinRegisterClass                    PMWIN
+WinMessageBox                       PMWIN
+WinShowWindow                       PMWIN
+WinSetFocus                         PMWIN
+WinGetMsg                           PMWIN
+WinDispatchMsg                      PMWIN
+WinTerminate                        PMWIN
+WinDestroyMsgQueue                  PMWIN
+WinDestroyWindow                    PMWIN
+WinFileDlg                          PMCTLS
+WinSetWindowText                    PMWIN
+WinDlgBox                           PMWIN
+WinSendMsg                          PMWIN
+WinSetWindowPos                     PMWIN
+WinQueryWindowRect                  PMWIN
+WinCreateWindow                     PMWIN
+WinPostMsg                          PMWIN
+WinDefWindowProc                    PMWIN
+WinQueryDlgItemText                 PMWIN
+WinSendDlgItemMsg                   PMWIN
+WinDismissDlg                       PMWIN
+WinSetDlgItemText                   PMWIN
+WinWindowFromID                     PMWIN
+WinDefDlgProc                       PMWIN
+GpiQueryFonts                       PMGPI
+GpiCreateLogFont                    PMGPI
+GpiSetCharSet                       PMGPI
+GpiDeleteSetId                      PMGPI
+WinGetPS                            PMWIN
+GpiQueryFontMetrics                 PMGPI
+WinReleasePS                        PMWIN
+WinQuerySysValue                    PMWIN
+WinCreateCursor                     PMWIN
+WinInvalidateRect                   PMWIN
+WinQueryWindow                      PMWIN
+WinQueryWindowUShort                PMWIN
+GpiSetColor                         PMGPI
+GpiCharStringAt                     PMGPI
+WinFillRect                         PMWIN
+GpiSetBackMix                       PMGPI
+WinBeginPaint                       PMWIN
+GpiCreateLogColorTable              PMGPI
+WinQuerySysColor                    PMWIN
+WinShowCursor                       PMWIN
+WinEndPaint                         PMWIN
+WinSetCapture                       PMWIN
+WinQueryWindowPtr                   PMWIN
+WinSetWindowPtr                     PMWIN
+WinQuerySysPointer                  PMWIN
+WinSetPointer                       PMWIN
+WinGetKeyState                      PMWIN
+WinDestroyCursor                    PMWIN
+WinQueryClipbrdFmtInfo              PMWIN
+DosAllocSharedMem                   DOSCALLS
+WinOpenClipbrd                      PMWIN
+WinEmptyClipbrd                     PMWIN
+WinSetClipbrdData                   PMWIN
+WinCloseClipbrd                     PMWIN
+DosFreeMem                          DOSCALLS
+WinQueryClipbrdData                 PMWIN
+DosOpen                             DOSCALLS
+DosSetFilePtr                       DOSCALLS
+DosClose                            DOSCALLS
+DosRead                             DOSCALLS
+DosWrite                            DOSCALLS
+DosQuerySysInfo                     DOSCALLS
+DosExit                             DOSCALLS
+DosAllocMem                         DOSCALLS
+DosQueryDBCSEnv                     NLS
+DosQueryCp                          DOSCALLS
+
+
+                        +--------------------+
+                        |   Libraries Used   |
+                        +--------------------+
+
+C:\WATCOM/lib386/os2\clib3r.lib
+C:\WATCOM/lib386/os2\os2386.lib
+
+
+                        +-----------------------+
+                        |   Linker Statistics   |
+                        +-----------------------+
+
+Stack size:  00040000 (262144.)
+Memory size:  000477d6 (292822.)
+Entry point address: 0001:00004fa8
+Link time: 00:00.31

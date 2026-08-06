@@ -1,0 +1,591 @@
+Open Watcom Linker Version 1.9
+Portions Copyright (c) 1985-2002 Sybase, Inc. All Rights Reserved.
+Created on:       26/08/05 05:06:04
+Executable Image: EXPLORER.EXE
+creating an OS/2 32-bit Presentation Manager executable
+
+
+                        +------------+
+                        |   Groups   |
+                        +------------+
+
+Group                           Address              Size
+=====                           =======              ====
+
+DGROUP                          0002:00000000        000d70e0
+
+
+
+                        +--------------+
+                        |   Segments   |
+                        +--------------+
+
+Segment                Class          Group          Address         Size
+=======                =====          =====          =======         ====
+
+BEGTEXT                CODE           AUTO           0001:00000000   00000007
+_TEXT                  CODE           AUTO           0001:00000010   00012341
+_NULL                  BEGDATA        DGROUP         0002:00000000   00000004
+_AFTERNULL             BEGDATA        DGROUP         0002:00000004   00000000
+CONST                  DATA           DGROUP         0002:00000004   0000100c
+CONST2                 DATA           DGROUP         0002:00001010   0000000c
+_DATA                  DATA           DGROUP         0002:00001020   00000518
+XIB                    DATA           DGROUP         0002:00001538   00000000
+XI                     DATA           DGROUP         0002:00001538   00000024
+XIE                    DATA           DGROUP         0002:0000155c   00000000
+YIB                    DATA           DGROUP         0002:0000155c   00000000
+YI                     DATA           DGROUP         0002:0000155c   0000000c
+YIE                    DATA           DGROUP         0002:00001568   00000000
+TIB                    DATA           DGROUP         0002:00001568   00000000
+TI                     DATA           DGROUP         0002:00001568   00000000
+TIE                    DATA           DGROUP         0002:00001568   00000000
+DATA                   DATA           DGROUP         0002:00001568   00000000
+_BSS                   BSS            DGROUP         0002:00001570   00095b65
+STACK                  STACK          DGROUP         0002:000970e0   00040000
+
+
+                        +----------------+
+                        |   Memory Map   |
+                        +----------------+
+
+* = unreferenced symbol
++ = symbol only referenced locally
+
+Address        Symbol
+=======        ======
+
+Module: PMMAIN.obj(S:\CPP\OS2\EXPLORER\PMMAIN.CPP)
+0002:00001570  long unsigned near hab
+0002:00001574+ long unsigned near hwndFrame
+0002:00001578  long unsigned near hwndClient
+0002:0000157c  long unsigned near abSelectedFiles[]
+0002:0000357c  long near nScrollX
+0002:00003580  long near nScrollY
+0002:00003584  long unsigned near uClipFormat
+0002:00003588+ long unsigned near uDragDropMsg
+0002:0000358c+ long unsigned near bShowHidden
+0002:00001030* char near szAppName[]
+0002:00001040+ char near szTitle[]
+0002:00001050+ char near szExePath[]
+0002:00001158  char near szCurrentPath[]
+0002:0000125c  int near nCurrentView
+0002:00001260  int near nSelectedDrive
+0002:00001264+ int near nSelectedFile
+0002:00001268  int near nDragHoverIdx
+0002:00003590  long unsigned near bComboSyncing
+0001:00000010  void near EnsureTrailingSlash( char near * )
+0001:00000050  long unsigned near ExpMessageBox( long unsigned, char const near *, long unsigned )
+0001:00000070+ long unsigned near IsDriveReady( char )
+0001:00000370  void near NavigateTo( long unsigned, char const near * )
+0001:00000730+ void near * near ClientWndProc( long unsigned, long unsigned, void near *, void near * )
+0001:00002970+ void near * near AboutDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:000029b0  main_
+Module: DRIVES.obj(S:\CPP\OS2\EXPLORER\DRIVES.CPP)
+0001:00002e30  int near EnumDrives()
+0001:000030f0  int near GetDriveCount()
+0001:00003100  _DRIVEINFO near * near GetDriveInfo( int )
+0001:00003120  _DRIVEINFO near * near FindDriveInfo( char )
+0001:00003170  void near PopulatePathCombo( long unsigned )
+Module: DIRVIEW.obj(S:\CPP\OS2\EXPLORER\DIRVIEW.CPP)
+0001:00003200  void near FreeFileIcons()
+0001:00003250  int near EnumDirectory( char const near *, long unsigned )
+0001:00003740  int near GetFileCount()
+0001:00003750  _FILEITEM near * near GetFileItem( int )
+Module: PAINT.obj(S:\CPP\OS2\EXPLORER\PAINT.CPP)
+0002:0008d9c8  long unsigned near hwndVScroll
+0002:0008d9cc  long unsigned near hwndHScroll
+0001:00003770  void near FreeViewBitmaps()
+0001:000037b0  void near LoadViewBitmaps( int )
+0001:00003990  void near ContentRect( long unsigned, _RECTL near * )
+0001:00003a20* void near CellRect( _RECTL const near *, long, long, long, long, _RECTL near * )
+0001:00003a60* void near PointToLogical( _RECTL const near *, long, long, long near *, long near * )
+0001:00003a90  long near GetViewCellHeight()
+0001:00003b00  int near GetViewColumns( long unsigned )
+0001:00003b40  void near CalcContentSize( long, long near *, long near * )
+0001:00003bd0  long near ScrollScaleY()
+0001:00003be0  long near ScrollScaleX()
+0001:00003bf0  void near UpdateScrollBars( long unsigned )
+0001:00003de0  void near EnsureItemVisible( long unsigned, int )
+0001:000040e0  int near HitTestDrive( long unsigned, long, long )
+0001:00004100  int near HitTestFile( long unsigned, long, long )
+0001:00004120  void near DrawDrives( long unsigned, _RECTL const near * )
+0001:00004550  void near DrawFiles( long unsigned, _RECTL const near * )
+Module: TOOLBAR.obj(S:\CPP\OS2\EXPLORER\TOOLBAR.CPP)
+0002:0008d9e8+ long unsigned near hwndToolbar
+0002:0008d9ec  long unsigned near hwndPathCombo
+0001:00005ad0  long unsigned near RegisterToolbarClass( long unsigned )
+0001:00005af0  long unsigned near CreateToolbar( long unsigned )
+0001:00005b60  void near LayoutToolbar( long unsigned )
+Module: STATBAR.obj(S:\CPP\OS2\EXPLORER\STATBAR.CPP)
+0001:000063b0  long unsigned near RegisterStatusBarClass( long unsigned )
+0001:000063d0  long unsigned near CreateStatusBar( long unsigned )
+0001:00006410  void near LayoutStatusBar( long unsigned )
+0001:00006460  void near UpdateStatusBar( char )
+0001:00006650  void near ClearStatusBar()
+0001:00006690  void near UpdateStatusSelection()
+0002:0008da04+ long unsigned near hwndStatusBar
+Module: SEARCH.obj(S:\CPP\OS2\EXPLORER\SEARCH.CPP)
+0002:0008da10+ long unsigned near hwndSearchFrame
+0001:000067f0  long unsigned near SearchBusy()
+0001:00006840  long unsigned near SearchShutdown()
+0001:00007850  long unsigned near RegisterSearchClass( long unsigned )
+0001:00007870  long unsigned near OpenSearchWindow( long unsigned )
+Module: FILEOPS.obj(S:\CPP\OS2\EXPLORER\FILEOPS.CPP)
+0001:00007900  long unsigned near IsExecFile( char const near * )
+0001:00007b70  long unsigned near FileOpsBusy()
+0001:00007be0+ void near * near CopyMoveDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:00007ca0  void near FileOpsOnTimer( long unsigned )
+0001:00007f30+ void near * near OverwriteDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:00008030* void near FileOpsOnAsk( long unsigned, long unsigned )
+0001:000094a0  long unsigned near LaunchProgram( long unsigned, char const near *, char const near * )
+0001:00009500  long unsigned near HasAssociation( char const near * )
+0001:00009520  void near OpenFileItem( long unsigned, int )
+0001:00009790+ void near * near NewDirDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:00009810  void near DoNewDir( long unsigned )
+0001:00009920+ void near * near RenameDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:000099f0  void near DoRename( long unsigned, int )
+0001:00009bb0  void near DoDelete( long unsigned, int )
+0001:00009c80  void near DoDeleteSelected( long unsigned )
+0001:00009e50  _EXPPATHLIST near * near BuildPathList( int, long unsigned )
+0001:0000a090  void near DoClipboardOp( long unsigned, int, long unsigned )
+0001:0000a100  void near DoClipboardOpSelected( long unsigned, long unsigned )
+0001:0000ba10* void near FileOpsOnDone( long unsigned, long unsigned )
+0001:0000bb60  long unsigned near FileOpsShutdown()
+0001:0000bbb0  void near DoPasteFromList( long unsigned, _EXPPATHLIST const near *, long unsigned, char const near * )
+0001:0000bc70  void near DoPaste( long unsigned )
+Module: PROPS.obj(S:\CPP\OS2\EXPLORER\PROPS.CPP)
+0001:0000bec0+ void near FormatDateTime( _FDATE, _FTIME, char near * )
+0001:0000c300+ void near * near FilePropsDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:0000c530* void near DoFileProperties( long unsigned, int )
+0001:0000c720+ void near * near DirPropsDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:0000c850* void near DoDirProperties( long unsigned, int )
+0001:0000c9b0  void near DoProperties( long unsigned, int )
+0001:0000cd20+ void near * near DrivePropsDlgProc( long unsigned, long unsigned, void near *, void near * )
+0001:0000ce10  void near DoDriveProperties( long unsigned, int )
+Module: NETWORK.obj(S:\CPP\OS2\EXPLORER\NETWORK.CPP)
+0001:0000d0e0  long unsigned near IsNetworkPresent()
+0001:0000d6e0  void near ReconnectNetDrives( long unsigned )
+0001:0000ef20  void near OpenConnectNetDrive( long unsigned )
+0001:0000ef40  void near OpenDisconnectNetDrive( long unsigned )
+0001:0000ef60  void near DisconnectNetDriveDirect( long unsigned, char )
+Module: PMWORKER.obj(S:\CPP\OS2\COMMON\PMWORKER.C)
+0001:0000efc0  PmWorkerInit_
+0001:0000f040  PmWorkerStart_
+0001:0000f0a0  PmWorkerIsBusy_
+0001:0000f0b0  PmWorkerRequestCancel_
+0001:0000f0c0  PmWorkerPollDone_
+0001:0000f100  PmWorkerPollAsk_
+0001:0000f130  PmWorkerWait_
+0001:0000f180  PmWorkerCancelled_
+0001:0000f190  PmWorkerAsk_
+0001:0000f230  PmWorkerAnswer_
+0001:0000f250  PmWorkerEnd_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(sprintf.c)
+0001:0000f2a0  sprintf_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(memset.c)
+0001:0000f2d0  memset_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(strncpy.c)
+0001:0000f2f0  strncpy_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(_strcmp)
+0001:0000f330  strcmp_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(cstart)
+0001:0000f46e  _cstart_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(imthread.c)
+0002:00001538  __imthread
+Module: C:\WATCOM/lib386/os2\clib3r.lib(argcv.c)
+0002:00096d40  __argc
+0002:00096d44  __argv
+0002:00096d48  ___argc
+0002:00096d4c  ___argv
+Module: C:\WATCOM/lib386/os2\plbxmt3r.lib(fsroot.cpp)
+0002:00001544  ___wcpp_4_data_init_fs_root_
+Module: C:\WATCOM/lib386/os2\plbxmt3r.lib(cppdata.cpp)
+0002:00096d50  __wint_thread_data_offset
+0002:00096d54  __compiled_under_OS2
+Module: C:\WATCOM/lib386/os2\clib3r.lib(stricmp.c)
+0001:0000f500  stricmp_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(i8m)
+0001:0000f53c* __I8M
+0001:0000f53c  __U8M
+Module: C:\WATCOM/lib386/os2\clib3r.lib(i8d)
+0001:0000f558* __I8D
+0001:0000f5ad  __U8D
+Module: C:\WATCOM/lib386/os2\clib3r.lib(register.c)
+0001:0000f650  __initthread_
+0001:0000f660  _beginthread_
+0001:0000f670  _endthread_
+0001:0000f680* __RegisterThreadData_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(vsprintf.c)
+0001:0000f6f0  vsprintf_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(__stos)
+0001:0000f710  __STOSB
+0001:0000f747* __STOSD
+Module: C:\WATCOM/lib386/os2\clib3r.lib(main2o32.c)
+0001:0000f7c0  __OS2Main
+Module: C:\WATCOM/lib386/os2\clib3r.lib(segdefns)
+0001:00000003  ___begtext
+0002:00000000* __nullarea
+0002:00001538  __Start_XI
+0002:0000155c  __End_XI
+0002:0000155c  __Start_YI
+0002:00001568  __End_YI
+Module: C:\WATCOM/lib386/os2\clib3r.lib(trdalloc.c)
+0001:0000f830  __InitThreadProcessing_
+0001:0000f850  __FiniThreadProcessing_
+0002:00096d58  ___ThreadData
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mthread.c)
+0001:0000f8f0+ __CloseSemaphore_
+0001:0000f960+ __AccessIOB_
+0001:0000f970+ __ReleaseIOB_
+0001:0000f980+ __AccessFileH_
+0001:0000f990+ __ReleaseFileH_
+0001:0000f9a0+ __AccessNHeap_
+0001:0000f9b0+ __ReleaseNHeap_
+0001:0000f9c0+ __AccessFHeap_
+0001:0000f9d0+ __ReleaseFHeap_
+0001:0000f9e0+ __AccessTDList_
+0001:0000f9f0+ __AccessSemaphore_
+0001:0000fa50+ __ReleaseTDList_
+0001:0000fa60+ __ReleaseSemaphore_
+0001:0000fa90+ __MultipleThread_
+0001:0000fad0  __AllocInitThreadData_
+0001:0000fb20* __FreeInitThreadData_
+0001:0000fb30  __OS2AddThread_
+0001:0000fba0  __OS2RemoveThread_
+0001:0000fbf0  __InitMultipleThread_
+0002:00001464+ ___AccessSema4
+0002:00001468+ ___ReleaseSema4
+0002:0000146c+ ___CloseSema4
+Module: C:\WATCOM/lib386/os2\clib3r.lib(initargv.c)
+0001:0000fd80  __Init_Argv_
+0001:0000fdd0+ _getargv_
+0001:0000ff70  __Fini_Argv_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(maino32.c)
+0002:00001470  ___FirstThreadData
+0002:00001474  ___GetThreadPtr
+0002:00001478  __AccessFileH
+0002:0000147c  __ReleaseFileH
+0002:00001480  __AccessIOB
+0002:00001484  __ReleaseIOB
+0002:00001488  __AccessNHeap
+0002:0000148c  __AccessFHeap
+0002:00001490  __ReleaseNHeap
+0002:00001494  __ReleaseFHeap
+0001:0000ff84  __threadstack_
+0001:0000ff8b  __threadid_
+0001:0000ff92  __OS2MainInit_
+0001:00010001+ __OS2Init_
+0001:0001003f* __OS2Fini_
+0001:00010047* __shutdown_stack_checking_
+0001:0001005c  __exit_
+0002:00001498  __AccessTDList
+0002:0000149c  __ReleaseTDList
+0002:000014a0  ___sig_init_rtn
+0002:000014a4  ___sig_fini_rtn
+0002:000014a8  __threadstksize
+0002:000014ac  ___process_fini
+0002:00096eb0  ___Is_DLL
+0002:00096eb4+ ___saved_CS
+Module: C:\WATCOM/lib386/os2\plbxmt3r.lib(thrddata.cpp)
+0001:000100a0  __wcpp_4_multi_thread_init__
+Module: C:\WATCOM/lib386/os2\clib3r.lib(thredo32.c)
+0001:00010150  __CBeginThread_
+0001:000101f0  __CEndThread_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(prtf.c)
+0001:00010210  __prtf_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(initrtns.c)
+0001:00010ef0  __InitRtns
+0001:00010f40  __FiniRtns
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mthrdini.c)
+0001:00010fa0  __InitThreadData_
+0002:000014b0  ___ThreadDataSize
+Module: C:\WATCOM/lib386/os2\clib3r.lib(cmain386.c)
+0001:00010fc0  __CMain
+Module: C:\WATCOM/lib386/os2\clib3r.lib(dosseg)
+0000:00001234  __DOSseg__
+Module: C:\WATCOM/lib386/os2\clib3r.lib(thrdmax.c)
+0001:00011000  __GETMAXTHREADS
+Module: C:\WATCOM/lib386/os2\clib3r.lib(maxthrds.c)
+0002:000014b4  ___MaxThreads
+Module: C:\WATCOM/lib386/os2\clib3r.lib(calloc.c)
+0001:00011010  calloc_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nfree.c)
+0001:00011030  _nfree_
+0001:00011030  free_
+0002:00096fb8  ___MiniHeapFreeRover
+Module: C:\WATCOM/lib386/os2\clib3r.lib(trdlist.c)
+0001:00011190  __GetThreadData_
+0001:000112a0  __ReallocThreadData_
+0001:00011410  __AddThreadData_
+0001:00011490  __RemoveThreadData_
+0001:000114f0  __ResizeThreadDataList_
+0001:00011540  __FreeThreadDataList_
+0001:00011570* __ActiveThreads_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(xmsgo32.c)
+0001:00011590+ __exit_with_msg_
+0001:000115e0  __fatal_runtime_error_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nheapmin.c)
+0001:00011600  _nheapshrink_
+0001:00011600* _nheapmin_
+0001:00011600* _heapmin_
+0001:00011600  _heapshrink_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(crwdata)
+0002:000014fc  __osmajor
+0002:000014fd  __osminor
+0002:000014c8* __LpDllName
+0002:000014cc* __LpwCmdLine
+0002:000014d0* __LpwPgmName
+0002:000014d4* __LpwDllName
+0002:000014c0  __LpCmdLine
+0002:000014c4  __LpPgmName
+0002:000014b8* __dynend
+0002:000014bc  __curbrk
+0002:000014d8* __STACKLOW
+0002:000014dc* __STACKTOP
+0002:000014e0  __ASTACKSIZ
+0002:000014e4  __ASTACKPTR
+0002:000014e8* __cbyte
+0002:000014ec* __cbyte2
+0002:000014f0* __child
+0002:000014f6  __Envptr
+0002:000014fa* __Envseg
+0002:000014f4  __no87
+0002:000014fe* ___FPE_handler
+Module: C:\WATCOM/lib386/os2\clib3r.lib(histsplt.c)
+0002:00096fc0  ___historical_splitparms
+Module: C:\WATCOM/lib386/os2\clib3r.lib(___argc.c)
+0002:00096fc4  ____Argc
+0002:00096fc8  ____Argv
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nmalloc.c)
+0001:000116f0  _nmalloc_
+0001:000116f0  malloc_
+0002:00001504  ___nheapbeg
+0002:00001508  ___MiniHeapRover
+0002:0000150c  ___LargestSizeB4MiniHeapRover
+Module: C:\WATCOM/lib386/os2\clib3r.lib(cinit.c)
+0001:000117f0  __CommonInit_
+0002:00096fcc  ___hmodule
+Module: C:\WATCOM/lib386/os2\clib3r.lib(regdata.c)
+0001:00011800  __RegisterThreadDataSize_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(chk8087.c)
+0001:00011830  _fpreset_
+0001:00011850* __init_8087_
+0001:00011860  __chk8087_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(wctomb.c)
+0001:000118b0  wctomb_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(itoa.c)
+0001:000118e0+ utoa_
+0001:00011930  itoa_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(strupr.c)
+0001:00011960  strupr_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(noefgfmt.c)
+0002:00001510  ___EFG_printf
+0002:00001514* ___EFG_scanf
+Module: C:\WATCOM/lib386/os2\clib3r.lib(lltoa.c)
+0001:000119d0  ulltoa_
+0001:00011a40* lltoa_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(ltoa.c)
+0001:00011a70  ultoa_
+0001:00011ac0* ltoa_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mbisdbcs.c)
+0002:00096fd0  ___IsDBCS
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mbislead.c)
+0001:00011af0* _ismbblead_
+0002:00096fd4  ___MBCSIsTable
+Module: C:\WATCOM/lib386/os2\clib3r.lib(exit.c)
+0001:00011b07+ __null_int23_exit_
+0001:00011b08  exit_
+0001:00011b58* _exit_
+0002:00001518+ ___int23_exit
+0002:0000151c+ ___FPE_handler_exit
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mem.c)
+0001:00011b70  __MemAllocator
+0001:00011c20  __MemFree
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nrealloc.c)
+0001:00011d60* _nrealloc_
+0001:00011d60  realloc_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(enterdb.c)
+0001:00011de0  __EnterWVIDEO_
+0002:00001520+ ___WD_Present
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nmemneed.c)
+0001:00011e10  __nmemneed_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(grownear.c)
+0001:00011f80  __ExpandDGROUP_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(amblksiz.c)
+0002:00001524  __amblksiz
+Module: C:\WATCOM/lib386/os2\clib3r.lib(_8087)
+0002:00001528  __8087
+0002:00001529  __real87
+Module: C:\WATCOM/lib386/os2\clib3r.lib(8087cw.c)
+0002:0000152c  __8087cw
+Module: C:\WATCOM/lib386/os2\clib3r.lib(init8087)
+0001:00011fa0  __x87id
+Module: C:\WATCOM/lib386/os2\clib3r.lib(alphabet.c)
+0002:00000fe8  ___Alphabet
+Module: C:\WATCOM/lib386/os2\clib3r.lib(mbinit.c)
+0001:0001201a  __mbinit_
+0002:00001530+ ___MBCodePage
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nmsize.c)
+0001:00012120  _nmsize_
+0001:00012120* _msize_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(nexpand.c)
+0001:00012130  _nexpand_
+0001:00012130* _expand_
+0001:00012170+ __HeapManager_expand_
+Module: C:\WATCOM/lib386/os2\clib3r.lib(heapen.c)
+0001:00012330* _heapenable_
+0002:00001534  ___heap_enabled
+
+
+                        +----------------------+
+                        |   Imported Symbols   |
+                        +----------------------+
+
+Symbol                              Module
+======                              ======
+
+WinMessageBox                       PMWIN
+DosFindFirst                        DOSCALLS
+DosFindClose                        DOSCALLS
+DosQueryFSInfo                      DOSCALLS
+PrfWriteProfileString               PMSHAPI
+WinWindowFromID                     PMWIN
+WinSendMsg                          PMWIN
+WinQueryWindowRect                  PMWIN
+WinQuerySysValue                    PMWIN
+WinSetWindowPos                     PMWIN
+WinQuerySysPointer                  PMWIN
+WinSetPointer                       PMWIN
+WinSetWindowText                    PMWIN
+WinInvalidateRect                   PMWIN
+WinUpdateWindow                     PMWIN
+DosGetNamedSharedMem                DOSCALLS
+DosFreeMem                          DOSCALLS
+DosAllocMem                         DOSCALLS
+WinQuerySystemAtomTable             PMWIN
+WinAddAtom                          PMWIN
+WinCreateWindow                     PMWIN
+PrfQueryProfileInt                  PMSHAPI
+WinBeginPaint                       PMWIN
+GpiCreateLogColorTable              PMGPI
+WinQuerySysColor                    PMWIN
+WinFillRect                         PMWIN
+WinEndPaint                         PMWIN
+DevOpenDC                           PMGPI
+GpiCreatePS                         PMGPI
+GpiQueryDevice                      PMGPI
+DevQueryCaps                        PMGPI
+GpiCreateBitmap                     PMGPI
+GpiSetBitmap                        PMGPI
+GpiBitBlt                           PMGPI
+GpiDeleteBitmap                     PMGPI
+GpiDestroyPS                        PMGPI
+DevCloseDC                          PMGPI
+WinPostMsg                          PMWIN
+WinDlgBox                           PMWIN
+WinDefWindowProc                    PMWIN
+WinGetKeyState                      PMWIN
+WinSetCapture                       PMWIN
+WinMapWindowPoints                  PMWIN
+WinWindowFromPoint                  PMWIN
+WinQueryClassName                   PMWIN
+DosAllocSharedMem                   DOSCALLS
+WinDestroyWindow                    PMWIN
+WinLoadMenu                         PMWIN
+WinPopupMenu                        PMWIN
+WinSetFocus                         PMWIN
+WinDismissDlg                       PMWIN
+WinDefDlgProc                       PMWIN
+WinInitialize                       PMWIN
+WinCreateMsgQueue                   PMWIN
+DosError                            DOSCALLS
+WinRegisterClass                    PMWIN
+WinCreateStdWindow                  PMWIN
+WinGetLastError                     PMWIN
+WinGetMsg                           PMWIN
+WinDispatchMsg                      PMWIN
+WinTerminate                        PMWIN
+WinDestroyMsgQueue                  PMWIN
+DosQueryCurrentDisk                 DOSCALLS
+DosDevConfig                        DOSCALLS
+DosQueryFSAttach                    DOSCALLS
+WinFreeFileIcon                     PMWP
+WinLoadFileIcon                     PMWP
+DosFindNext                         DOSCALLS
+WinGetPS                            PMWIN
+GpiLoadBitmap                       PMGPI
+WinReleasePS                        PMWIN
+GpiQueryBitmapParameters            PMGPI
+GpiQueryFontMetrics                 PMGPI
+WinDrawText                         PMWIN
+WinDrawBitmap                       PMWIN
+GpiSetMix                           PMGPI
+GpiSetLineType                      PMGPI
+GpiMove                             PMGPI
+GpiBox                              PMGPI
+GpiSetColor                         PMGPI
+GpiLine                             PMGPI
+WinDrawPointer                      PMWIN
+WinQueryWindow                      PMWIN
+DosCreateMutexSem                   DOSCALLS
+WinSendDlgItemMsg                   PMWIN
+DosRequestMutexSem                  DOSCALLS
+DosReleaseMutexSem                  DOSCALLS
+DosSleep                            DOSCALLS
+WinQueryDlgItemText                 PMWIN
+WinSetDlgItemText                   PMWIN
+WinStartTimer                       PMWIN
+WinStopTimer                        PMWIN
+DosQueryPathInfo                    DOSCALLS
+DosSetPathInfo                      DOSCALLS
+WinEnableWindow                     PMWIN
+WinShowWindow                       PMWIN
+WinOpenClipbrd                      PMWIN
+WinEmptyClipbrd                     PMWIN
+WinCloseClipbrd                     PMWIN
+DosCopy                             DOSCALLS
+DosEnumAttribute                    DOSCALLS
+DosCreateDir                        DOSCALLS
+DosDelete                           DOSCALLS
+DosMove                             DOSCALLS
+DosDeleteDir                        DOSCALLS
+PrfQueryProfileString               PMSHAPI
+WinStartApp                         PMSHAPI
+WinQueryObject                      PMWP
+WinOpenObject                       PMWP
+WinSetClipbrdData                   PMWIN
+WinLoadDlg                          PMWIN
+WinQueryClipbrdData                 PMWIN
+DosQueryProcAddr                    DOSCALLS
+DosLoadModule                       DOSCALLS
+DosCreateEventSem                   DOSCALLS
+DosResetEventSem                    DOSCALLS
+DosWaitEventSem                     DOSCALLS
+DosPostEventSem                     DOSCALLS
+DosCloseMutexSem                    DOSCALLS
+DosQuerySysInfo                     DOSCALLS
+DosExit                             DOSCALLS
+DosCreateThread                     DOSCALLS
+DosCloseEventSem                    DOSCALLS
+DosWrite                            DOSCALLS
+DosQueryDBCSEnv                     NLS
+DosQueryCp                          DOSCALLS
+
+
+                        +--------------------+
+                        |   Libraries Used   |
+                        +--------------------+
+
+C:\WATCOM/lib386/os2\clib3r.lib
+C:\WATCOM/lib386/os2\plbxmt3r.lib
+C:\WATCOM/lib386/os2\os2386.lib
+
+
+                        +-----------------------+
+                        |   Linker Statistics   |
+                        +-----------------------+
+
+Stack size:  00040000 (262144.)
+Memory size:  000e9431 (955441.)
+Entry point address: 0001:0000f46e
+Link time: 00:00.78

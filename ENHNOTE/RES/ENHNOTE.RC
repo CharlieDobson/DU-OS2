@@ -1,0 +1,143 @@
+/*===========================================================================
+ * ENHNOTE.RC  -  Enhanced Notepad (OS/2 PM) resource script
+ * Compile with:  wrc -bt=os2 -r ...
+ *
+ * Rewritten from the Windows script.  OS/2's resource grammar differs in
+ * more than spelling: POPUP becomes SUBMENU (and needs an ID), a dialog is
+ * a DLGTEMPLATE wrapping a DIALOG, EDITTEXT becomes ENTRYFIELD, and "&"
+ * mnemonics become "~".  Dialog coordinates are in dialog units measured
+ * from the BOTTOM-left, so every y here is the mirror of the Windows
+ * original's.
+ *
+ * The VERSIONINFO block has no OS/2 equivalent and is gone.
+ *
+ * ID_ENHNOTE is the frame's window ID: FCF_MENU, FCF_ICON and
+ * FCF_ACCELTABLE all look those resources up by it, so the MENU, the ICON
+ * and the ACCELTABLE below must every one carry that same number.
+ *===========================================================================*/
+#include <os2.h>
+#include "resource.h"
+
+/*---------------------------------------------------------------------------
+ * Icon.  Must be an OS/2-format icon, not a Windows .ICO -- BUILD\MKOS2.CMD
+ * converts ..\RES\ENHNOTE.ICO into ENHNOTE.PTR next to itself before this
+ * script is compiled.
+ *-------------------------------------------------------------------------*/
+
+ICON ID_ENHNOTE "ENHNOTE.PTR"
+
+/*---------------------------------------------------------------------------
+ * Menu bar
+ *-------------------------------------------------------------------------*/
+
+MENU ID_ENHNOTE
+BEGIN
+    SUBMENU "~File", IDM_FILE
+    BEGIN
+        MENUITEM "~New",                    IDM_FILE_NEW
+        MENUITEM "~Open...",                IDM_FILE_OPEN
+        MENUITEM "~Save",                   IDM_FILE_SAVE
+        MENUITEM "Save ~as...",             IDM_FILE_SAVEAS
+        MENUITEM SEPARATOR
+        MENUITEM "E~xit\tF3",               IDM_FILE_EXIT
+    END
+
+    SUBMENU "~Edit", IDM_EDIT
+    BEGIN
+        MENUITEM "~Undo\tCtrl+Z",           IDM_EDIT_UNDO
+        MENUITEM "~Redo\tCtrl+Y",           IDM_EDIT_REDO
+        MENUITEM SEPARATOR
+        MENUITEM "Cu~t\tCtrl+X",            IDM_EDIT_CUT
+        MENUITEM "~Copy\tCtrl+C",           IDM_EDIT_COPY
+        MENUITEM "~Paste\tCtrl+V",          IDM_EDIT_PASTE
+        MENUITEM "~Delete\tDel",            IDM_EDIT_DELETE
+        MENUITEM SEPARATOR
+        MENUITEM "Select ~all\tCtrl+A",     IDM_EDIT_SELECTALL
+        MENUITEM SEPARATOR
+        MENUITEM "~Word wrap",              IDM_EDIT_WORDWRAP
+    END
+
+    SUBMENU "~Search", IDM_SEARCH
+    BEGIN
+        MENUITEM "~Find...\tCtrl+F",        IDM_SEARCH_FIND
+        MENUITEM "Find ~next\tF9",          IDM_SEARCH_FINDNEXT
+    END
+
+    SUBMENU "~Help", IDM_HELP
+    BEGIN
+        MENUITEM "~About Enhanced Notepad...", IDM_HELP_ABOUT
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Accelerators (FCF_ACCELTABLE).
+ *
+ * PM has no virtual key codes for letters, so the Ctrl combinations have to
+ * be CHAR entries -- and a CHAR entry is matched against the character
+ * carried by the key event, which for Ctrl+Z is 0x1A, not 'Z'.  The keys are
+ * therefore written as those control codes outright.
+ *
+ * Do NOT write them as "^Z": wrc accepts that spelling but compiles it the
+ * Windows way, emitting AF_CHAR | AF_CONTROL with the key left as 'Z'
+ * (0x5A), which no PM key event will ever match.  Verified by disassembling
+ * the compiled resource -- the numeric form below yields AF_CHAR |
+ * AF_CONTROL with key 0x1A, which is what PM wants.
+ *
+ * F3 is the OS/2 convention for File / Exit, so Find Next is on F9.
+ *-------------------------------------------------------------------------*/
+
+ACCELTABLE ID_ENHNOTE
+BEGIN
+    1,      IDM_EDIT_SELECTALL,     CHAR, CONTROL    /* Ctrl+A */
+    26,     IDM_EDIT_UNDO,          CHAR, CONTROL    /* Ctrl+Z */
+    25,     IDM_EDIT_REDO,          CHAR, CONTROL    /* Ctrl+Y */
+    24,     IDM_EDIT_CUT,           CHAR, CONTROL    /* Ctrl+X */
+    3,      IDM_EDIT_COPY,          CHAR, CONTROL    /* Ctrl+C */
+    22,     IDM_EDIT_PASTE,         CHAR, CONTROL    /* Ctrl+V */
+    6,      IDM_SEARCH_FIND,        CHAR, CONTROL    /* Ctrl+F */
+    VK_F9,  IDM_SEARCH_FINDNEXT,    VIRTUALKEY
+    VK_F3,  IDM_FILE_EXIT,          VIRTUALKEY
+END
+
+/*---------------------------------------------------------------------------
+ * Find dialog
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_FIND LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Find", IDD_FIND, 24, 24, 236, 62,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT         "Find ~what:",   IDC_STATIC,      4, 45,  44,  8
+        ENTRYFIELD    "",              IDC_FINDTEXT,   50, 43, 118, 12,
+                                       ES_MARGIN | ES_AUTOSCROLL
+        CHECKBOX      "~Match case",   IDC_MATCHCASE,   4, 22,  80, 12
+        DEFPUSHBUTTON "~Find next",    DID_OK,        176, 42,  56, 14
+        PUSHBUTTON    "Cancel",        DID_CANCEL,    176, 24,  56, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * About box.  The Windows version showed the program icon beside the text;
+ * OS/2's ICON statement is the top-level icon declaration, so that control
+ * is dropped here rather than fought with.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_ABOUT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "About Enhanced Notepad", IDD_ABOUT, 24, 24, 216, 72,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "Enhanced Notepad - Dobson Utilities",
+                                        IDC_STATIC,  12, 54, 190,  8
+        LTEXT   "A simple text editor for large files.",
+                                        IDC_STATIC,  12, 42, 190,  8
+        LTEXT   "Copyright (C) Charlie Dobson 1992 - 2026",
+                                        IDC_STATIC,  12, 30, 190,  8
+        LTEXT   "All Rights Reserved.",
+                                        IDC_STATIC,  12, 18, 190,  8
+        DEFPUSHBUTTON "OK",             DID_OK,     166,  4,  40, 14
+    END
+END
