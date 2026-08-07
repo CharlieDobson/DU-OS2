@@ -61,4 +61,38 @@ typedef int            Int32;
 #define SZ_MAX_UNPACK_SIZE  (1024UL * 1024 * 1024)  /* 7z folder output */
 #define SZ_MAX_PACK_SIZE    (1024UL * 1024 * 1024)  /* 7z folder input  */
 
+/*---- Filesystem-safe output names ----------------------------------------- *
+ * Implemented in ARCFILE.C, called by every backend's output-path builder.
+ * Rewrites an entry's stored path into one that is safe to create on the
+ * extraction target: separators normalised to '\', characters the filesystem
+ * forbids replaced, "." / ".." components neutralised, DOS device names
+ * (CON, NUL, COM1, ...) disarmed, and - when the target only takes 8.3 names
+ * (the DOS build always; the Win32 build when running on Win32s) - every
+ * component truncated to an upper-case 8.3 name.
+ *-------------------------------------------------------------------------- */
+void ArcFsName( char *dst, int dstSize, const char *name );
+
+/*---- Overwrite confirmation ----------------------------------------------- *
+ * When extraction is about to write over a file that already exists, the
+ * front end can be asked what to do.  It registers a prompt callback once at
+ * startup; the callback returns one of the ARC_OW_* answers.  The two "all"
+ * answers latch for the rest of that extraction operation (the latch resets
+ * on every ArcExtractAll / ArcExtractItems call).  With no callback
+ * registered, existing files are silently overwritten - the old behaviour,
+ * kept for the CLI.
+ *
+ * ArcWantWrite is for the backends: called with the would-be output path
+ * before creating a file, it returns 1 to (over)write and 0 to skip the
+ * entry.  It only prompts when the file exists.
+ *-------------------------------------------------------------------------- */
+#define ARC_OW_YES     0   /* overwrite this file            */
+#define ARC_OW_NO      1   /* keep this file                 */
+#define ARC_OW_YESALL  2   /* overwrite this and all further */
+#define ARC_OW_NOALL   3   /* keep this and all further      */
+
+typedef int (*ArcOverwriteFn)( void *user, const char *path );
+
+void ArcSetOverwritePrompt( ArcOverwriteFn fn, void *user );
+int  ArcWantWrite( const char *path );
+
 #endif /* ARCDEFS_H */

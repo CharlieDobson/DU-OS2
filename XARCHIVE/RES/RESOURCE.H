@@ -34,6 +34,7 @@
 #define IDD_EXTRACT                     106
 #define IDD_NEWFOLDER                   107
 #define IDD_FOLDERPICK                  108
+#define IDD_OVERWRITE                   109
 
 /* commands (menu items and the toolbar buttons alike) */
 #define IDM_FILE_OPEN                   201
@@ -56,6 +57,13 @@
 #define IDC_NEWDIR_NAME                 1009
 #define IDC_FP_LIST                     1010
 #define IDC_FP_PATH                     1011
+#define IDC_OW_FILE                     1012
+#define IDC_OW_YESALL                   1013
+#define IDC_OW_NOALL                    1014
+/* PM-only: the Win32s dialog reuses the predefined IDYES / IDNO for its Yes
+ * and No buttons; PM has no such stock IDs, so they get numbers here. */
+#define IDC_OW_YES                      1015
+#define IDC_OW_NO                       1016
 #define IDC_STATIC                      -1
 
 #endif /* RESOURCE_H */

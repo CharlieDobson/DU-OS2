@@ -1413,17 +1413,15 @@ static void MakeParentTree( const char *filePath )
     }
 }
 
-/* Build destDir\name with normalised back-slashes. */
+/* Build destDir\name with the name made filesystem-safe - ArcFsName also
+ * normalises '/' to '\' (invalid characters, device names, 8.3 truncation
+ * on DOS/Win32s; see ARCFILE.C). */
 static void BuildPath( char *dst, int dstSize,
                        const char *destDir, const char *name )
 {
     char rel[SZ_MAX_NAME];
-    char *p;
 
-    lstrcpyn( rel, name, sizeof( rel ) );
-    for ( p = rel; *p; p++ )
-        if ( *p == '/' ) *p = '\\';
-
+    ArcFsName( rel, sizeof( rel ), name );
     wsprintf( dst, "%s\\%s", (LPSTR)destDir, (LPSTR)rel );
     dst[dstSize - 1] = '\0';
 }
@@ -1448,6 +1446,8 @@ static int WriteEmptyEntry( const SzEntry *e, const char *destDir )
     FILE *fout;
     if ( !destDir ) return SZ_OK;              /* test only */
     BuildPath( outPath, sizeof( outPath ), destDir, e->name );
+    if ( !ArcWantWrite( outPath ) )
+        return SZ_OK;                  /* exists and the user chose to keep it */
     MakeParentTree( outPath );
     fout = fopen( outPath, "wb" );
     if ( !fout ) return SZ_ERR_WRITE;
@@ -1556,6 +1556,7 @@ typedef struct {
     UInt32      pos;          /* absolute position in the folder stream   */
 
     int         cur;          /* entry currently open, -1 = none          */
+    int         curSkip;      /* declined overwrite: decode past, keep    */
     UInt32      curEnd;       /* folder offset where it ends              */
     FILE       *out;          /* NULL when testing or when not wanted     */
     UInt32      crc;          /* running CRC of the current entry         */
@@ -1578,10 +1579,11 @@ static int SzSinkOpen( SzSink *s )
     int            idx = s->order[s->next];
     const SzEntry *e   = &s->a->entries[idx];
 
-    s->cur    = idx;
-    s->curEnd = e->offsetInFolder + e->size;
-    s->crc    = Crc32Init();
-    s->out    = NULL;
+    s->cur     = idx;
+    s->curEnd  = e->offsetInFolder + e->size;
+    s->crc     = Crc32Init();
+    s->out     = NULL;
+    s->curSkip = 0;
     s->next++;
 
     if ( !SzSinkWanted( s, idx ) )
@@ -1597,6 +1599,13 @@ static int SzSinkOpen( SzSink *s )
     if ( s->destDir )
     {
         BuildPath( s->curPath, sizeof( s->curPath ), s->destDir, e->name );
+        /* Declined overwrite: decode past like an unwanted entry, and never
+         * CRC-fail/remove/timestamp the file the user chose to keep. */
+        if ( !ArcWantWrite( s->curPath ) )
+        {
+            s->curSkip = 1;
+            return 1;
+        }
         MakeParentTree( s->curPath );
         s->out = fopen( s->curPath, "wb" );
         if ( !s->out ) { s->rc = SZ_ERR_WRITE; return 0; }
@@ -1608,7 +1617,7 @@ static int SzSinkOpen( SzSink *s )
 static int SzSinkClose( SzSink *s )
 {
     const SzEntry *e     = &s->a->entries[s->cur];
-    int            check = SzSinkWanted( s, s->cur );
+    int            check = SzSinkWanted( s, s->cur ) && !s->curSkip;
 
     if ( s->out )
     {
@@ -1739,6 +1748,7 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
     sink.want      = want;
     sink.pos       = 0;
     sink.cur       = -1;
+    sink.curSkip   = 0;
     sink.curEnd    = 0;
     sink.out       = NULL;
     sink.crc       = 0;

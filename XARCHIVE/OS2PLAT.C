@@ -65,6 +65,46 @@ void SetFileMTime( const char *path, const FILETIME *ft )
     ApplyStamp( path, date, time );
 }
 
+/*---- 8.3 filesystem probe (for ArcFsName's name mangling) -----------------
+ * Called by the shared ARCFILE.C (extern under #ifdef __OS2__) at the start
+ * of every extraction: 1 when the drive holding 'path' takes only 8.3 names
+ * (FAT), 0 when it takes long names (HPFS, and anything else that is not
+ * FAT - JFS, NFS, CDFS all allow long names).  A NULL or relative path means
+ * the current drive.  On any query failure the answer is 1: mangled names
+ * are legal everywhere, long names on FAT are not.
+ *-------------------------------------------------------------------------- */
+int Os2NamesNeed83( const char *path )
+{
+    union {
+        FSQBUFFER2 fsq;
+        char       pad[sizeof( FSQBUFFER2 ) + 3 * CCHMAXPATH];
+    } buf;
+    ULONG cb = sizeof( buf );
+    char  drive[3];
+    char *fsName;
+
+    if ( path && path[0] && path[1] == ':' )
+        drive[0] = path[0];
+    else
+    {
+        ULONG ulDrive = 0, ulMap = 0;
+        if ( DosQueryCurrentDisk( &ulDrive, &ulMap ) != NO_ERROR )
+            return 1;
+        drive[0] = (char)( 'A' + ulDrive - 1 );
+    }
+    drive[1] = ':';
+    drive[2] = '\0';
+
+    memset( &buf, 0, sizeof( buf ) );
+    if ( DosQueryFSAttach( (PCSZ)drive, 0, FSAIL_QUERYNAME,
+                           &buf.fsq, &cb ) != NO_ERROR )
+        return 1;
+
+    /* szName holds the drive; the attached filesystem's name follows it. */
+    fsName = (char *)buf.fsq.szName + buf.fsq.cbName + 1;
+    return ( stricmp( fsName, "FAT" ) == 0 );
+}
+
 /*---- Win32-only shell helpers, kept as no-ops ---------------------------- */
 int  IsModernShell( void )            { return 0; }
 void InitCtl3d( HINSTANCE hInst )     { (void)hInst; }

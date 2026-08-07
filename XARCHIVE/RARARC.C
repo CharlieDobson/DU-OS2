@@ -141,16 +141,21 @@ static void MakeDirs( const char *path, int includeLast )
         _mkdir( buf );
 }
 
+/* destDir\name with the name made filesystem-safe (ArcFsName, ARCFILE.C). */
 static void BuildOut( char *dst, int dstSize,
                       const char *destDir, const char *name )
 {
-    int n = 0;
+    char        fsname[SZ_MAX_NAME];
+    const char *s = fsname;
+    int         n = 0;
+
+    ArcFsName( fsname, sizeof( fsname ), name );
     if ( destDir && destDir[0] )
     {
         while ( destDir[n] && n < dstSize - 2 ) { dst[n] = destDir[n]; n++; }
         if ( n > 0 && dst[n-1] != '\\' ) dst[n++] = '\\';
     }
-    while ( *name && n < dstSize - 1 ) dst[n++] = *name++;
+    while ( *s && n < dstSize - 1 ) dst[n++] = *s++;
     dst[n] = '\0';
 }
 
@@ -315,6 +320,8 @@ static int RarExtractIndex( RarArchive *z, int idx, const char *destDir )
         if ( destDir ) MakeDirs( outPath, 1 );
         return SZ_OK;
     }
+    if ( destDir && !ArcWantWrite( outPath ) )
+        return SZ_OK;                  /* exists and the user chose to keep it */
     if ( z->headFlags[idx] & LHD_PASSWORD )
         return SZ_ERR_UNSUPPORTED;                 /* encrypted */
 
@@ -459,12 +466,21 @@ static void SolidOpenNext( SolidSink *s )
             s->fileCrc       = Crc32Init();
             s->bufLen        = 0;
             s->out           = NULL;
+            if ( s->curReq && s->destDir )    /* NULL destDir = test only */
+            {
+                BuildOut( s->outPath, sizeof( s->outPath ),
+                          s->destDir, e->name );
+                /* Declined overwrite: demote to "not requested" - the chain
+                 * still decodes through it, but nothing is written, CRC-
+                 * checked, or timestamped, and the kept file is never
+                 * removed. */
+                if ( !ArcWantWrite( s->outPath ) )
+                    s->curReq = 0;
+            }
             if ( s->curReq )
             {
-                if ( s->destDir )             /* NULL destDir = test only */
+                if ( s->destDir )
                 {
-                    BuildOut( s->outPath, sizeof( s->outPath ),
-                              s->destDir, e->name );
                     MakeDirs( s->outPath, 0 );
                     s->out = fopen( s->outPath, "wb" );
                     if ( !s->out ) { s->rc = SZ_ERR_WRITE; return; }
@@ -612,6 +628,7 @@ static int SolidExtract( RarArchive *z, const int *indices, int count,
                 char  outPath[SZ_MAX_NAME * 4];
                 FILE *out;
                 BuildOut( outPath, sizeof( outPath ), destDir, z->entries[i].name );
+                if ( !ArcWantWrite( outPath ) ) continue;
                 MakeDirs( outPath, 0 );
                 out = fopen( outPath, "wb" );
                 if ( out ) fclose( out );

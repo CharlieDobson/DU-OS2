@@ -182,6 +182,29 @@ BEGIN
 END
 
 /*---------------------------------------------------------------------------
+ * Overwrite confirmation.  Shown by the UI thread (ArcOnAsk in PMMAIN.C)
+ * while the extraction worker is blocked inside PmWorkerAsk; the four
+ * buttons dismiss with ARC_OW_* + 1 (0 would be unreadable next to
+ * WinDlgBox's error return).
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_OVERWRITE LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Confirm File Overwrite", IDD_OVERWRITE, 24, 24, 248, 80,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "This file already exists:",  IDC_STATIC,     8, 64, 232,  8
+        LTEXT   "",                           IDC_OW_FILE,    8, 46, 232, 16
+        LTEXT   "Overwrite it?",              IDC_STATIC,     8, 32, 232,  8
+        DEFPUSHBUTTON "~Yes",                 IDC_OW_YES,     8,  8,  52, 14
+        PUSHBUTTON "~No",                     IDC_OW_NO,     68,  8,  52, 14
+        PUSHBUTTON "Yes to ~All",             IDC_OW_YESALL,128,  8,  52, 14
+        PUSHBUTTON "N~o to All",              IDC_OW_NOALL, 188,  8,  52, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
  * Destination folder browser.  PM has no DlgDirList, so PMMAIN.C fills this
  * listbox itself from DosQueryCurrentDisk (drives) and DosFindFirst
  * (subdirectories).

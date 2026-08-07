@@ -146,8 +146,18 @@ static char          g_progName[CCHMAXPATH + 1];
 #define TID_ARCPROGRESS     1
 #define ARC_TIMER_MS        150
 
+/* The one question an extraction asks (PmWorkerAsk's ulQuestion). */
+#define ARCASK_OVERWRITE    1
+
 static PMWORKER g_worker;
 static int      g_workerReady = 0;
+
+/* The output path an overwrite question is about.  Written by the WORKER
+ * immediately before PmWorkerAsk raises the ask latch, read by the UI
+ * thread's dialog; safe unlocked because the worker then blocks inside
+ * PmWorkerAsk until PmWorkerAnswer, so the buffer cannot change while the
+ * dialog is up. */
+static char g_owAskPath[SZ_MAX_NAME * 4];
 
 static struct {
     int      kind;
@@ -198,6 +208,7 @@ MRESULT EXPENTRY InfoDlgProc    ( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY ExtractDlgProc ( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY NewFolderDlgProc( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY FolderPickProc ( HWND, ULONG, MPARAM, MPARAM );
+MRESULT EXPENTRY OverwriteDlgProc( HWND, ULONG, MPARAM, MPARAM );
 
 static void OpenArchiveFile( HWND hwnd, const char *path );
 static void ProgressBegin  ( HWND owner, const char *caption,
@@ -207,6 +218,7 @@ static void ProgressTick   ( void );
 static void ProgressEnd    ( HWND owner );
 static void ArcWorkerBody  ( void *arg );
 static void ArcOnDone      ( HWND hwnd, BOOL cancelled );
+static void ArcOnAsk       ( HWND hwnd, ULONG question );
 static BOOL ArcStartJob    ( HWND hwnd, int kind, const char *caption,
                              const char *label, BOOL cancelable );
 static BOOL BrowseForFolder( HWND owner, char *dir, int dirSize );
@@ -866,6 +878,69 @@ static int ExtractProgress( void *user, int fileIndex, int fileCount,
     (void)user;
     ProgressSet( pct, name );
     return PmWorkerCancelled( &g_worker ) ? 0 : 1;
+}
+
+/* Overwrite prompt hook (ArcOverwriteFn), registered once in main().
+ * WORKER THREAD - no PM calls here.  Park the path where the UI thread's
+ * dialog can read it, then block in PmWorkerAsk until ArcOnAsk answers.
+ * If the job is cancelled while waiting (or the ask machinery is not
+ * available), the answer is "No": nothing gets overwritten, and the progress
+ * callback then turns the pending cancel into SZ_ERR_CANCEL. */
+static int OverwriteHook( void *user, const char *path )
+{
+    (void)user;
+    strncpy( g_owAskPath, path, sizeof( g_owAskPath ) - 1 );
+    g_owAskPath[sizeof( g_owAskPath ) - 1] = '\0';
+    return (int)PmWorkerAsk( &g_worker, ARCASK_OVERWRITE, ARC_OW_NO );
+}
+
+/* The overwrite dialog.  Four answers; Esc (DID_CANCEL) and the close box
+ * mean "No".  Dismissed with ARC_OW_* + 1, because a WinDismissDlg value of
+ * 0 could not be told from WinDlgBox failing outright. */
+MRESULT EXPENTRY OverwriteDlgProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
+{
+    switch ( msg )
+    {
+    case WM_INITDLG:
+        WinSetDlgItemText( hwnd, IDC_OW_FILE, (PCSZ)g_owAskPath );
+        return (MRESULT)FALSE;
+
+    case WM_COMMAND:
+        switch ( SHORT1FROMMP( mp1 ) )
+        {
+        case IDC_OW_YES:    WinDismissDlg( hwnd, ARC_OW_YES + 1 );    return (MRESULT)FALSE;
+        case IDC_OW_NO:     WinDismissDlg( hwnd, ARC_OW_NO + 1 );     return (MRESULT)FALSE;
+        case IDC_OW_YESALL: WinDismissDlg( hwnd, ARC_OW_YESALL + 1 ); return (MRESULT)FALSE;
+        case IDC_OW_NOALL:  WinDismissDlg( hwnd, ARC_OW_NOALL + 1 );  return (MRESULT)FALSE;
+        case DID_CANCEL:    WinDismissDlg( hwnd, ARC_OW_NO + 1 );     return (MRESULT)FALSE;
+        }
+        break;
+
+    case WM_CLOSE:
+        WinDismissDlg( hwnd, ARC_OW_NO + 1 );
+        return (MRESULT)FALSE;
+    }
+    return WinDefDlgProc( hwnd, msg, mp1, mp2 );
+}
+
+/* A worker question arrived (UI THREAD, from WMU_WORKER_ASK or the progress
+ * timer - PmWorkerPollAsk latches, so whichever runs first takes it and the
+ * other finds nothing).  MUST end in PmWorkerAnswer: the worker is blocked
+ * until it does. */
+static void ArcOnAsk( HWND hwnd, ULONG question )
+{
+    (void)hwnd;
+    if ( question == ARCASK_OVERWRITE )
+    {
+        HWND  owner = ( g_hwndProgress != NULLHANDLE ) ? g_hwndProgress
+                                                       : g_hwndFrame;
+        ULONG r = WinDlgBox( HWND_DESKTOP, owner, OverwriteDlgProc,
+                             NULLHANDLE, IDD_OVERWRITE, NULL );
+        PmWorkerAnswer( &g_worker,
+                        ( r >= 1 && r <= 4 ) ? r - 1 : ARC_OW_NO );
+    }
+    else
+        PmWorkerAnswer( &g_worker, ARC_OW_NO );   /* unknown question */
 }
 
 /*===========================================================================
@@ -1968,9 +2043,15 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
     case WM_TIMER:
         if ( SHORT1FROMMP( mp1 ) == TID_ARCPROGRESS )
         {
-            BOOL cancelled = FALSE;
+            BOOL  cancelled = FALSE;
+            ULONG question  = 0;
 
             ProgressTick();
+
+            /* Ask before done: a worker blocked in an ask cannot finish, and
+               a worker that just finished has no ask outstanding. */
+            if ( PmWorkerPollAsk( &g_worker, &question ) )
+                ArcOnAsk( hwnd, question );
 
             if ( PmWorkerPollDone( &g_worker, NULL, &cancelled ) )
                 ArcOnDone( hwnd, cancelled );
@@ -1987,6 +2068,15 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
 
         if ( PmWorkerPollDone( &g_worker, NULL, &cancelled ) )
             ArcOnDone( hwnd, cancelled );
+        return (MRESULT)FALSE;
+    }
+
+    /* Same prompt-only role for a worker question (the overwrite ask). */
+    case WMU_WORKER_ASK: {
+        ULONG question = 0;
+
+        if ( PmWorkerPollAsk( &g_worker, &question ) )
+            ArcOnAsk( hwnd, question );
         return (MRESULT)FALSE;
     }
 
@@ -2160,6 +2250,11 @@ int main( int argc, char *argv[] )
 
     WinShowWindow( g_hwndFrame, TRUE );
     UpdateTitle();
+
+    /* Extraction asks before writing over an existing file (ArcWantWrite in
+     * the shared backend); the hook runs on the worker and blocks until the
+     * UI thread's dialog answers - see OverwriteHook / ArcOnAsk. */
+    ArcSetOverwritePrompt( OverwriteHook, NULL );
 
     /* An archive named on the command line (or by a WPS association). */
     if ( argc > 1 && argv[1][0] )

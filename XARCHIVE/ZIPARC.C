@@ -689,17 +689,22 @@ static void MakeDirs( const char *path, int includeLast )
         _mkdir( buf );
 }
 
-/* Build destDir\name (name already back-slashed, no leading separator). */
+/* Build destDir\name, with the name made filesystem-safe (invalid characters,
+ * device names, 8.3 truncation on DOS/Win32s - see ArcFsName in ARCFILE.C). */
 static void BuildOut( char *dst, int dstSize,
                       const char *destDir, const char *name )
 {
-    int n = 0;
+    char        fsname[SZ_MAX_NAME];
+    const char *s = fsname;
+    int         n = 0;
+
+    ArcFsName( fsname, sizeof( fsname ), name );
     if ( destDir && destDir[0] )
     {
         while ( destDir[n] && n < dstSize - 2 ) { dst[n] = destDir[n]; n++; }
         if ( n > 0 && dst[n-1] != '\\' ) dst[n++] = '\\';
     }
-    while ( *name && n < dstSize - 1 ) dst[n++] = *name++;
+    while ( *s && n < dstSize - 1 ) dst[n++] = *s++;
     dst[n] = '\0';
 }
 
@@ -852,6 +857,8 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
         if ( destDir ) MakeDirs( outPath, 1 );
         return SZ_OK;
     }
+    if ( destDir && !ArcWantWrite( outPath ) )
+        return SZ_OK;                  /* exists and the user chose to keep it */
 
     if ( z->flags[idx] & FLAG_ENCRYPTED )                 return SZ_ERR_UNSUPPORTED;
     if ( z->method[idx] != METHOD_STORE &&

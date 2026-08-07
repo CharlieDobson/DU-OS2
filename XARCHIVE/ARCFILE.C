@@ -414,9 +414,46 @@ void ArcEntryAttr( ArcFile *a, int index, char *buf, int buflen )
     }
 }
 
+/* Defined with ArcFsName at the end of this file. */
+static int NamesNeed83( const char *destDir );
+static int g_names83 = -1;             /* per-operation latch, -1 = undecided */
+
+/*---- Overwrite confirmation (see ARCDEFS.H) ------------------------------- */
+static ArcOverwriteFn g_owFn   = NULL;
+static void          *g_owUser = NULL;
+static int            g_owAll  = -1;   /* latched ARC_OW_*ALL, -1 = ask */
+
+void ArcSetOverwritePrompt( ArcOverwriteFn fn, void *user )
+{
+    g_owFn   = fn;
+    g_owUser = user;
+    g_owAll  = -1;
+}
+
+int ArcWantWrite( const char *path )
+{
+    FILE *f;
+    int   ans;
+
+    f = fopen( path, "rb" );
+    if ( !f ) return 1;                    /* nothing there - just write   */
+    fclose( f );
+
+    if ( g_owAll == ARC_OW_YESALL ) return 1;
+    if ( g_owAll == ARC_OW_NOALL )  return 0;
+    if ( !g_owFn ) return 1;               /* no prompt hook: old behaviour */
+
+    ans = g_owFn( g_owUser, path );
+    if ( ans == ARC_OW_YESALL ) { g_owAll = ans; return 1; }
+    if ( ans == ARC_OW_NOALL )  { g_owAll = ans; return 0; }
+    return ( ans == ARC_OW_YES );
+}
+
 int ArcExtractAll( ArcFile *a, const char *destDir,
                    SzProgress prog, void *user )
 {
+    g_owAll   = -1;                        /* new operation: forget "all" */
+    g_names83 = NamesNeed83( destDir );    /* and re-read the destination  */
     if ( !a ) return SZ_ERR_FORMAT;
     if ( a->fmt == FMT_7Z )   return SzExtractAll( a->sz, destDir, prog, user );
     if ( a->fmt == FMT_RAR )  return RarExtractAll( a->rar, destDir, prog, user );
@@ -428,6 +465,8 @@ int ArcExtractAll( ArcFile *a, const char *destDir,
 int ArcExtractItems( ArcFile *a, const int *indices, int count,
                      const char *destDir, SzProgress prog, void *user )
 {
+    g_owAll   = -1;                        /* new operation: forget "all" */
+    g_names83 = NamesNeed83( destDir );    /* and re-read the destination  */
     if ( !a ) return SZ_ERR_FORMAT;
     if ( a->fmt == FMT_7Z )
         return SzExtractItems( a->sz, indices, count, destDir, prog, user );
@@ -518,4 +557,222 @@ const char *ArcUnsupportedHint( ArcFile *a )
         return "This archive uses a feature, compression method, or encryption "
                "that this extractor does not support.";
     }
+}
+
+/*===========================================================================
+ * Filesystem-safe output names (ArcFsName)
+ *
+ * Entry names come out of the archive and cannot be trusted to be legal - or
+ * safe - filenames on the extraction target.  Every backend's output-path
+ * builder passes the stored name through ArcFsName before appending it to the
+ * destination folder, which
+ *
+ *   - normalises '/' to '\' and strips any leading separators;
+ *   - drops "." components and rewrites ".." to "__", so a hostile name
+ *     cannot climb out of the destination folder (a ':' is replaced too,
+ *     which also disarms "C:..." drive prefixes);
+ *   - replaces characters the filesystem cannot take (control characters
+ *     and  " * : < > ? |  ) with '_', and trims the trailing dots/spaces
+ *     FAT and NTFS refuse to store;
+ *   - appends '_' to a base name that matches a DOS device (CON, PRN, AUX,
+ *     NUL, CLOCK$, COM1-9, LPT1-9 - with or without an extension), which
+ *     would otherwise open the device instead of a file;
+ *   - and, when the target only understands 8.3 names, mangles every
+ *     component to the upper-case 8.3 form the way DOS itself would:
+ *     spaces and extra dots are dropped, the rest is truncated to 8+3
+ *     ("A Long File Name.txt" -> "ALONGFIL.TXT").
+ *
+ * Two long names CAN mangle to the same 8.3 name; the later entry then
+ * overwrites the earlier one, exactly as copying them onto a FAT disk would.
+ * A ~N uniquifier would need per-extraction state in all five backends and
+ * is deliberately not attempted.
+ *===========================================================================*/
+
+#ifdef __OS2__
+/* OS2PLAT.C: 1 when the drive holding 'path' (the current drive when path is
+ * NULL or relative) carries an 8.3-only filesystem (FAT); 0 for HPFS and
+ * other long-name filesystems. */
+extern int Os2NamesNeed83( const char *path );
+#endif
+
+/* True when extracted names must fit the FAT 8.3 form, decided from the
+ * extraction's destination:
+ *   - DOS build: always (real-mode FAT).
+ *   - Win32 build: only under Win32s, whatever the destination.  GetVersion()
+ *     with the high bit set and a major version of 3 is Win32s - Windows 95
+ *     reports major 4, and NT clears the high bit; both take long names.
+ *   - OS/2 build: only when the destination drive's filesystem is FAT
+ *     (DosQueryFSAttach via Os2NamesNeed83; HPFS takes long names).
+ * ArcExtractAll / ArcExtractItems latch the answer per operation in
+ * g_names83; ArcFsName probes the current drive if somehow asked outside
+ * one. */
+static int NamesNeed83( const char *destDir )
+{
+#if defined(_WIN32)
+    DWORD v = GetVersion();
+    (void)destDir;
+    return ( ( v & 0x80000000UL ) != 0 && ( v & 0xFFUL ) == 3 );
+#elif defined(__OS2__)
+    return Os2NamesNeed83( destDir );
+#else
+    (void)destDir;
+    return 1;
+#endif
+}
+
+/* Characters FAT accepts inside an 8.3 name (input already upper-cased). */
+static int Fs83Valid( int c )
+{
+    if ( c >= 'A' && c <= 'Z' ) return 1;
+    if ( c >= '0' && c <= '9' ) return 1;
+    if ( c >= 0x80 ) return 1;                   /* code-page characters */
+    return c != 0 && strchr( "!#$%&'()-@^_`{}~", c ) != NULL;
+}
+
+/* If the part of 'comp' before the extension names a DOS device, append '_'
+ * to it: "CON" -> "CON_", "con.txt" -> "con_.txt".  DOS resolves device
+ * names BEFORE extensions, so "CON.TXT" is still the console. */
+static void GuardDevice( char *comp )
+{
+    static const char *dev[] = { "CON", "PRN", "AUX", "NUL", "CLOCK$", 0 };
+    char up[8];
+    int  i, n, match = 0;
+
+    for ( n = 0; n < 7 && comp[n] && comp[n] != '.'; n++ )
+    {
+        char c = comp[n];
+        if ( c >= 'a' && c <= 'z' ) c = (char)( c - 'a' + 'A' );
+        up[n] = c;
+    }
+    if ( comp[n] && comp[n] != '.' ) return;     /* base > 7 chars: safe */
+    up[n] = '\0';
+
+    for ( i = 0; dev[i]; i++ )
+        if ( !strcmp( up, dev[i] ) ) match = 1;
+    if ( !match && n == 4 && up[3] >= '1' && up[3] <= '9' &&
+         ( !memcmp( up, "COM", 3 ) || !memcmp( up, "LPT", 3 ) ) )
+        match = 1;
+    if ( !match ) return;
+
+    memmove( comp + n + 1, comp + n, strlen( comp + n ) + 1 );
+    comp[n] = '_';
+}
+
+/* Long-name target: substitute forbidden characters, trim the trailing dots
+ * and spaces the filesystem will not store.  In place; may shrink. */
+static void CleanLong( char *comp )
+{
+    int r, w = 0;
+
+    for ( r = 0; comp[r]; r++ )
+    {
+        int c = (unsigned char)comp[r];
+        if ( c < 0x20 || strchr( "\"*:<>?|", c ) ) c = '_';
+        comp[w++] = (char)c;
+    }
+    while ( w > 0 && ( comp[w-1] == '.' || comp[w-1] == ' ' ) ) w--;
+    comp[w] = '\0';
+    GuardDevice( comp );
+}
+
+/* 8.3 target: mangle to an upper-case 8.3 name the way DOS would.  The text
+ * after the LAST dot becomes the extension; spaces and other dots are
+ * dropped; anything else FAT cannot take becomes '_'.  In place; the result
+ * is at most 13 characters, always shorter than the buffer 'comp' sits in. */
+static void Clean83( char *comp )
+{
+    char base[10], ext[4];
+    int  bi = 0, xi = 0, i, dot = -1;
+
+    for ( i = 0; comp[i]; i++ )
+        if ( comp[i] == '.' ) dot = i;
+    if ( dot == 0 ) dot = -1;          /* ".profile": the whole name is the base */
+
+    for ( i = 0; comp[i]; i++ )
+    {
+        int   c     = (unsigned char)comp[i];
+        int   isExt = ( dot >= 0 && i > dot );
+        char *out   = isExt ? ext  : base;
+        int  *n     = isExt ? &xi  : &bi;
+        int   max   = isExt ? 3    : 8;
+
+        if ( i == dot ) continue;
+        if ( c == ' ' || c == '.' ) continue;
+        if ( c >= 'a' && c <= 'z' ) c = c - 'a' + 'A';
+        if ( !Fs83Valid( c ) ) c = '_';
+        if ( *n < max ) out[(*n)++] = (char)c;
+    }
+    base[bi] = '\0';
+    ext[xi]  = '\0';
+
+    if ( bi == 0 && xi > 0 )           /* nothing survived before the dot */
+    {
+        lstrcpy( base, ext );
+        ext[0] = '\0';
+    }
+    if ( base[0] == '\0' )
+    {
+        base[0] = '_';
+        base[1] = '\0';
+    }
+
+    lstrcpy( comp, base );
+    if ( ext[0] )
+    {
+        lstrcat( comp, "." );
+        lstrcat( comp, ext );
+    }
+    GuardDevice( comp );
+}
+
+/* One path component, in place.  "." vanishes (empty result = drop the
+ * component); ".." becomes "__" so it cannot climb out of the destination. */
+static void CleanComponent( char *comp, int e83 )
+{
+    if ( comp[0] == '.' && comp[1] == '\0' )
+    {
+        comp[0] = '\0';
+        return;
+    }
+    if ( comp[0] == '.' && comp[1] == '.' && comp[2] == '\0' )
+    {
+        comp[0] = comp[1] = '_';
+        return;
+    }
+    if ( e83 ) Clean83( comp );
+    else       CleanLong( comp );
+}
+
+void ArcFsName( char *dst, int dstSize, const char *name )
+{
+    char        comp[SZ_MAX_NAME + 2];   /* +2: GuardDevice may grow it by one */
+    const char *s  = name;
+    int         di = 0, ci, e83;
+
+    if ( dstSize <= 0 ) return;
+    if ( g_names83 < 0 )
+        g_names83 = NamesNeed83( NULL );
+    e83 = g_names83;
+    while ( s && *s )
+    {
+        while ( *s == '\\' || *s == '/' ) s++;
+        ci = 0;
+        while ( *s && *s != '\\' && *s != '/' )
+        {
+            if ( ci < SZ_MAX_NAME ) comp[ci++] = *s;
+            s++;
+        }
+        comp[ci] = '\0';
+        if ( ci == 0 ) break;
+
+        CleanComponent( comp, e83 );
+        if ( comp[0] == '\0' ) continue;
+
+        if ( di > 0 && di < dstSize - 1 ) dst[di++] = '\\';
+        for ( ci = 0; comp[ci] && di < dstSize - 1; ci++ )
+            dst[di++] = comp[ci];
+    }
+    if ( di == 0 && dstSize > 1 )        /* never hand back an empty name */
+        dst[di++] = '_';
+    dst[di] = '\0';
 }
