@@ -92,7 +92,7 @@ BEGIN
            FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
            FCF_TITLEBAR | FCF_SYSMENU
     BEGIN
-        LTEXT   "XArchive - File Extractor",
+        LTEXT   "XArchive v1.0 - File Extractor",
                                     IDC_STATIC,  12, 54, 204,  8
         LTEXT   "Extracts 7-Zip, Zip, RAR and FAT images.",
                                     IDC_STATIC,  12, 42, 204,  8

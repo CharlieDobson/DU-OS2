@@ -51,6 +51,12 @@ const char *ArcErrorText( int code );
  * ARE handled and which are not.  Safe to call with a NULL archive. */
 const char *ArcUnsupportedHint( ArcFile *a );
 
+/* Explanation for SZ_ERR_NORAM: the archive needs a compression dictionary
+ * bigger than this build will hold in memory.  Unlike SZ_ERR_MEMORY (an
+ * allocation that failed) this one is a refusal, and the user can act on it
+ * by re-creating the archive with a smaller dictionary. */
+const char *ArcNoRamHint( void );
+
 /* Short display name of the archive's format, e.g. "7z", "Zip", "RAR", "RAR5".
  * Safe to call with a NULL archive (returns "?"). */
 const char *ArcFormatName( ArcFile *a );

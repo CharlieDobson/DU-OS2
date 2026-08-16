@@ -521,14 +521,25 @@ const char *ArcFormatName( ArcFile *a )
     }
 }
 
+const char *ArcNoRamHint( void )
+{
+    return "Not enough memory for this archive.\n"
+           "It was compressed with a dictionary larger than this program can "
+           "hold in RAM (the limit is 32 MB).\n"
+           "Re-create the archive with a smaller dictionary - in 7-Zip, a "
+           "lower compression level, or Dictionary size 32 MB or less - and "
+           "it will extract here.";
+}
+
 const char *ArcUnsupportedHint( ArcFile *a )
 {
     int fmt = a ? a->fmt : 0;
     switch ( fmt )
     {
     case FMT_7Z:
-        return "This 7z entry uses a feature this extractor does not support.\n"
-               "Supported: LZMA, LZMA2, stored, and the BCJ x86 filter.\n"
+        return "Some entries use a feature this extractor does not support, "
+               "and were skipped.  Everything else was extracted.\n"
+               "Supported: LZMA, LZMA2, stored, the BCJ x86 filter, and BCJ2.\n"
                "Not supported: other codecs (PPMd, BZip2, Deflate, ARM/other "
                "filters) and encryption.";
     case FMT_RAR:

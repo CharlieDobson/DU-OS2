@@ -48,26 +48,76 @@
 #define SZ_F_NONE     0
 #define SZ_F_BCJ_X86  1
 
+/* Coder kinds, as recognised from the coder id while parsing a folder. */
+#define SZ_C_UNKNOWN  0         /* parsed structurally, cannot be decoded    */
+#define SZ_C_COPY     1
+#define SZ_C_LZMA     2
+#define SZ_C_LZMA2    3
+#define SZ_C_BCJ_X86  4
+#define SZ_C_BCJ2     5
+
 /*---- Internal structures ------------------------------------------------- *
- * A folder is one or two coders.  The "main" coder (Copy / LZMA / LZMA2)
- * consumes the single packed stream; an optional filter coder (BCJ x86) is
- * applied to its output.  When both are present the header binds the main
- * coder's output to the filter's input, and the folder's final output is the
- * filter's output - which for BCJ is the same size as the main output, so the
- * filter runs in place.
+ * A folder is a small graph of coders.  Every coder is parsed STRUCTURALLY,
+ * whatever its id: the layout (coder count, per-coder in/out stream counts,
+ * bind pairs, packed-stream indices) is self-describing and independent of
+ * the codec, so an unknown coder can be stepped over without losing the
+ * reader's place in the header.  Only after the whole folder is parsed do we
+ * ask whether it can actually be DECODED; if not, 'unsupported' is set and
+ * the archive still opens and lists, with just that folder's entries failing
+ * at extract time.  This is what keeps one PPMd or encrypted folder from
+ * making the entire archive unopenable.
+ *
+ * Three shapes are decodable:
+ *   1 coder    - Copy / LZMA / LZMA2 straight from the packed stream.
+ *   2 coders   - the above plus a BCJ x86 filter over its output, bound so
+ *                the main coder's output feeds the filter's input.
+ *   4 coders   - BCJ2: three coders producing the main, call and jump
+ *                streams, plus the BCJ2 coder itself whose fourth input is
+ *                the raw range-coder packed stream.
  *-------------------------------------------------------------------------- */
+typedef struct {
+    int    kind;            /* SZ_C_*                                        */
+    Byte   props[8];
+    UInt32 propsSize;
+    UInt32 numIn, numOut;
+    UInt32 firstIn;         /* folder-local index of this coder's first in   */
+    UInt32 firstOut;        /*   and first out stream                        */
+    UInt32 unpackSize;      /* size of its output stream                     */
+} SzCoder;
+
 typedef struct {
     int    method;          /* SZ_M_COPY / SZ_M_LZMA / SZ_M_LZMA2            */
     int    filter;          /* SZ_F_NONE / SZ_F_BCJ_X86                      */
     Byte   props[8];
     UInt32 propsSize;
-    UInt32 numCoders;       /* 1 or 2                                        */
+    UInt32 numCoders;
     UInt32 mainOutLocal;    /* out-stream index (0-based, folder-local) of   */
     UInt32 finalOutLocal;   /*   the main coder and the final output         */
     UInt32 mainUnpackSize;  /* main coder output size (LZMA decode buffer)   */
     UInt32 unpackSize;      /* folder final output size                      */
     int    hasCrc;
     UInt32 crc;
+
+    /* Generic structure, filled for every folder including unsupported ones */
+    int      unsupported;   /* 1 = parsed but not decodable                  */
+    SzCoder  coders[SZ_MAX_CODERS];
+    UInt32   numOutStreams; /* total across coders (CodersUnpackSize count)  */
+    UInt32   numInStreams;
+    UInt32   numPackStreams;/* packed streams this folder consumes           */
+    UInt32   firstPackStream;/* index of the first, into a->packSizes[]      */
+    /* packed stream n (folder-relative) feeds folder in-stream packToIn[n] */
+    UInt32   packToIn[SZ_MAX_FOLDER_STRMS];
+    /* bind pair b joins out-stream bpOut[b] to in-stream bpIn[b] */
+    UInt32   numBindPairs;
+    UInt32   bpIn[SZ_MAX_FOLDER_STRMS];
+    UInt32   bpOut[SZ_MAX_FOLDER_STRMS];
+    int      hasFinalOut;   /* exactly one unbound out-stream was found      */
+
+    /* BCJ2 wiring, valid when isBcj2.  Each is a coder index, except rcPack
+     * which is a folder-relative packed stream index. */
+    int      isBcj2;
+    int      bcj2Main, bcj2Call, bcj2Jump;
+    UInt32   bcj2RcPack;
 } SzFolder;
 
 struct SzArchive {
@@ -76,8 +126,8 @@ struct SzArchive {
 
     UInt32   packPos;
     UInt32   numPackStreams;
-    UInt32   packSizes[SZ_MAX_FOLDERS];
-    UInt32   packOffset[SZ_MAX_FOLDERS];    /* base-relative cumulative     */
+    UInt32   packSizes[SZ_MAX_PACKSTREAMS];
+    UInt32   packOffset[SZ_MAX_PACKSTREAMS];/* base-relative cumulative     */
 
     UInt32   numFolders;
     SzFolder folders[SZ_MAX_FOLDERS];
@@ -261,7 +311,7 @@ static int ReadPackInfo( ParseState *ps )
 
     a->packPos        = RdNum( r );
     a->numPackStreams = RdNum( r );
-    if ( a->numPackStreams > SZ_MAX_FOLDERS )
+    if ( a->numPackStreams > SZ_MAX_PACKSTREAMS )
         return SZ_ERR_TOOBIG;
 
     id = RdByte( r );
@@ -276,7 +326,8 @@ static int ReadPackInfo( ParseState *ps )
     }
     if ( id == k7zCRC )
     {
-        Byte   defined[SZ_MAX_FOLDERS];
+        Byte   defined[SZ_MAX_PACKSTREAMS];   /* one per PACK stream, and a
+                                               * folder may own four */
         UInt32 c;
         RdBitsOptional( r, defined, a->numPackStreams );
         for ( i = 0; i < a->numPackStreams; i++ )
@@ -306,20 +357,187 @@ static int ReadPackInfo( ParseState *ps )
  * coder index, which lets us record which output is the main coder's (the LZMA
  * decode size) and which is the folder's final output.
  *-------------------------------------------------------------------------- */
+/* Is folder in-stream 'inIdx' fed by a bind pair (rather than by a packed
+ * stream)?  Returns the bind pair index, or -1. */
+static int FolderBindForIn( const SzFolder *fo, UInt32 inIdx )
+{
+    UInt32 b;
+    for ( b = 0; b < fo->numBindPairs; b++ )
+        if ( fo->bpIn[b] == inIdx ) return (int)b;
+    return -1;
+}
+
+/* Which coder produces folder out-stream 'outIdx'?  Returns the coder index,
+ * or -1 when the folder has more coders than we stored. */
+static int FolderCoderForOut( const SzFolder *fo, UInt32 outIdx )
+{
+    UInt32 c, n = fo->numCoders;
+    if ( n > SZ_MAX_CODERS ) n = SZ_MAX_CODERS;
+    for ( c = 0; c < n; c++ )
+        if ( outIdx >= fo->coders[c].firstOut &&
+             outIdx <  fo->coders[c].firstOut + fo->coders[c].numOut )
+            return (int)c;
+    return -1;
+}
+
+/* Folder-relative packed stream index feeding in-stream 'inIdx', or -1. */
+static int FolderPackForIn( const SzFolder *fo, UInt32 inIdx )
+{
+    UInt32 p;
+    for ( p = 0; p < fo->numPackStreams; p++ )
+        if ( fo->packToIn[p] == inIdx ) return (int)p;
+    return -1;
+}
+
+/* A main coder reads the packed stream directly and produces bytes. */
+static int CoderIsMain( int kind )
+{
+    return kind == SZ_C_COPY || kind == SZ_C_LZMA || kind == SZ_C_LZMA2;
+}
+
+static int CoderMethod( int kind )
+{
+    if ( kind == SZ_C_COPY )  return SZ_M_COPY;
+    if ( kind == SZ_C_LZMA )  return SZ_M_LZMA;
+    return SZ_M_LZMA2;
+}
+
+/*---- Folder classification ----------------------------------------------- *
+ * Decide, from the parsed structure alone, whether this folder is one of the
+ * three decodable shapes, and fill in the fields the decoder uses.  Sets
+ * fo->unsupported instead of failing: the caller carries on parsing either
+ * way, so an unknown codec costs its own entries and nothing else.
+ *-------------------------------------------------------------------------- */
+static void ClassifyFolder( SzFolder *fo )
+{
+    UInt32 finalOut = 0;
+    UInt32 o;
+    int    bi;
+
+    fo->unsupported = 1;
+    fo->isBcj2      = 0;
+
+    if ( fo->numCoders > SZ_MAX_CODERS ) return;
+    if ( !fo->hasFinalOut ) return;       /* not a single-result folder */
+    finalOut = fo->finalOutLocal;
+    (void)o;
+
+    /* --- one coder: straight from the packed stream --------------------- */
+    if ( fo->numCoders == 1 )
+    {
+        if ( !CoderIsMain( fo->coders[0].kind ) ) return;
+        if ( fo->numPackStreams != 1 ) return;
+        fo->method       = CoderMethod( fo->coders[0].kind );
+        fo->filter       = SZ_F_NONE;
+        fo->propsSize    = fo->coders[0].propsSize;
+        memcpy( fo->props, fo->coders[0].props, sizeof( fo->props ) );
+        fo->mainOutLocal = fo->coders[0].firstOut;
+        fo->unsupported  = 0;
+        return;
+    }
+
+    /* --- two coders: main + BCJ x86 filter over its output --------------- */
+    if ( fo->numCoders == 2 )
+    {
+        int mainIdx = -1, filtIdx = -1;
+        UInt32 c;
+        for ( c = 0; c < 2; c++ )
+        {
+            if ( CoderIsMain( fo->coders[c].kind ) )      mainIdx = (int)c;
+            else if ( fo->coders[c].kind == SZ_C_BCJ_X86 ) filtIdx = (int)c;
+        }
+        if ( mainIdx < 0 || filtIdx < 0 ) return;
+        if ( fo->numPackStreams != 1 || fo->numBindPairs != 1 ) return;
+        /* the filter's input must be fed by the main coder's output */
+        if ( fo->bpIn[0]  != fo->coders[filtIdx].firstIn )  return;
+        if ( fo->bpOut[0] != fo->coders[mainIdx].firstOut ) return;
+        if ( finalOut != fo->coders[filtIdx].firstOut )     return;
+
+        fo->method       = CoderMethod( fo->coders[mainIdx].kind );
+        fo->filter       = SZ_F_BCJ_X86;
+        fo->propsSize    = fo->coders[mainIdx].propsSize;
+        memcpy( fo->props, fo->coders[mainIdx].props, sizeof( fo->props ) );
+        fo->mainOutLocal = fo->coders[mainIdx].firstOut;
+        fo->unsupported  = 0;
+        return;
+    }
+
+    /* --- four coders: BCJ2 ---------------------------------------------- *
+     * The BCJ2 coder takes four inputs - main, call, jump, and the raw
+     * range-coder stream.  The first three are bound to the outputs of three
+     * other coders (each reading its own packed stream); the fourth is a
+     * packed stream directly.  Nothing here assumes 7-Zip's coder ORDER: the
+     * wiring is read out of the bind pairs.
+     *-------------------------------------------------------------------- */
+    if ( fo->numCoders != 4 ) return;
+
+    bi = -1;
+    for ( o = 0; o < 4; o++ )
+        if ( fo->coders[o].kind == SZ_C_BCJ2 )
+        {
+            if ( bi >= 0 ) return;                /* two BCJ2 coders */
+            bi = (int)o;
+        }
+    if ( bi < 0 ) return;
+    if ( fo->coders[bi].numIn != 4 || fo->coders[bi].numOut != 1 ) return;
+    if ( finalOut != fo->coders[bi].firstOut ) return;
+    if ( fo->numPackStreams != 4 || fo->numBindPairs != 3 ) return;
+
+    {
+        int  sub[3];
+        int  k;
+        for ( k = 0; k < 3; k++ )
+        {
+            UInt32 in = fo->coders[bi].firstIn + (UInt32)k;
+            int    b  = FolderBindForIn( fo, in );
+            int    cd;
+            if ( b < 0 ) return;                  /* must be a bound input */
+            cd = FolderCoderForOut( fo, fo->bpOut[b] );
+            if ( cd < 0 || cd == bi ) return;
+            if ( !CoderIsMain( fo->coders[cd].kind ) ) return;
+            /* each sub-coder must read a packed stream of its own */
+            if ( FolderPackForIn( fo, fo->coders[cd].firstIn ) < 0 ) return;
+            sub[k] = cd;
+        }
+        /* the fourth input is the range-coder stream, taken raw */
+        {
+            int p = FolderPackForIn( fo, fo->coders[bi].firstIn + 3 );
+            if ( p < 0 ) return;
+            fo->bcj2RcPack = (UInt32)p;
+        }
+        fo->bcj2Main = sub[0];
+        fo->bcj2Call = sub[1];
+        fo->bcj2Jump = sub[2];
+    }
+
+    fo->isBcj2       = 1;
+    fo->filter       = SZ_F_NONE;
+    fo->method       = CoderMethod( fo->coders[fo->bcj2Main].kind );
+    fo->propsSize    = fo->coders[fo->bcj2Main].propsSize;
+    memcpy( fo->props, fo->coders[fo->bcj2Main].props, sizeof( fo->props ) );
+    fo->mainOutLocal = fo->coders[fo->bcj2Main].firstOut;
+    fo->unsupported  = 0;
+}
+
+/*---- Folder: structural parse -------------------------------------------- *
+ * Reads the folder record whatever it contains.  Returns an error ONLY for a
+ * malformed header - an unrecognised codec is not an error here, it is a
+ * classification result (see ClassifyFolder).
+ *-------------------------------------------------------------------------- */
 static int ReadFolder( ParseState *ps, SzFolder *fo )
 {
-    CRdr    *r = &ps->rd;
-    UInt32   numCoders = RdNum( r );
-    UInt32   c;
-    int      mainIdx   = -1;
-    int      filterIdx = -1;
+    CRdr   *r = &ps->rd;
+    UInt32  numCoders;
+    UInt32  c, totalIn = 0, totalOut = 0, i;
 
-    if ( numCoders < 1 || numCoders > 2 )
-        return SZ_ERR_UNSUPPORTED;
+    memset( fo, 0, sizeof( *fo ) );
+    fo->method   = -1;
+    fo->filter   = SZ_F_NONE;
+    fo->bcj2Main = fo->bcj2Call = fo->bcj2Jump = -1;
 
-    fo->method    = -1;
-    fo->filter    = SZ_F_NONE;
-    fo->propsSize = 0;
+    numCoders = RdNum( r );
+    if ( numCoders < 1 || numCoders > SZ_MAX_FOLDER_STRMS )
+        return SZ_ERR_FORMAT;
     fo->numCoders = numCoders;
 
     for ( c = 0; c < numCoders; c++ )
@@ -328,89 +546,123 @@ static int ReadFolder( ParseState *ps, SzFolder *fo )
         unsigned idSize    = flags & 0x0F;
         int      isComplex = ( flags & 0x10 ) != 0;
         int      hasAttr   = ( flags & 0x20 ) != 0;
-        int      isMain    = 0;
-        int      isFilter  = 0;
         Byte     id[8];
         unsigned k;
+        UInt32   nin = 1, nout = 1;
+        SzCoder  cd;
 
-        if ( idSize > 8 )
-            return SZ_ERR_FORMAT;
-        for ( k = 0; k < idSize; k++ )
-            id[k] = RdByte( r );
+        if ( idSize > 8 ) return SZ_ERR_FORMAT;
+        for ( k = 0; k < idSize; k++ ) id[k] = RdByte( r );
 
         if ( isComplex )
         {
-            UInt32 nin = RdNum( r ), nout = RdNum( r );
-            if ( nin != 1 || nout != 1 )
-                return SZ_ERR_UNSUPPORTED;
+            nin  = RdNum( r );
+            nout = RdNum( r );
+            if ( nin > SZ_MAX_FOLDER_STRMS || nout > SZ_MAX_FOLDER_STRMS )
+                return SZ_ERR_FORMAT;
         }
 
+        memset( &cd, 0, sizeof( cd ) );
+        cd.kind     = SZ_C_UNKNOWN;
+        cd.numIn    = nin;
+        cd.numOut   = nout;
+        cd.firstIn  = totalIn;
+        cd.firstOut = totalOut;
+
         if ( idSize == 1 && id[0] == 0x00 )
-            { fo->method = SZ_M_COPY;  isMain = 1; }
+            cd.kind = SZ_C_COPY;
         else if ( idSize == 3 && id[0] == 0x03 && id[1] == 0x01 && id[2] == 0x01 )
-            { fo->method = SZ_M_LZMA;  isMain = 1; }
+            cd.kind = SZ_C_LZMA;
         else if ( idSize == 1 && id[0] == 0x21 )
-            { fo->method = SZ_M_LZMA2; isMain = 1; }
+            cd.kind = SZ_C_LZMA2;
         else if ( idSize == 4 && id[0] == 0x03 && id[1] == 0x03 &&
                   id[2] == 0x01 && id[3] == 0x03 )
-            { fo->filter = SZ_F_BCJ_X86; isFilter = 1; }
-        else
-            return SZ_ERR_UNSUPPORTED;
+            cd.kind = SZ_C_BCJ_X86;
+        else if ( idSize == 4 && id[0] == 0x03 && id[1] == 0x03 &&
+                  id[2] == 0x01 && id[3] == 0x1B )
+            cd.kind = SZ_C_BCJ2;
 
         if ( hasAttr )
         {
             UInt32 propSize = RdNum( r );
             UInt32 j;
-            if ( isMain )
+            for ( j = 0; j < propSize; j++ )
             {
-                if ( propSize > sizeof( fo->props ) )
-                    return SZ_ERR_UNSUPPORTED;
-                for ( j = 0; j < propSize; j++ )
-                    fo->props[j] = RdByte( r );
-                fo->propsSize = propSize;
+                Byte b = RdByte( r );
+                if ( j < sizeof( cd.props ) ) cd.props[j] = b;
             }
-            else                              /* BCJ x86 carries no props */
-                for ( j = 0; j < propSize; j++ )
-                    (void)RdByte( r );
+            if ( propSize <= sizeof( cd.props ) )
+                cd.propsSize = propSize;
+            else
+                cd.kind = SZ_C_UNKNOWN;   /* more props than we can hold */
         }
 
-        if ( isMain )
-        {
-            if ( mainIdx >= 0 ) return SZ_ERR_UNSUPPORTED;   /* two main coders */
-            mainIdx = (int)c;
-        }
-        if ( isFilter )
-        {
-            if ( filterIdx >= 0 ) return SZ_ERR_UNSUPPORTED;
-            filterIdx = (int)c;
-        }
+        totalIn  += nin;
+        totalOut += nout;
+        if ( totalIn > SZ_MAX_FOLDER_STRMS || totalOut > SZ_MAX_FOLDER_STRMS )
+            return SZ_ERR_FORMAT;
+        if ( c < SZ_MAX_CODERS ) fo->coders[c] = cd;
+        if ( r->err ) return SZ_ERR_FORMAT;
     }
 
-    if ( mainIdx < 0 )
-        return SZ_ERR_UNSUPPORTED;            /* no packed-stream coder */
+    fo->numInStreams  = totalIn;
+    fo->numOutStreams = totalOut;
+    if ( totalOut < 1 ) return SZ_ERR_FORMAT;
 
-    if ( numCoders == 1 )
+    /* Bind pairs: one fewer than the number of out-streams. */
+    fo->numBindPairs = totalOut - 1;
+    if ( fo->numBindPairs > SZ_MAX_FOLDER_STRMS ) return SZ_ERR_FORMAT;
+    for ( i = 0; i < fo->numBindPairs; i++ )
     {
-        fo->mainOutLocal  = 0;
-        fo->finalOutLocal = 0;
+        fo->bpIn[i]  = RdNum( r );
+        fo->bpOut[i] = RdNum( r );
+        if ( fo->bpIn[i] >= totalIn || fo->bpOut[i] >= totalOut )
+            return SZ_ERR_FORMAT;
+    }
+
+    /* Whatever is left unbound on the input side is fed by a packed stream. */
+    if ( totalIn < fo->numBindPairs ) return SZ_ERR_FORMAT;
+    fo->numPackStreams = totalIn - fo->numBindPairs;
+    if ( fo->numPackStreams < 1 ||
+         fo->numPackStreams > SZ_MAX_FOLDER_STRMS ) return SZ_ERR_FORMAT;
+
+    if ( fo->numPackStreams == 1 )
+    {
+        /* Implicit: the single in-stream no bind pair claims.  Not stored. */
+        int found = -1;
+        for ( i = 0; i < totalIn; i++ )
+            if ( FolderBindForIn( fo, i ) < 0 ) { found = (int)i; break; }
+        if ( found < 0 ) return SZ_ERR_FORMAT;
+        fo->packToIn[0] = (UInt32)found;
     }
     else
     {
-        /* Two coders: one bind pair (InIndex, OutIndex).  The bound input is
-         * the filter's; the bound output is the main coder's.  The packed
-         * stream count for this folder is numIn - numBindPairs = 2 - 1 = 1, so
-         * no explicit packed-stream index is stored. */
-        UInt32 inIndex, outIndex;
-        if ( filterIdx < 0 )
-            return SZ_ERR_UNSUPPORTED;        /* second coder isn't a filter */
-        inIndex  = RdNum( r );
-        outIndex = RdNum( r );
-        if ( inIndex != (UInt32)filterIdx || outIndex != (UInt32)mainIdx )
-            return SZ_ERR_UNSUPPORTED;
-        fo->mainOutLocal  = (UInt32)mainIdx;
-        fo->finalOutLocal = (UInt32)filterIdx;
+        for ( i = 0; i < fo->numPackStreams; i++ )
+        {
+            fo->packToIn[i] = RdNum( r );
+            if ( fo->packToIn[i] >= totalIn ) return SZ_ERR_FORMAT;
+        }
+    }
+    if ( r->err ) return SZ_ERR_FORMAT;
+
+    /* The folder's result is the one out-stream no bind pair consumes.  This
+     * is structural, so it is worked out here rather than during
+     * classification: an unsupported folder still needs its output size, or
+     * its entries would list as zero bytes. */
+    {
+        UInt32 o, b;
+        int    found = 0;
+        for ( o = 0; o < fo->numOutStreams; o++ )
+        {
+            int bound = 0;
+            for ( b = 0; b < fo->numBindPairs; b++ )
+                if ( fo->bpOut[b] == o ) bound = 1;
+            if ( !bound ) { fo->finalOutLocal = o; found++; }
+        }
+        fo->hasFinalOut = ( found == 1 );
     }
 
+    ClassifyFolder( fo );
     fo->mainUnpackSize = 0;
     fo->unpackSize     = 0;
     fo->hasCrc         = 0;
@@ -439,33 +691,55 @@ static int ReadUnpackInfo( ParseState *ps )
     if ( external != 0 )
         return SZ_ERR_UNSUPPORTED;     /* folder defs in another stream */
 
-    for ( i = 0; i < a->numFolders; i++ )
-    {
-        rc = ReadFolder( ps, &a->folders[i] );
-        if ( rc ) return rc;
+    {   /* Folders consume packed streams in order; a folder is not one
+         * stream (BCJ2 takes four), so walk a running total. */
+        UInt32 packBase = 0;
+        for ( i = 0; i < a->numFolders; i++ )
+        {
+            SzFolder *fo = &a->folders[i];
+            rc = ReadFolder( ps, fo );
+            if ( rc ) return rc;
+            fo->firstPackStream = packBase;
+            packBase += fo->numPackStreams;
+            if ( packBase > SZ_MAX_PACKSTREAMS ) return SZ_ERR_TOOBIG;
+        }
     }
 
     id = RdByte( r );
     if ( id != k7zCodersUnpackSize )
         return SZ_ERR_FORMAT;
-    /* One unpack size per coder output stream, in folder/coder order.  Pick
-     * out the main coder's output (the LZMA decode size) and the folder's
-     * final output (after any filter). */
+    /* One unpack size per coder OUTPUT STREAM, in folder/coder order - not
+     * one per coder.  Pick out the main coder's output (the LZMA decode
+     * size) and the folder's final output (after any filter or BCJ2). */
     for ( i = 0; i < a->numFolders; i++ )
     {
         SzFolder *fo = &a->folders[i];
-        UInt32    sizes[2];
-        UInt32    c;
-        for ( c = 0; c < fo->numCoders; c++ )
+        UInt32    sizes[SZ_MAX_FOLDER_STRMS];
+        UInt32    o, c, n;
+
+        for ( o = 0; o < fo->numOutStreams; o++ )
         {
-            sizes[c] = RdNum( r );
+            sizes[o] = RdNum( r );
             if ( r->err )
                 return SZ_ERR_TOOBIG;
-            if ( sizes[c] > SZ_MAX_UNPACK_SIZE )
+            if ( sizes[o] > SZ_MAX_UNPACK_SIZE )
                 return SZ_ERR_TOOBIG;
         }
+
+        n = ( fo->numCoders > SZ_MAX_CODERS ) ? SZ_MAX_CODERS : fo->numCoders;
+        for ( c = 0; c < n; c++ )
+            if ( fo->coders[c].firstOut < fo->numOutStreams )
+                fo->coders[c].unpackSize = sizes[fo->coders[c].firstOut];
+
+        /* The folder's output size is structural and is needed even for an
+         * unsupported folder, so its entries still list their real sizes. */
+        if ( fo->hasFinalOut && fo->finalOutLocal < fo->numOutStreams )
+            fo->unpackSize = sizes[fo->finalOutLocal];
+
+        if ( fo->unsupported )
+            continue;                  /* nothing further to wire up */
+
         fo->mainUnpackSize = sizes[fo->mainOutLocal];
-        fo->unpackSize     = sizes[fo->finalOutLocal];
     }
 
     id = RdByte( r );
@@ -673,10 +947,16 @@ static int ReadStreamsInfo( ParseState *ps )
     if ( id != k7zEnd )
         return SZ_ERR_FORMAT;
 
-    /* single-input coders => one packed stream per folder */
-    if ( ps->a->numFolders != 0 &&
-         ps->a->numPackStreams != ps->a->numFolders )
-        return SZ_ERR_UNSUPPORTED;
+    /* Folders claim packed streams in order and a folder may claim more than
+     * one (BCJ2 claims four), so the total has to add up rather than match
+     * the folder count. */
+    if ( ps->a->numFolders != 0 )
+    {
+        SzFolder *last = &ps->a->folders[ps->a->numFolders - 1];
+        if ( last->firstPackStream + last->numPackStreams !=
+             ps->a->numPackStreams )
+            return SZ_ERR_FORMAT;
+    }
 
     return SZ_OK;
 }
@@ -1043,7 +1323,7 @@ static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
                                   ( (UInt32)fo->props[3] << 16 ) |
                                   ( (UInt32)fo->props[4] << 24 );
                 if ( dictSize > SZ_MAX_DICT_SIZE )
-                    rc = SZ_ERR_TOOBIG;
+                    rc = SZ_ERR_NORAM;
                 else
                     rc = LzmaDecode( fo->props, fo->propsSize,
                                      packBuf, packSize, outBuf, mainSize );
@@ -1064,7 +1344,7 @@ static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
                         ? 0xFFFFFFFFUL
                         : ( (UInt32)( 2 | ( pbyte & 1 ) ) << ( pbyte / 2 + 11 ) );
                     if ( dictSize > SZ_MAX_DICT_SIZE )
-                        rc = SZ_ERR_TOOBIG;
+                        rc = SZ_ERR_NORAM;
                     else
                         rc = Lzma2Decode( pbyte, packBuf, packSize,
                                           outBuf, mainSize );
@@ -1334,6 +1614,11 @@ const char *SzEntryMethod( SzArchive *a, int index )
         return buf;
 
     fo = &a->folders[e->folderIndex];
+    if ( fo->unsupported )                    /* parsed, but not decodable */
+    {
+        lstrcpy( buf, "unsupported" );
+        return buf;
+    }
     m  = ( fo->method == SZ_M_COPY )  ? "Copy"
        : ( fo->method == SZ_M_LZMA )  ? "LZMA"
        : ( fo->method == SZ_M_LZMA2 ) ? "LZMA2"
@@ -1341,6 +1626,8 @@ const char *SzEntryMethod( SzArchive *a, int index )
     lstrcpy( buf, m );
     if ( fo->filter == SZ_F_BCJ_X86 )
         lstrcat( buf, "+BCJ" );
+    if ( fo->isBcj2 )
+        lstrcat( buf, "+BCJ2" );
     return buf;
 }
 
@@ -1545,6 +1832,323 @@ static int SzBcjFinish( SzBcjStage *s )
     return 1;
 }
 
+/*---- BCJ2 stage ---------------------------------------------------------- *
+ * BCJ2 splits x86 branch TARGETS out of the code into two side streams, so
+ * that the main stream compresses without the noise of absolute addresses.
+ * Rebuilding the code needs four inputs at once:
+ *
+ *   main  - the code with the target operands removed   (streamed)
+ *   call  - the 4-byte big-endian targets of E8 CALLs   (buffered)
+ *   jump  - the same for E9 JMPs and 0F 8x Jcc          (buffered)
+ *   rc    - a range-coded bit per branch OPCODE saying whether that opcode
+ *           really had its target extracted                (buffered)
+ *
+ * Only 'main' is streamed; the other three are held whole, which is what
+ * keeps this affordable.  They are small - a few bytes per branch - and
+ * their sizes are known from the header before anything is allocated, so an
+ * oversized one is refused rather than attempted.  The converter itself is
+ * a state machine over the main bytes: nothing about it needs main in RAM.
+ *
+ * The transform is position-dependent: a stored target is absolute and the
+ * emitted operand is relative, so the output position at the operand has to
+ * be tracked exactly - which is why outPos counts EMITTED bytes, including
+ * the four this stage inserts itself.
+ *-------------------------------------------------------------------------- */
+
+/* Branch opcodes BCJ2 considers: E8, E9, and the 0F 8x two-byte Jcc. */
+#define SZ_IS_J( b0, b1 ) ( ( ( (b1) & 0xFE ) == 0xE8 ) || \
+                            ( (b0) == 0x0F && ( (b1) & 0xF0 ) == 0x80 ) )
+
+#define SZ_RC_TOP_VALUE   ( 1UL << 24 )
+#define SZ_RC_MODEL_TOTAL ( 1 << 11 )
+#define SZ_RC_MOVE_BITS   5
+
+typedef struct {
+    /* range-coded control stream, held whole */
+    const Byte *rc;
+    UInt32      rcLen, rcPos;
+    UInt32      range, code;
+    UInt16      probs[256 + 2];
+
+    /* branch target streams, held whole */
+    const Byte *call;  UInt32 callLen, callPos;
+    const Byte *jump;  UInt32 jumpLen, jumpPos;
+
+    /* output position and the byte before the current one */
+    UInt32      outPos, outSize;
+    Byte        prevByte;
+
+    Byte       *obuf;             /* staging, SZ_BCJ_BUF bytes */
+    UInt32      oN;
+
+    LzmaEmit    next;             /* downstream sink */
+    void       *nextUser;
+    int         err;              /* SZ_OK or SZ_ERR_DATA on a short stream */
+} SzBcj2Stage;
+
+static void Bcj2Init( SzBcj2Stage *s )
+{
+    int i;
+    for ( i = 0; i < 256 + 2; i++ )
+        s->probs[i] = SZ_RC_MODEL_TOTAL >> 1;
+    s->rcPos    = 0;
+    s->callPos  = 0;
+    s->jumpPos  = 0;
+    s->outPos   = 0;
+    s->prevByte = 0;
+    s->oN       = 0;
+    s->err      = SZ_OK;
+    s->range    = 0xFFFFFFFFUL;
+    s->code     = 0;
+}
+
+/* Prime the range decoder: five bytes, the first of which is discarded. */
+static int Bcj2RcStart( SzBcj2Stage *s )
+{
+    int i;
+    if ( s->rcLen < 5 ) { s->err = SZ_ERR_DATA; return 0; }
+    s->rcPos = 1;                              /* byte 0 is always zero */
+    s->code  = 0;
+    for ( i = 0; i < 4; i++ )
+        s->code = ( s->code << 8 ) | (UInt32)s->rc[s->rcPos++];
+    s->range = 0xFFFFFFFFUL;
+    return 1;
+}
+
+/* One adaptive bit.  Returns 0/1, or -1 when the rc stream runs out. */
+static int Bcj2Bit( SzBcj2Stage *s, unsigned idx )
+{
+    UInt16 *p = &s->probs[idx];
+    UInt32  bound = ( s->range >> 11 ) * (UInt32)*p;
+    int     sym;
+
+    if ( s->code < bound )
+    {
+        s->range = bound;
+        *p = (UInt16)( *p + ( ( SZ_RC_MODEL_TOTAL - *p ) >> SZ_RC_MOVE_BITS ) );
+        sym = 0;
+    }
+    else
+    {
+        s->range -= bound;
+        s->code  -= bound;
+        *p = (UInt16)( *p - ( *p >> SZ_RC_MOVE_BITS ) );
+        sym = 1;
+    }
+    while ( s->range < SZ_RC_TOP_VALUE )
+    {
+        if ( s->rcPos >= s->rcLen ) { s->err = SZ_ERR_DATA; return -1; }
+        s->code   = ( s->code << 8 ) | (UInt32)s->rc[s->rcPos++];
+        s->range <<= 8;
+    }
+    return sym;
+}
+
+static int Bcj2Put( SzBcj2Stage *s, Byte b )
+{
+    if ( s->outPos >= s->outSize ) return 1;   /* folder complete; drop */
+    s->obuf[s->oN++] = b;
+    s->outPos++;
+    if ( s->oN == SZ_BCJ_BUF )
+    {
+        if ( !s->next( s->nextUser, s->obuf, s->oN ) ) return 0;
+        s->oN = 0;
+    }
+    return 1;
+}
+
+/* Emit callback: receives the main stream and rebuilds the original code. */
+static int SzBcj2Emit( void *user, const Byte *data, UInt32 len )
+{
+    SzBcj2Stage *s = (SzBcj2Stage *)user;
+    UInt32       i;
+
+    for ( i = 0; i < len; i++ )
+    {
+        Byte b = data[i];
+
+        if ( !Bcj2Put( s, b ) ) return 0;
+
+        if ( SZ_IS_J( s->prevByte, b ) )
+        {
+            unsigned idx = ( b == 0xE8 ) ? 2 + (unsigned)s->prevByte
+                         : ( b == 0xE9 ) ? 1 : 0;
+            int bit = Bcj2Bit( s, idx );
+            if ( bit < 0 ) return 0;
+
+            if ( bit )
+            {
+                const Byte *v;
+                UInt32      dest;
+
+                if ( b == 0xE8 )
+                {
+                    if ( s->callPos + 4 > s->callLen )
+                        { s->err = SZ_ERR_DATA; return 0; }
+                    v = s->call + s->callPos;
+                    s->callPos += 4;
+                }
+                else
+                {
+                    if ( s->jumpPos + 4 > s->jumpLen )
+                        { s->err = SZ_ERR_DATA; return 0; }
+                    v = s->jump + s->jumpPos;
+                    s->jumpPos += 4;
+                }
+
+                /* stored big-endian and absolute; emitted little-endian and
+                 * relative to the address just past the operand */
+                dest = ( (UInt32)v[0] << 24 ) | ( (UInt32)v[1] << 16 ) |
+                       ( (UInt32)v[2] <<  8 ) |   (UInt32)v[3];
+                dest -= ( s->outPos + 4 );
+
+                if ( !Bcj2Put( s, (Byte)( dest       ) ) ) return 0;
+                if ( !Bcj2Put( s, (Byte)( dest >>  8 ) ) ) return 0;
+                if ( !Bcj2Put( s, (Byte)( dest >> 16 ) ) ) return 0;
+                s->prevByte = (Byte)( dest >> 24 );
+                if ( !Bcj2Put( s, s->prevByte ) ) return 0;
+            }
+            else
+                s->prevByte = b;
+        }
+        else
+            s->prevByte = b;
+    }
+    return 1;
+}
+
+static int SzBcj2Finish( SzBcj2Stage *s )
+{
+    if ( s->oN )
+    {
+        if ( !s->next( s->nextUser, s->obuf, s->oN ) ) return 0;
+        s->oN = 0;
+    }
+    return 1;
+}
+
+/* Absolute packed-stream index feeding coder 'coderIdx' of folder 'fo', or
+ * -1 if that coder is not fed by a packed stream. */
+static int SzCoderPackIndex( SzArchive *a, SzFolder *fo, int coderIdx )
+{
+    int rel = FolderPackForIn( fo, fo->coders[coderIdx].firstIn );
+    UInt32 abs;
+    if ( rel < 0 ) return -1;
+    abs = fo->firstPackStream + (UInt32)rel;
+    if ( abs >= a->numPackStreams ) return -1;
+    return (int)abs;
+}
+
+/* Decode one sub-coder of a BCJ2 folder whole into a fresh buffer.  Sizes are
+ * known from the header, so an oversized stream is refused before any
+ * allocation is attempted.  The caller frees *outBuf. */
+static int SzDecodeSubCoder( SzArchive *a, SzFolder *fo, int coderIdx,
+                             Byte **outBuf, UInt32 *outLen )
+{
+    SzCoder *cd = &fo->coders[coderIdx];
+    int      pk = SzCoderPackIndex( a, fo, coderIdx );
+    UInt32   packOff, packSize, unpackSize;
+    Byte    *packBuf = NULL, *dst = NULL;
+    int      rc = SZ_OK;
+
+    *outBuf = NULL;
+    *outLen = 0;
+    if ( pk < 0 ) return SZ_ERR_FORMAT;
+
+    packOff    = a->baseOffset + a->packOffset[pk];
+    packSize   = a->packSizes[pk];
+    unpackSize = cd->unpackSize;
+
+    if ( packSize > SZ_MAX_BUFFER_SIZE || unpackSize > SZ_MAX_BUFFER_SIZE )
+        return SZ_ERR_NORAM;
+
+    packBuf = (Byte *)malloc( packSize ? packSize : 1 );
+    if ( !packBuf ) return SZ_ERR_MEMORY;
+    if ( fseek( a->fp, (long)packOff, SEEK_SET ) != 0 ||
+         fread( packBuf, 1, packSize, a->fp ) != packSize )
+    {
+        free( packBuf );
+        return SZ_ERR_READ;
+    }
+
+    dst = (Byte *)malloc( unpackSize ? unpackSize : 1 );
+    if ( !dst ) { free( packBuf ); return SZ_ERR_MEMORY; }
+
+    /* Buffered decode: dst doubles as the match dictionary, so this costs
+     * the output size and no separate dictionary. */
+    if ( cd->kind == SZ_C_COPY )
+    {
+        if ( packSize != unpackSize ) rc = SZ_ERR_DATA;
+        else memcpy( dst, packBuf, unpackSize );
+    }
+    else if ( cd->kind == SZ_C_LZMA )
+    {
+        if ( cd->propsSize < 5 ) rc = SZ_ERR_UNSUPPORTED;
+        else
+        {
+            UInt32 dictSize = cd->props[1] | ( (UInt32)cd->props[2] << 8 ) |
+                              ( (UInt32)cd->props[3] << 16 ) |
+                              ( (UInt32)cd->props[4] << 24 );
+            if ( dictSize > SZ_MAX_DICT_SIZE ) rc = SZ_ERR_NORAM;
+            else rc = LzmaDecode( cd->props, cd->propsSize,
+                                  packBuf, packSize, dst, unpackSize );
+        }
+    }
+    else if ( cd->kind == SZ_C_LZMA2 )
+    {
+        if ( cd->propsSize < 1 ) rc = SZ_ERR_UNSUPPORTED;
+        else
+        {
+            Byte pb = cd->props[0];
+            if ( pb > 40 ) rc = SZ_ERR_UNSUPPORTED;
+            else
+            {
+                UInt32 dictSize = ( pb == 40 )
+                    ? 0xFFFFFFFFUL
+                    : ( (UInt32)( 2 | ( pb & 1 ) ) << ( pb / 2 + 11 ) );
+                if ( dictSize > SZ_MAX_DICT_SIZE ) rc = SZ_ERR_NORAM;
+                else rc = Lzma2Decode( pb, packBuf, packSize, dst, unpackSize );
+            }
+        }
+    }
+    else
+        rc = SZ_ERR_UNSUPPORTED;
+
+    free( packBuf );
+    if ( rc != SZ_OK ) { free( dst ); return rc; }
+    *outBuf = dst;
+    *outLen = unpackSize;
+    return SZ_OK;
+}
+
+/* Read a folder's raw (uncoded) packed stream whole - the BCJ2 rc stream. */
+static int SzReadRawPack( SzArchive *a, int packIdx, Byte **outBuf,
+                          UInt32 *outLen )
+{
+    UInt32 off, len;
+    Byte  *buf;
+
+    *outBuf = NULL;
+    *outLen = 0;
+    if ( packIdx < 0 || (UInt32)packIdx >= a->numPackStreams )
+        return SZ_ERR_FORMAT;
+    off = a->baseOffset + a->packOffset[packIdx];
+    len = a->packSizes[packIdx];
+    if ( len > SZ_MAX_BUFFER_SIZE ) return SZ_ERR_NORAM;
+
+    buf = (Byte *)malloc( len ? len : 1 );
+    if ( !buf ) return SZ_ERR_MEMORY;
+    if ( fseek( a->fp, (long)off, SEEK_SET ) != 0 ||
+         fread( buf, 1, len, a->fp ) != len )
+    {
+        free( buf );
+        return SZ_ERR_READ;
+    }
+    *outBuf = buf;
+    *outLen = len;
+    return SZ_OK;
+}
+
 /*---- The sink: folder bytes -> the right file, CRC-checked ---------------- */
 typedef struct {
     SzArchive  *a;
@@ -1702,17 +2306,35 @@ static int SzSinkEmit( void *user, const Byte *data, UInt32 len )
 static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
                            const Byte *want, SzProgress prog, void *user )
 {
-    SzFolder  *fo       = &a->folders[fIdx];
-    UInt32     packOff  = a->baseOffset + a->packOffset[fIdx];
-    UInt32     packSize = a->packSizes[fIdx];
-    SzPackSrc  src;
-    SzSink     sink;
-    SzBcjStage bcj;
-    LzmaEmit   emit     = SzSinkEmit;
-    void      *emitUser = &sink;
-    int       *order    = NULL;
-    int        i, n = 0;
-    int        rc = SZ_OK;
+    SzFolder   *fo       = &a->folders[fIdx];
+    UInt32      packOff, packSize;
+    SzPackSrc   src;
+    SzSink      sink;
+    SzBcjStage  bcj;
+    SzBcj2Stage bcj2;
+    Byte       *callBuf = NULL, *jumpBuf = NULL, *rcBuf = NULL;
+    UInt32      callLen = 0,     jumpLen = 0,     rcLen = 0;
+    LzmaEmit    emit     = SzSinkEmit;
+    void       *emitUser = &sink;
+    int        *order    = NULL;
+    int         mainPack;
+    int         i, n = 0;
+    int         rc = SZ_OK;
+
+    /* Parsed but not decodable (unknown codec, encryption, an odd coder
+     * graph).  Only this folder's entries are lost; the rest extract. */
+    if ( fo->unsupported )                     return SZ_ERR_UNSUPPORTED;
+
+    /* Which packed stream feeds the main coder.  For a plain folder that is
+     * the folder's only one; for BCJ2 it is whichever of the four the bind
+     * pairs say, which need not be the first. */
+    mainPack = fo->isBcj2
+             ? SzCoderPackIndex( a, fo, fo->bcj2Main )
+             : (int)fo->firstPackStream;
+    if ( mainPack < 0 || (UInt32)mainPack >= a->numPackStreams )
+        return SZ_ERR_FORMAT;
+    packOff  = a->baseOffset + a->packOffset[mainPack];
+    packSize = a->packSizes[mainPack];
 
     if ( packSize > SZ_MAX_PACK_SIZE )         return SZ_ERR_TOOBIG;
     if ( fo->unpackSize > SZ_MAX_UNPACK_SIZE ) return SZ_ERR_TOOBIG;
@@ -1756,6 +2378,51 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
     sink.prog      = prog;
     sink.user      = user;
     sink.rc        = SZ_OK;
+
+    bcj2.obuf = NULL;
+    if ( fo->isBcj2 )
+    {
+        /* Bring up the three side streams before touching main.  Their
+         * sub-decodes are sequential and buffered, so their scratch is gone
+         * again before the main dictionary is allocated. */
+        rc = SzDecodeSubCoder( a, fo, fo->bcj2Call, &callBuf, &callLen );
+        if ( rc == SZ_OK )
+            rc = SzDecodeSubCoder( a, fo, fo->bcj2Jump, &jumpBuf, &jumpLen );
+        if ( rc == SZ_OK )
+            rc = SzReadRawPack( a,
+                     (int)( fo->firstPackStream + fo->bcj2RcPack ),
+                     &rcBuf, &rcLen );
+        if ( rc == SZ_OK )
+        {
+            bcj2.obuf = (Byte *)malloc( SZ_BCJ_BUF );
+            if ( !bcj2.obuf ) rc = SZ_ERR_MEMORY;
+        }
+        if ( rc != SZ_OK )
+        {
+            if ( callBuf ) free( callBuf );
+            if ( jumpBuf ) free( jumpBuf );
+            if ( rcBuf )   free( rcBuf );
+            if ( bcj2.obuf ) free( bcj2.obuf );
+            free( order );
+            return rc;
+        }
+
+        bcj2.rc       = rcBuf;   bcj2.rcLen   = rcLen;
+        bcj2.call     = callBuf; bcj2.callLen = callLen;
+        bcj2.jump     = jumpBuf; bcj2.jumpLen = jumpLen;
+        bcj2.outSize  = fo->unpackSize;
+        bcj2.next     = SzSinkEmit;
+        bcj2.nextUser = &sink;
+        Bcj2Init( &bcj2 );
+        if ( !Bcj2RcStart( &bcj2 ) )
+        {
+            free( callBuf ); free( jumpBuf ); free( rcBuf );
+            free( bcj2.obuf ); free( order );
+            return SZ_ERR_DATA;
+        }
+        emit     = SzBcj2Emit;
+        emitUser = &bcj2;
+    }
 
     bcj.buf = NULL;
     if ( fo->filter == SZ_F_BCJ_X86 )
@@ -1813,7 +2480,7 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
                                   ( (UInt32)fo->props[3] << 16 ) |
                                   ( (UInt32)fo->props[4] << 24 );
                 if ( dictSize > SZ_MAX_DICT_SIZE )
-                    rc = SZ_ERR_TOOBIG;
+                    rc = SZ_ERR_NORAM;
                 else
                     rc = LzmaDecodeStream( fo->props, fo->propsSize,
                                            SzReadPacked, &src, packSize,
@@ -1836,7 +2503,7 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
                         ? 0xFFFFFFFFUL
                         : ( (UInt32)( 2 | ( pbyte & 1 ) ) << ( pbyte / 2 + 11 ) );
                     if ( dictSize > SZ_MAX_DICT_SIZE )
-                        rc = SZ_ERR_TOOBIG;
+                        rc = SZ_ERR_NORAM;
                     else
                         rc = Lzma2DecodeStream( pbyte,
                                                 SzReadPacked, &src, packSize,
@@ -1849,6 +2516,16 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
 
     if ( rc == SZ_OK && bcj.buf && !SzBcjFinish( &bcj ) )
         rc = sink.rc ? sink.rc : SZ_ERR_CANCEL;
+
+    if ( fo->isBcj2 )
+    {
+        if ( rc == SZ_OK && !SzBcj2Finish( &bcj2 ) )
+            rc = sink.rc ? sink.rc : SZ_ERR_CANCEL;
+        /* A short call/jump/rc stream shows up as a stage error, not as a
+         * decoder error - the main stream was fine. */
+        if ( rc == SZ_OK && bcj2.err != SZ_OK )
+            rc = bcj2.err;
+    }
 
     /* A sink error (write failure, CRC mismatch, cancel) surfaces as a cancel
      * from the decoder; report what actually went wrong. */
@@ -1867,7 +2544,11 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
         fclose( sink.out );
         remove( sink.curPath );
     }
-    if ( bcj.buf )  free( bcj.buf );
+    if ( bcj.buf )   free( bcj.buf );
+    if ( bcj2.obuf ) free( bcj2.obuf );
+    if ( callBuf )   free( callBuf );
+    if ( jumpBuf )   free( jumpBuf );
+    if ( rcBuf )     free( rcBuf );
     free( order );
     return rc;
 }
@@ -1889,11 +2570,19 @@ int SzExtractAll( SzArchive *a, const char *destDir,
             WriteDirEntry( e, destDir );
     }
 
-    /* 2. Folder by folder, straight from the decoder to the files. */
+    /* 2. Folder by folder, straight from the decoder to the files.  A folder
+     * we cannot decode costs its own entries and nothing more: remember that
+     * it happened, carry on, and report it once at the end.  Aborting here
+     * would throw away every supported entry after the first bad folder. */
     for ( f = 0; f < a->numFolders; f++ )
     {
-        rc = SzStreamFolder( a, f, destDir, NULL, prog, user );
-        if ( rc ) return rc;
+        int frc = SzStreamFolder( a, f, destDir, NULL, prog, user );
+        if ( frc == SZ_ERR_UNSUPPORTED || frc == SZ_ERR_NORAM )
+        {
+            if ( rc == SZ_OK ) rc = frc;      /* first reason wins */
+            continue;
+        }
+        if ( frc ) return frc;
     }
 
     /* 3. Empty files (no folder, not a directory). */
@@ -1902,14 +2591,16 @@ int SzExtractAll( SzArchive *a, const char *destDir,
         const SzEntry *e = &a->entries[i];
         if ( e->folderIndex == -1 && !e->isDir && e->name[0] )
         {
+            int erc;
             if ( prog && !prog( user, i, a->numEntries, e->name ) )
                 return SZ_ERR_CANCEL;
-            rc = WriteEmptyEntry( e, destDir );
-            if ( rc ) return rc;
+            erc = WriteEmptyEntry( e, destDir );
+            if ( erc ) return erc;
         }
     }
 
-    return SZ_OK;
+    /* SZ_OK, or the first skipped folder's reason. */
+    return rc;
 }
 
 /*
@@ -1943,15 +2634,23 @@ int SzExtractItems( SzArchive *a, const int *indices, int count,
             WriteDirEntry( &a->entries[idx], destDir );
     }
 
-    /* 2. Folders holding at least one selected entry. */
-    for ( f = 0; f < a->numFolders && rc == SZ_OK; f++ )
+    /* 2. Folders holding at least one selected entry.  As in SzExtractAll, a
+     * folder we cannot decode is noted and stepped over rather than ending
+     * the run - the rest of the selection still extracts. */
+    for ( f = 0; f < a->numFolders; f++ )
     {
-        int used = 0;
+        int used = 0, frc;
         for ( k = 0; k < a->numEntries; k++ )
             if ( want[k] && a->entries[k].folderIndex == (int)f ) { used = 1; break; }
         if ( !used ) continue;
 
-        rc = SzStreamFolder( a, f, destDir, want, prog, user );
+        frc = SzStreamFolder( a, f, destDir, want, prog, user );
+        if ( frc == SZ_ERR_UNSUPPORTED || frc == SZ_ERR_NORAM )
+        {
+            if ( rc == SZ_OK ) rc = frc;
+            continue;
+        }
+        if ( frc ) { rc = frc; break; }
     }
 
     /* 3. Selected empty files. */
@@ -1991,6 +2690,9 @@ const char *SzErrorText( int code )
     case SZ_ERR_WRITE:      return "Cannot create or write an output file.";
     case SZ_ERR_DATA:       return "Corrupt compressed data.";
     case SZ_ERR_CANCEL:     return "Cancelled.";
+    case SZ_ERR_NORAM:      return "Not enough memory: this archive needs a "
+                                   "larger compression dictionary than this "
+                                   "build can hold.";
     default:                return "Unknown error.";
     }
 }

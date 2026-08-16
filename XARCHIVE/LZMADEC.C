@@ -177,6 +177,13 @@ typedef struct {
     UInt32   pos;              /* next write index within win                */
     UInt32   flushed;          /* index of the first byte not yet emitted    */
     UInt32   total;            /* absolute bytes produced                    */
+    /* Absolute position of the most recent DICTIONARY RESET.  LZMA's position
+     * context and its "how far back may a match reach" limit are both counted
+     * from here, not from the start of the stream - which is what lets an
+     * LZMA2 stream reset its dictionary part-way through.  Multi-threaded
+     * 7-Zip does exactly that: it splits the input into independent blocks
+     * and each one after the first begins with a reset. */
+    UInt32   dictBase;
     LzmaEmit emit;             /* NULL in buffered mode                      */
     void    *user;
     int      err;              /* SZ_ERR_CANCEL once the sink says stop      */
@@ -359,9 +366,13 @@ static void LzmaResetState( CLzma *s )
 /*
  * Decode from the current state into the window until the absolute output
  * position reaches limit (the end of the current LZMA1 stream or LZMA2 chunk).
- * The position used for the pos/literal context is the absolute output
- * position, which is valid as long as the dictionary is only reset at
- * position 0 (enforced by the caller).
+ *
+ * 'pos' is the absolute output position, which is what 'limit' and the
+ * window are expressed in.  Everything the CODEC reasons about, though, is
+ * counted from the last dictionary reset: the pos/literal context, and the
+ * bound on how far back a match may reach.  That distinction is 'rel' below.
+ * With no reset (LZMA1, or LZMA2 with one reset at the start) dictBase is 0
+ * and rel == pos, exactly as before.
  */
 static int LzmaRun( CLzma *s, CRangeDec *rc, CWin *w, UInt32 limit )
 {
@@ -372,11 +383,13 @@ static int LzmaRun( CLzma *s, CRangeDec *rc, CWin *w, UInt32 limit )
     unsigned state  = s->state;
     UInt32   rep0 = s->rep0, rep1 = s->rep1, rep2 = s->rep2, rep3 = s->rep3;
     UInt32   pos  = w->total;
+    UInt32   base = w->dictBase;
     int      ret  = SZ_OK;
 
     while ( pos < limit )
     {
-        unsigned posState = (unsigned)( pos & pbMask );
+        UInt32   rel      = pos - base;
+        unsigned posState = (unsigned)( rel & pbMask );
         UInt16  *prob = probs + oIsMatch + ( state << kNumPosBitsMax ) + posState;
 
         if ( RcBit( rc, prob ) == 0 )
@@ -384,16 +397,16 @@ static int LzmaRun( CLzma *s, CRangeDec *rc, CWin *w, UInt32 limit )
             /*---- literal ---------------------------------------------- */
             UInt16  *probLit;
             unsigned symbol = 1;
-            Byte     prevByte = ( pos == 0 ) ? 0 : WinBack( w, 0 );
+            Byte     prevByte = ( rel == 0 ) ? 0 : WinBack( w, 0 );
             unsigned litState =
-                (unsigned)( ( ( pos & lpMask ) << lc ) + ( prevByte >> ( 8 - lc ) ) );
+                (unsigned)( ( ( rel & lpMask ) << lc ) + ( prevByte >> ( 8 - lc ) ) );
 
             probLit = probs + oLiteral + (UInt32)0x300 * litState;
 
             if ( state >= 7 )
             {
                 Byte matchByte;
-                if ( rep0 + 1 > pos || rep0 + 1 > w->size )
+                if ( rep0 + 1 > rel || rep0 + 1 > w->size )
                     { ret = SZ_ERR_DATA; break; }
                 matchByte = WinBack( w, rep0 );
                 do
@@ -424,7 +437,7 @@ static int LzmaRun( CLzma *s, CRangeDec *rc, CWin *w, UInt32 limit )
             if ( RcBit( rc, prob ) != 0 )
             {
                 /* repeated-distance match */
-                if ( pos == 0 ) { ret = SZ_ERR_DATA; break; }
+                if ( rel == 0 ) { ret = SZ_ERR_DATA; break; }
 
                 prob = probs + oIsRepG0 + state;
                 if ( RcBit( rc, prob ) == 0 )
@@ -435,7 +448,7 @@ static int LzmaRun( CLzma *s, CRangeDec *rc, CWin *w, UInt32 limit )
                     {
                         /* short rep: one byte from rep0 */
                         Byte b;
-                        if ( rep0 + 1 > pos || rep0 + 1 > w->size )
+                        if ( rep0 + 1 > rel || rep0 + 1 > w->size )
                             { ret = SZ_ERR_DATA; break; }
                         state = ( state < 7 ) ? 9 : 11;
                         b = WinBack( w, rep0 );
@@ -518,9 +531,9 @@ static int LzmaRun( CLzma *s, CRangeDec *rc, CWin *w, UInt32 limit )
 
             len += kMatchMinLen;
 
-            /* the distance must point inside what we have already produced,
-             * and inside the window we still hold */
-            if ( rep0 + 1 > pos || rep0 + 1 > w->size )
+            /* the distance must point inside what we have already produced
+             * SINCE THE LAST DICTIONARY RESET, and inside the window we hold */
+            if ( rep0 + 1 > rel || rep0 + 1 > w->size )
                 { ret = SZ_ERR_DATA; break; }
             if ( pos + len > limit )
                 len = limit - pos;    /* clamp (defensive) */
@@ -584,7 +597,7 @@ static int WinOpen( CWin *w, Byte *dst, UInt32 dstLen,
                     UInt32 dictSize, UInt32 unpackSize,
                     LzmaEmit emit, void *user )
 {
-    w->pos = w->flushed = w->total = 0;
+    w->pos = w->flushed = w->total = w->dictBase = 0;
     w->emit = emit;
     w->user = user;
     w->err  = SZ_OK;
@@ -707,8 +720,11 @@ int LzmaDecodeStream( const Byte *props, UInt32 propsSize,
  *                             uncompressed size.
  * Every LZMA chunk is an independent range-coded stream (its own 5-byte init),
  * but the dictionary (the dst buffer) and - unless reset - the LZMA state and
- * probabilities persist across chunks.  We only support a dictionary reset at
- * position 0, which is what 7-Zip emits (one reset at the start of a folder).
+ * probabilities persist across chunks.  A dictionary reset is honoured
+ * ANYWHERE in the stream, not just at position 0: multi-threaded 7-Zip
+ * compresses in independent blocks and every block after the first opens
+ * with one.  CWin::dictBase records where the current dictionary starts, and
+ * LzmaRun counts its position context and match reach from there.
  *===========================================================================*/
 static int Lzma2RunStream( CIn *in, CWin *w, UInt32 unpackTotal )
 {
@@ -745,8 +761,8 @@ static int Lzma2RunStream( CIn *in, CWin *w, UInt32 unpackTotal )
             if ( rcCode != SZ_OK ) break;
 
             size = ( ( (UInt32)hdr[0] << 8 ) | hdr[1] ) + 1;
-            if ( control == 1 && w->total != 0 )
-                { rcCode = SZ_ERR_UNSUPPORTED; break; }
+            if ( control == 1 )
+                w->dictBase = w->total;      /* reset dictionary here */
             if ( w->total + size > unpackTotal ) { rcCode = SZ_ERR_DATA; break; }
 
             while ( size )
@@ -786,8 +802,8 @@ static int Lzma2RunStream( CIn *in, CWin *w, UInt32 unpackTotal )
                 haveProps = 1;
             }
             if ( !haveProps ) { rcCode = SZ_ERR_DATA; break; }
-            if ( reset == 3 && w->total != 0 )
-                { rcCode = SZ_ERR_UNSUPPORTED; break; }
+            if ( reset == 3 )
+                w->dictBase = w->total;         /* reset dictionary here */
             if ( reset >= 1 )
                 LzmaResetState( &s );           /* state + reps + probs */
 

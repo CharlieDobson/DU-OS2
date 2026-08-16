@@ -31,6 +31,11 @@ typedef int            Int32;
 #define SZ_ERR_WRITE      9   /* cannot create / write an output file    */
 #define SZ_ERR_DATA       10  /* corrupt compressed data                 */
 #define SZ_ERR_CANCEL     11  /* user cancelled                          */
+#define SZ_ERR_NORAM      12  /* needs more RAM than this build can use  *
+                               * (an LZMA dictionary over SZ_MAX_DICT_   *
+                               * SIZE).  Distinct from SZ_ERR_MEMORY:    *
+                               * that is "the allocation failed", this   *
+                               * is "we refuse to attempt it".           */
 
 /*---- Configurable limits (keep memory manageable on era hardware) -------- *
  * The extractor refuses archives that would exceed these, with a clear
@@ -49,6 +54,13 @@ typedef int            Int32;
 #define SZ_MAX_FILES        16384               /* entries we will list     */
 #define SZ_MAX_FOLDERS      256                 /* coded folders            */
 #define SZ_MAX_NAME         260                 /* stored path length       */
+
+/* A folder is not one packed stream: a BCJ2 folder consumes four (main, call
+ * and jump inputs plus the raw range-coder stream).  Pack streams therefore
+ * need their own bound rather than borrowing SZ_MAX_FOLDERS. */
+#define SZ_MAX_PACKSTREAMS  1024                /* packed streams total     */
+#define SZ_MAX_CODERS       4                   /* coders in one folder     */
+#define SZ_MAX_FOLDER_STRMS 8                   /* in/out streams per folder*/
 
 /* In RAM at once */
 #define SZ_MAX_DICT_SIZE    (32UL * 1024 * 1024) /* LZMA sliding dictionary */
