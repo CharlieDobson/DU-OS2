@@ -417,6 +417,10 @@ void ArcEntryAttr( ArcFile *a, int index, char *buf, int buflen )
 /* Defined with ArcFsName at the end of this file. */
 static int NamesNeed83( const char *destDir );
 static int g_names83 = -1;             /* per-operation latch, -1 = undecided */
+static int g_flatten = 0;              /* 1 = extract without folder names   */
+
+void ArcSetFlattenPaths( int on ) { g_flatten = on ? 1 : 0; }
+int  ArcFlattenPaths( void )      { return g_flatten; }
 
 /*---- Overwrite confirmation (see ARCDEFS.H) ------------------------------- */
 static ArcOverwriteFn g_owFn   = NULL;
@@ -783,6 +787,22 @@ void ArcFsName( char *dst, int dstSize, const char *name )
         for ( ci = 0; comp[ci] && di < dstSize - 1; ci++ )
             dst[di++] = comp[ci];
     }
+    /* "Extract without paths": keep only the final component.  Done after the
+     * per-component cleaning above, so ".." and device names are already
+     * disarmed and the 8.3 mangling has already run. */
+    if ( g_flatten && di > 0 )
+    {
+        int k, last = -1;
+        for ( k = 0; k < di; k++ )
+            if ( dst[k] == '\\' ) last = k;
+        if ( last >= 0 )
+        {
+            int m = 0;
+            for ( k = last + 1; k < di; k++ ) dst[m++] = dst[k];
+            di = m;
+        }
+    }
+
     if ( di == 0 && dstSize > 1 )        /* never hand back an empty name */
         dst[di++] = '_';
     dst[di] = '\0';

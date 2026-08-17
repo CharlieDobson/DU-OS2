@@ -84,6 +84,20 @@ typedef int            Int32;
  *-------------------------------------------------------------------------- */
 void ArcFsName( char *dst, int dstSize, const char *name );
 
+/*---- Extract with or without the stored folder structure ------------------ *
+ * Off (the default) reproduces the archive's directory tree under the
+ * destination.  On, every file is dropped straight into the destination and
+ * stored directory entries are not created at all - "extract without paths".
+ * ArcFsName reduces a name to its final component, so all five backends
+ * inherit it from the one place they already share; each backend asks
+ * ArcFlattenPaths() before honouring a DIRECTORY entry.
+ *
+ * Flattening makes name collisions much likelier (a\readme + b\readme both
+ * become readme), which the existing overwrite prompt handles.
+ *-------------------------------------------------------------------------- */
+void ArcSetFlattenPaths( int on );
+int  ArcFlattenPaths( void );
+
 /*---- Overwrite confirmation ----------------------------------------------- *
  * When extraction is about to write over a file that already exists, the
  * front end can be asked what to do.  It registers a prompt callback once at

@@ -58,7 +58,7 @@ BEGIN
            FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
            FCF_TITLEBAR | FCF_SYSMENU
     BEGIN
-        LTEXT   "Disk Statistics - Dobson Utilities",
+        LTEXT   "Disk Statistics v1.0 - Dobson Utilities",
                                         IDC_STATIC,  12, 58, 190,  8
         LTEXT   "A drive space and folder-size visualizer.",
                                         IDC_STATIC,  12, 46, 190,  8

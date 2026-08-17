@@ -350,7 +350,7 @@ static int Rar5ExtractIndex( Rar5Archive *z, int idx, const char *destDir )
 
     if ( e->isDir )
     {
-        if ( destDir ) MakeDirs( outPath, 1 );
+        if ( destDir && !ArcFlattenPaths() ) MakeDirs( outPath, 1 );
         return SZ_OK;
     }
     if ( destDir && !ArcWantWrite( outPath ) )

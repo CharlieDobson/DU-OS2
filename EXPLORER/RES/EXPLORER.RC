@@ -226,7 +226,7 @@ BEGIN
            FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
            FCF_TITLEBAR | FCF_SYSMENU
     BEGIN
-        LTEXT   "Explorer - Dobson Utilities",
+        LTEXT   "Explorer v1.0 - Dobson Utilities",
                                         IDC_STATIC,  12, 58, 190,  8
         LTEXT   "File manager for OS/2.",
                                         IDC_STATIC,  12, 46, 190,  8

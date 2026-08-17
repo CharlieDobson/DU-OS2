@@ -43,6 +43,7 @@
 #define IDM_ARCHIVE_EXTRACT             206
 #define IDM_ARCHIVE_INFO                207
 #define IDM_ARCHIVE_TEST                208
+#define IDM_ARCHIVE_PATHS               209   /* checkable: keep folder names */
 #define IDM_HELP_ABOUT                  301
 
 /* controls */

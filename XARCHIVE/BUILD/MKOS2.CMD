@@ -91,7 +91,7 @@ rem     PMMAIN / OS2PLAT / COMPAT are the port; everything else is the shared
 rem     backend, copied from the Win32s tree unchanged.
 rem --------------------------------------------------------------------------
 echo Compiling...
-for %%F in (PMMAIN OS2PLAT COMPAT ARCFILE SZARC ZIPARC RARARC RAR3DEC RAR5ARC DISKARC LZMADEC CRC32) do (
+for %%F in (PMMAIN OS2PLAT COMPAT ARCFILE ARCPREF SZARC ZIPARC RARARC RAR3DEC RAR5ARC DISKARC LZMADEC CRC32) do (
   wcc386 ..\%%F.C %CFLAGS%
   if errorlevel 1 goto failed
   if not exist %%F.obj goto failed
@@ -115,7 +115,7 @@ echo Linking...
 wlink sys os2v2_pm name XARCHIVE.EXE ^
   option quiet option map option stack=%STACK% ^
   option description 'XArchive - Dobson Utilities' ^
-  file PMMAIN.obj,OS2PLAT.obj,COMPAT.obj,ARCFILE.obj,SZARC.obj,ZIPARC.obj, ^
+  file PMMAIN.obj,OS2PLAT.obj,COMPAT.obj,ARCFILE.obj,ARCPREF.obj,SZARC.obj,ZIPARC.obj, ^
        RARARC.obj,RAR3DEC.obj,RAR5ARC.obj,DISKARC.obj,LZMADEC.obj,CRC32.obj, ^
        PMWORKER.obj
 if errorlevel 1 goto failed

@@ -1,6 +1,6 @@
 Open Watcom Linker Version 1.9
 Portions Copyright (c) 1985-2002 Sybase, Inc. All Rights Reserved.
-Created on:       26/08/05 05:19:07
+Created on:       26/08/16 13:57:48
 Executable Image: ENHNOTE.EXE
 creating an OS/2 32-bit Presentation Manager executable
 
@@ -54,12 +54,12 @@ STACK                  STACK          DGROUP         0002:00000700   00040000
 Address        Symbol
 =======        ======
 
-Module: PMMAIN.obj(S:\CPP\OS2\ENHNOTE\PMMAIN.C)
+Module: PMMAIN.obj(S:\CPP\DU-OS2\ENHNOTE\PMMAIN.C)
 0001:000001c0  main_
 0001:00000970+ ClientWndProc
 0001:00000d40+ FindDlgProc
 0001:00000e30+ AboutDlgProc
-Module: EDITCTL.obj(S:\CPP\OS2\ENHNOTE\EDITCTL.C)
+Module: EDITCTL.obj(S:\CPP\DU-OS2\ENHNOTE\EDITCTL.C)
 0001:000032e0+ EditWndProc
 0001:00003730  EditRegister_
 0001:00003760  EditLoad_
@@ -81,7 +81,7 @@ Module: EDITCTL.obj(S:\CPP\OS2\ENHNOTE\EDITCTL.C)
 0001:00003d60  EditDeleteSel_
 0001:00003da0  EditCut_
 0001:00003dc0  EditFindNext_
-Module: GAPBUF.obj(S:\CPP\OS2\ENHNOTE\GAPBUF.C)
+Module: GAPBUF.obj(S:\CPP\DU-OS2\ENHNOTE\GAPBUF.C)
 0001:000043b0  TbInit_
 0001:00004490  TbFree_
 0001:000044d0  TbClear_
@@ -381,4 +381,4 @@ C:\WATCOM/lib386/os2\os2386.lib
 Stack size:  00040000 (262144.)
 Memory size:  000477d6 (292822.)
 Entry point address: 0001:00004fa8
-Link time: 00:00.31
+Link time: 00:00.47

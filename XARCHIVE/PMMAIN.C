@@ -52,6 +52,7 @@
 
 #include "arcdefs.h"
 #include "arcfile.h"
+#include "arcpref.h"
 #include "pmworker.h"
 #include "res/resource.h"
 
@@ -1887,6 +1888,17 @@ static void MenuEnable( HWND hwndMenu, USHORT id, BOOL bEnable )
                               (SHORT)( bEnable ? 0 : MIA_DISABLED ) ) );
 }
 
+/* Tick / untick a menu item.  PM's resource grammar has no CHECKED keyword on
+ * MENUITEM (unlike Windows' RC), so a checkable item's initial state has to be
+ * pushed from WM_INITMENU rather than declared in the .RC. */
+static void MenuCheck( HWND hwndMenu, USHORT id, BOOL bCheck )
+{
+    WinSendMsg( hwndMenu, MM_SETITEMATTR,
+                MPFROM2SHORT( (SHORT)id, TRUE ),
+                MPFROM2SHORT( MIA_CHECKED,
+                              (SHORT)( bCheck ? MIA_CHECKED : 0 ) ) );
+}
+
 /*===========================================================================
  * Client window procedure
  *===========================================================================*/
@@ -1959,6 +1971,10 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
             MenuEnable( hwndMenu, IDM_ARCHIVE_EXTRACT, have );
             MenuEnable( hwndMenu, IDM_ARCHIVE_TEST,    have );
             MenuEnable( hwndMenu, IDM_ARCHIVE_INFO,    have );
+            /* Ticked = folder names KEPT, so the tick is the inverse of the
+             * backend's flatten flag.  Pushed here every time the pulldown
+             * opens, which also supplies the initial state. */
+            MenuCheck( hwndMenu, IDM_ARCHIVE_PATHS, (BOOL)!ArcFlattenPaths() );
         }
         return (MRESULT)FALSE;
     }
@@ -1983,6 +1999,12 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
             break;
         case IDM_ARCHIVE_TEST:
             DoTest( hwnd );
+            break;
+        case IDM_ARCHIVE_PATHS:
+            /* Session only; WM_INITMENU redraws the tick next time the
+             * Archive pulldown opens, so nothing to update here. */
+            ArcSetFlattenPaths( !ArcFlattenPaths() );
+            ArcPrefSave();               /* remembered for next time */
             break;
         case IDM_FILE_EXIT:
             WinPostMsg( hwnd, WM_CLOSE, MPVOID, MPVOID );
@@ -2255,6 +2277,12 @@ int main( int argc, char *argv[] )
      * the shared backend); the hook runs on the worker and blocks until the
      * UI thread's dialog answers - see OverwriteHook / ArcOnAsk. */
     ArcSetOverwritePrompt( OverwriteHook, NULL );
+
+    /* Preferences beside the executable, in the same XARCHIVE.INI the DOS and
+     * Win32s builds use.  The Archive pulldown's tick comes from
+     * WM_INITMENU, so loading here is all that is needed. */
+    ArcPrefSetFileFromExe( argv[0] );
+    ArcPrefLoad();
 
     /* An archive named on the command line (or by a WPS association). */
     if ( argc > 1 && argv[1][0] )

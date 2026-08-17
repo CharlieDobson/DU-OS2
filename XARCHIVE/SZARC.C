@@ -1748,6 +1748,7 @@ static void WriteDirEntry( const SzEntry *e, const char *destDir )
 {
     char outPath[SZ_MAX_NAME * 4];
     if ( !destDir ) return;                    /* test only */
+    if ( ArcFlattenPaths() ) return;           /* extracting without paths */
     BuildPath( outPath, sizeof( outPath ), destDir, e->name );
     MakeTree( outPath );
 }

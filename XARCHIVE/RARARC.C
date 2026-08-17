@@ -317,7 +317,7 @@ static int RarExtractIndex( RarArchive *z, int idx, const char *destDir )
 
     if ( e->isDir )
     {
-        if ( destDir ) MakeDirs( outPath, 1 );
+        if ( destDir && !ArcFlattenPaths() ) MakeDirs( outPath, 1 );
         return SZ_OK;
     }
     if ( destDir && !ArcWantWrite( outPath ) )
@@ -533,7 +533,7 @@ static int SolidExtract( RarArchive *z, const int *indices, int count,
     else
         for ( i = 0; i < z->numEntries; i++ ) req[i] = 1;
 
-    if ( destDir )                            /* NULL destDir = test only */
+    if ( destDir && !ArcFlattenPaths() )      /* NULL destDir = test only */
         for ( i = 0; i < z->numEntries; i++ ) /* requested directories */
             if ( req[i] && z->entries[i].isDir && z->entries[i].name[0] )
             {

@@ -130,7 +130,7 @@ BEGIN
            FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
            FCF_TITLEBAR | FCF_SYSMENU
     BEGIN
-        LTEXT   "Enhanced Notepad - Dobson Utilities",
+        LTEXT   "Enhanced Notepad v1.0 - Dobson Utilities",
                                         IDC_STATIC,  12, 54, 190,  8
         LTEXT   "A simple text editor for large files.",
                                         IDC_STATIC,  12, 42, 190,  8

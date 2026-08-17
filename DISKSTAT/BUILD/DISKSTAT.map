@@ -1,6 +1,6 @@
 Open Watcom Linker Version 1.9
 Portions Copyright (c) 1985-2002 Sybase, Inc. All Rights Reserved.
-Created on:       26/08/05 17:51:08
+Created on:       26/08/16 13:57:25
 Executable Image: DISKSTAT.EXE
 creating an OS/2 32-bit Presentation Manager executable
 
@@ -54,7 +54,7 @@ STACK                  STACK          DGROUP         0002:000123e0   00040000
 Address        Symbol
 =======        ======
 
-Module: PMMAIN.obj(S:\CPP\OS2\DISKSTAT\PMMAIN.CPP)
+Module: PMMAIN.obj(S:\CPP\DU-OS2\DISKSTAT\PMMAIN.CPP)
 0002:000006c0+ long unsigned near hab
 0002:000006c4+ long unsigned near hwndFrame
 0002:000006c8  long unsigned near hwndClient
@@ -77,7 +77,7 @@ Module: PMMAIN.obj(S:\CPP\OS2\DISKSTAT\PMMAIN.CPP)
 0001:00001240+ void near * near TreePaneWndProc( long unsigned, long unsigned, void near *, void near * )
 0001:00001480+ void near * near ScanDlgProc( long unsigned, long unsigned, void near *, void near * )
 0001:000014f0+ void near * near AboutDlgProc( long unsigned, long unsigned, void near *, void near * )
-Module: DRAW.obj(S:\CPP\OS2\DISKSTAT\DRAW.CPP)
+Module: DRAW.obj(S:\CPP\DU-OS2\DISKSTAT\DRAW.CPP)
 0001:00001530  void near DsSetRgbMode( long unsigned )
 0001:00001560  long near DsRowHeight( long unsigned )
 0001:000015b0  long near DsHeaderHeight( long unsigned )
@@ -87,7 +87,7 @@ Module: DRAW.obj(S:\CPP\OS2\DISKSTAT\DRAW.CPP)
 0001:000020c0  void near DrawPieLegend( long unsigned, _RECTL near * )
 0001:000022d0  void near DrawTreeView( long unsigned, _RECTL near * )
 0001:000030c0  void near DrawStatusBar( long unsigned, _RECTL near * )
-Module: SCAN.obj(S:\CPP\OS2\DISKSTAT\SCAN.CPP)
+Module: SCAN.obj(S:\CPP\DU-OS2\DISKSTAT\SCAN.CPP)
 0001:00003400  long unsigned near ScanBusy()
 0001:00003440  void near ScanCancel()
 0001:00003480  char const near * near ScanProgressPath()
@@ -99,7 +99,7 @@ Module: SCAN.obj(S:\CPP\OS2\DISKSTAT\SCAN.CPP)
 0001:000044b0  void near CollapseNode( int )
 0001:000045a0  void near ScanDrive( long unsigned )
 0001:00004650  void near PopulateDriveCombo( long unsigned )
-Module: PMWORKER.obj(S:\CPP\OS2\COMMON\PMWORKER.C)
+Module: PMWORKER.obj(S:\CPP\DU-OS2\COMMON\PMWORKER.C)
 0001:00004800  PmWorkerInit_
 0001:00004880  PmWorkerStart_
 0001:000048e0  PmWorkerIsBusy_
@@ -537,4 +537,4 @@ C:\WATCOM/lib386/os2\os2386.lib
 Stack size:  00040000 (262144.)
 Memory size:  0005b7e7 (374759.)
 Entry point address: 0001:00004b28
-Link time: 00:00.78
+Link time: 00:00.09

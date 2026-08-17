@@ -1,6 +1,6 @@
 Open Watcom Linker Version 1.9
 Portions Copyright (c) 1985-2002 Sybase, Inc. All Rights Reserved.
-Created on:       26/08/05 05:06:04
+Created on:       26/08/16 13:58:03
 Executable Image: EXPLORER.EXE
 creating an OS/2 32-bit Presentation Manager executable
 
@@ -54,7 +54,7 @@ STACK                  STACK          DGROUP         0002:000970e0   00040000
 Address        Symbol
 =======        ======
 
-Module: PMMAIN.obj(S:\CPP\OS2\EXPLORER\PMMAIN.CPP)
+Module: PMMAIN.obj(S:\CPP\DU-OS2\EXPLORER\PMMAIN.CPP)
 0002:00001570  long unsigned near hab
 0002:00001574+ long unsigned near hwndFrame
 0002:00001578  long unsigned near hwndClient
@@ -80,18 +80,18 @@ Module: PMMAIN.obj(S:\CPP\OS2\EXPLORER\PMMAIN.CPP)
 0001:00000730+ void near * near ClientWndProc( long unsigned, long unsigned, void near *, void near * )
 0001:00002970+ void near * near AboutDlgProc( long unsigned, long unsigned, void near *, void near * )
 0001:000029b0  main_
-Module: DRIVES.obj(S:\CPP\OS2\EXPLORER\DRIVES.CPP)
+Module: DRIVES.obj(S:\CPP\DU-OS2\EXPLORER\DRIVES.CPP)
 0001:00002e30  int near EnumDrives()
 0001:000030f0  int near GetDriveCount()
 0001:00003100  _DRIVEINFO near * near GetDriveInfo( int )
 0001:00003120  _DRIVEINFO near * near FindDriveInfo( char )
 0001:00003170  void near PopulatePathCombo( long unsigned )
-Module: DIRVIEW.obj(S:\CPP\OS2\EXPLORER\DIRVIEW.CPP)
+Module: DIRVIEW.obj(S:\CPP\DU-OS2\EXPLORER\DIRVIEW.CPP)
 0001:00003200  void near FreeFileIcons()
 0001:00003250  int near EnumDirectory( char const near *, long unsigned )
 0001:00003740  int near GetFileCount()
 0001:00003750  _FILEITEM near * near GetFileItem( int )
-Module: PAINT.obj(S:\CPP\OS2\EXPLORER\PAINT.CPP)
+Module: PAINT.obj(S:\CPP\DU-OS2\EXPLORER\PAINT.CPP)
 0002:0008d9c8  long unsigned near hwndVScroll
 0002:0008d9cc  long unsigned near hwndHScroll
 0001:00003770  void near FreeViewBitmaps()
@@ -110,13 +110,13 @@ Module: PAINT.obj(S:\CPP\OS2\EXPLORER\PAINT.CPP)
 0001:00004100  int near HitTestFile( long unsigned, long, long )
 0001:00004120  void near DrawDrives( long unsigned, _RECTL const near * )
 0001:00004550  void near DrawFiles( long unsigned, _RECTL const near * )
-Module: TOOLBAR.obj(S:\CPP\OS2\EXPLORER\TOOLBAR.CPP)
+Module: TOOLBAR.obj(S:\CPP\DU-OS2\EXPLORER\TOOLBAR.CPP)
 0002:0008d9e8+ long unsigned near hwndToolbar
 0002:0008d9ec  long unsigned near hwndPathCombo
 0001:00005ad0  long unsigned near RegisterToolbarClass( long unsigned )
 0001:00005af0  long unsigned near CreateToolbar( long unsigned )
 0001:00005b60  void near LayoutToolbar( long unsigned )
-Module: STATBAR.obj(S:\CPP\OS2\EXPLORER\STATBAR.CPP)
+Module: STATBAR.obj(S:\CPP\DU-OS2\EXPLORER\STATBAR.CPP)
 0001:000063b0  long unsigned near RegisterStatusBarClass( long unsigned )
 0001:000063d0  long unsigned near CreateStatusBar( long unsigned )
 0001:00006410  void near LayoutStatusBar( long unsigned )
@@ -124,13 +124,13 @@ Module: STATBAR.obj(S:\CPP\OS2\EXPLORER\STATBAR.CPP)
 0001:00006650  void near ClearStatusBar()
 0001:00006690  void near UpdateStatusSelection()
 0002:0008da04+ long unsigned near hwndStatusBar
-Module: SEARCH.obj(S:\CPP\OS2\EXPLORER\SEARCH.CPP)
+Module: SEARCH.obj(S:\CPP\DU-OS2\EXPLORER\SEARCH.CPP)
 0002:0008da10+ long unsigned near hwndSearchFrame
 0001:000067f0  long unsigned near SearchBusy()
 0001:00006840  long unsigned near SearchShutdown()
 0001:00007850  long unsigned near RegisterSearchClass( long unsigned )
 0001:00007870  long unsigned near OpenSearchWindow( long unsigned )
-Module: FILEOPS.obj(S:\CPP\OS2\EXPLORER\FILEOPS.CPP)
+Module: FILEOPS.obj(S:\CPP\DU-OS2\EXPLORER\FILEOPS.CPP)
 0001:00007900  long unsigned near IsExecFile( char const near * )
 0001:00007b70  long unsigned near FileOpsBusy()
 0001:00007be0+ void near * near CopyMoveDlgProc( long unsigned, long unsigned, void near *, void near * )
@@ -153,7 +153,7 @@ Module: FILEOPS.obj(S:\CPP\OS2\EXPLORER\FILEOPS.CPP)
 0001:0000bb60  long unsigned near FileOpsShutdown()
 0001:0000bbb0  void near DoPasteFromList( long unsigned, _EXPPATHLIST const near *, long unsigned, char const near * )
 0001:0000bc70  void near DoPaste( long unsigned )
-Module: PROPS.obj(S:\CPP\OS2\EXPLORER\PROPS.CPP)
+Module: PROPS.obj(S:\CPP\DU-OS2\EXPLORER\PROPS.CPP)
 0001:0000bec0+ void near FormatDateTime( _FDATE, _FTIME, char near * )
 0001:0000c300+ void near * near FilePropsDlgProc( long unsigned, long unsigned, void near *, void near * )
 0001:0000c530* void near DoFileProperties( long unsigned, int )
@@ -162,13 +162,13 @@ Module: PROPS.obj(S:\CPP\OS2\EXPLORER\PROPS.CPP)
 0001:0000c9b0  void near DoProperties( long unsigned, int )
 0001:0000cd20+ void near * near DrivePropsDlgProc( long unsigned, long unsigned, void near *, void near * )
 0001:0000ce10  void near DoDriveProperties( long unsigned, int )
-Module: NETWORK.obj(S:\CPP\OS2\EXPLORER\NETWORK.CPP)
+Module: NETWORK.obj(S:\CPP\DU-OS2\EXPLORER\NETWORK.CPP)
 0001:0000d0e0  long unsigned near IsNetworkPresent()
 0001:0000d6e0  void near ReconnectNetDrives( long unsigned )
 0001:0000ef20  void near OpenConnectNetDrive( long unsigned )
 0001:0000ef40  void near OpenDisconnectNetDrive( long unsigned )
 0001:0000ef60  void near DisconnectNetDriveDirect( long unsigned, char )
-Module: PMWORKER.obj(S:\CPP\OS2\COMMON\PMWORKER.C)
+Module: PMWORKER.obj(S:\CPP\DU-OS2\COMMON\PMWORKER.C)
 0001:0000efc0  PmWorkerInit_
 0001:0000f040  PmWorkerStart_
 0001:0000f0a0  PmWorkerIsBusy_
@@ -588,4 +588,4 @@ C:\WATCOM/lib386/os2\os2386.lib
 Stack size:  00040000 (262144.)
 Memory size:  000e9431 (955441.)
 Entry point address: 0001:0000f46e
-Link time: 00:00.78
+Link time: 00:00.09

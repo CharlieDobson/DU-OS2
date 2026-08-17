@@ -643,7 +643,7 @@ static int DiskExtractIndex( DiskArchive *d, int idx, const char *destDir )
 
     if ( e->isDir )
     {
-        if ( destDir ) MakeDirs( outPath, 1 );
+        if ( destDir && !ArcFlattenPaths() ) MakeDirs( outPath, 1 );
         return SZ_OK;
     }
     if ( destDir && !ArcWantWrite( outPath ) )

@@ -48,6 +48,11 @@ BEGIN
         MENUITEM "~Extract...\tCtrl+E",     IDM_ARCHIVE_EXTRACT
         MENUITEM "~Test integrity\tCtrl+T", IDM_ARCHIVE_TEST
         MENUITEM SEPARATOR
+        /* Ticked at startup to match the default (folder names kept).  PM has
+         * no CHECKED keyword on MENUITEM the way Windows' RC does, so the
+         * initial tick is set from WM_INITMENU in PMMAIN.C instead. */
+        MENUITEM "Extract ~folder names",   IDM_ARCHIVE_PATHS
+        MENUITEM SEPARATOR
         MENUITEM "~Info...\tCtrl+I",        IDM_ARCHIVE_INFO
     END
 
