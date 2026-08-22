@@ -136,7 +136,9 @@ struct Rar5Archive {
     long      *dataOffset;
 };
 
-/* Make room for one more entry.  0 when out of memory. */
+/* Make room for one more entry.  1 on success, 0 when out of memory, -1 when
+ * the entry limit is what stopped us (see RarGrow in RARARC.C - the caller
+ * has to report those two differently). */
 static int Rar5Grow( Rar5Archive *z )
 {
     int        n;
@@ -144,9 +146,10 @@ static int Rar5Grow( Rar5Archive *z )
     long      *nd;
 
     if ( z->numEntries < z->cap ) return 1;
+    if ( (UInt32)z->numEntries >= SZ_MAX_FILES ) return -1;
 
     n = z->cap ? z->cap * 2 : 32;
-    if ( n > SZ_MAX_FILES ) n = SZ_MAX_FILES;
+    if ( (UInt32)n > SZ_MAX_FILES ) n = (int)SZ_MAX_FILES;
     if ( n <= z->numEntries ) return 0;
 
     ne = (Rar5Entry *)realloc( z->entries, (size_t)n * sizeof( Rar5Entry ) );
@@ -260,7 +263,7 @@ int Rar5Open( const char *path, Rar5Archive **out )
         if ( type == H5_ENDARC )   { free( hdr ); break; }
         if ( type == H5_ENCRYPT )  { free( hdr ); rc = SZ_ERR_UNSUPPORTED; break; }
 
-        if ( type == H5_FILE && z->numEntries < SZ_MAX_FILES )
+        if ( type == H5_FILE )
         {
             UInt32 fileFlags = BrVint( &b );
             UInt32 unpSize    = BrVint( &b );
@@ -279,8 +282,16 @@ int Rar5Open( const char *path, Rar5Archive **out )
                 Rar5Entry *e;
                 UInt32 j; int k = 0, last;
                 UInt32 avail = (UInt32)( b.end - b.p );
+                int    g     = Rar5Grow( z );
 
-                if ( !Rar5Grow( z ) ) { free( hdr ); rc = SZ_ERR_MEMORY; break; }
+                if ( g <= 0 )
+                {
+                    free( hdr );
+                    rc = ( g < 0 )
+                       ? ArcCheckEntryCount( (UInt32)z->numEntries + 1 )
+                       : SZ_ERR_MEMORY;
+                    break;
+                }
                 e = &z->entries[z->numEntries];
                 if ( nameLen > avail ) nameLen = avail;
 
@@ -314,7 +325,6 @@ int Rar5Open( const char *path, Rar5Archive **out )
 
         free( hdr );
         pos = pos + 4 + vLen + (long)headSize + (long)dataSize;
-        if ( z->numEntries >= SZ_MAX_FILES ) break;
     }
 
     if ( rc != SZ_OK ) { Rar5Close( z ); return rc; }

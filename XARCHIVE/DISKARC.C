@@ -61,6 +61,7 @@ struct DiskArchive {
     int            numEntries;
     int            entryCap;          /* entries the table can hold          */
     DiskEntry     *entries;           /* grown on demand up to SZ_MAX_FILES  */
+    int            loadErr;           /* why the walk stopped early, or 0    */
 };
 
 /* Make room for one more directory entry.  The table doubles from a small
@@ -72,9 +73,10 @@ static int DiskGrow( DiskArchive *d )
     DiskEntry *ne;
 
     if ( d->numEntries < d->entryCap ) return 1;
+    if ( (UInt32)d->numEntries >= SZ_MAX_FILES ) return -1;   /* limit, not RAM */
 
     n = d->entryCap ? d->entryCap * 2 : 64;
-    if ( n > SZ_MAX_FILES ) n = SZ_MAX_FILES;
+    if ( (UInt32)n > SZ_MAX_FILES ) n = (int)SZ_MAX_FILES;
     if ( n <= d->numEntries ) return 0;
 
     ne = (DiskEntry *)realloc( d->entries, (size_t)n * sizeof( DiskEntry ) );
@@ -397,10 +399,21 @@ static void AddEntry( DiskArchive *d, const char *prefix, const char *name,
     UInt32     cluster;
     unsigned   attr = rec[0x0B];
     char       path[SZ_MAX_NAME];
-    int        pn;
+    int        pn, g;
 
-    if ( d->numEntries >= SZ_MAX_FILES ) return;
-    if ( !DiskGrow( d ) ) return;
+    /* The walk is recursive and returns nothing, so a refusal is recorded on
+     * the archive and every level unwinds on it; DiskLoad turns it into the
+     * open's return code rather than handing back a listing that stops short. */
+    if ( d->loadErr != SZ_OK ) return;
+
+    g = DiskGrow( d );
+    if ( g <= 0 )
+    {
+        d->loadErr = ( g < 0 )
+                   ? ArcCheckEntryCount( (UInt32)d->numEntries + 1 )
+                   : SZ_ERR_MEMORY;
+        return;
+    }
 
     /* Build "prefix\name" (or just "name" at the root). */
     pn = 0;
@@ -473,7 +486,7 @@ static void ParseDir( DiskArchive *d, const unsigned char *buf, UInt32 len,
 
         if ( attr & ATTR_VOLUME ) { lfnActive = 0; continue; } /* vol label */
         if ( first == 0x2E )      { lfnActive = 0; continue; } /* . or ..   */
-        if ( d->numEntries >= SZ_MAX_FILES ) break;
+        if ( d->loadErr != SZ_OK ) break;
 
         FormatShort( rec, rec[0x0C], short83 );
 
@@ -525,6 +538,9 @@ static int DiskLoad( DiskArchive *d, long imgLen, DiskArchive **out )
 
     ParseDir( d, rootBuf, d->rootDirSectors * d->bytesPerSector, "", 0 );
     free( rootBuf );
+
+    if ( d->loadErr != SZ_OK )
+    { rc = d->loadErr; DiskClose( d ); return rc; }
 
     DiskTrim( d );
     *out = d;

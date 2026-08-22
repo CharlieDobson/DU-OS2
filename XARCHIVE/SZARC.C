@@ -197,7 +197,10 @@ static int PsEnsure( ParseState *ps, UInt32 n )
     Byte   *nA, *nB, *nC;
     UInt32 *nCrc;
 
-    if ( n > SZ_MAX_FILES ) return SZ_ERR_TOOBIG;
+    {
+        int vrc = ArcCheckEntryCount( n );
+        if ( vrc != SZ_OK ) return vrc;
+    }
     if ( n < 16 ) n = 16;               /* avoid a run of tiny reallocs, and
                                            keep the scratch non-NULL even for
                                            an archive with no files at all */
@@ -785,8 +788,8 @@ static int ReadSubStreamsInfo( ParseState *ps )
     totalSubs = 0;
     for ( f = 0; f < a->numFolders; f++ )
         totalSubs += a->numUnpack[f];
-    if ( totalSubs > SZ_MAX_FILES )
-        return SZ_ERR_TOOBIG;
+    rc = ArcCheckEntryCount( totalSubs );
+    if ( rc != SZ_OK ) return rc;
 
     rc = PsEnsure( ps, totalSubs );
     if ( rc ) return rc;
@@ -988,8 +991,8 @@ static int ReadFilesInfo( ParseState *ps )
     int        rc;
 
     numFiles = RdNum( r );
-    if ( numFiles > SZ_MAX_FILES )
-        return SZ_ERR_TOOBIG;
+    rc = ArcCheckEntryCount( numFiles );
+    if ( rc != SZ_OK ) return rc;
 
     /* Size the scratch and the entry table to what this archive actually holds
      * (the scratch may already be larger from SubStreamsInfo - PsEnsure only
@@ -1285,9 +1288,14 @@ static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
 
     /* Buffered: both the packed and the unpacked stream are held whole, so
      * this path is bounded by the in-RAM cap, not the streaming one.  It is
-     * used for the encoded archive header, which is small. */
-    if ( packSize > SZ_MAX_BUFFER_SIZE )        return SZ_ERR_TOOBIG;
-    if ( fo->unpackSize > SZ_MAX_BUFFER_SIZE )  return SZ_ERR_TOOBIG;
+     * used for the encoded archive header, which is small.
+     *
+     * NORAM, not TOOBIG: that cap is a MEASURED memory budget now, so this is
+     * "more than this machine can spare", not "past a limit somebody wrote
+     * down".  Getting that wrong tells the user to go and shrink an archive
+     * when what they need is to free some memory. */
+    if ( packSize > SZ_MAX_BUFFER_SIZE )        return SZ_ERR_NORAM;
+    if ( fo->unpackSize > SZ_MAX_BUFFER_SIZE )  return SZ_ERR_NORAM;
 
     packBuf = (Byte *)malloc( packSize ? packSize : 1 );
     if ( !packBuf ) return SZ_ERR_MEMORY;
@@ -2681,19 +2689,23 @@ const char *SzErrorText( int code )
     case SZ_OK:             return "OK";
     case SZ_ERR_OPEN:       return "Cannot open the archive file.";
     case SZ_ERR_READ:       return "Read error or truncated archive.";
-    case SZ_ERR_SIG:        return "Not a 7z archive.";
+    case SZ_ERR_SIG:        return "Not an archive this program recognises "
+                                   "(no 7z, zip, RAR or FAT image found in "
+                                   "it).";
     case SZ_ERR_CRC:        return "CRC mismatch (corrupt archive).";
     case SZ_ERR_FORMAT:     return "Malformed or unexpected archive header.";
     case SZ_ERR_UNSUPPORTED:return "Unsupported archive feature, compression "
                                    "method, or encryption.";
     case SZ_ERR_MEMORY:     return "Out of memory.";
-    case SZ_ERR_TOOBIG:     return "Archive exceeds a configured size limit.";
+    case SZ_ERR_TOOBIG:     return "Archive exceeds a structural limit of this "
+                                   "extractor (entry count, or a size the "
+                                   "format should never reach).";
     case SZ_ERR_WRITE:      return "Cannot create or write an output file.";
     case SZ_ERR_DATA:       return "Corrupt compressed data.";
     case SZ_ERR_CANCEL:     return "Cancelled.";
-    case SZ_ERR_NORAM:      return "Not enough memory: this archive needs a "
-                                   "larger compression dictionary than this "
-                                   "build can hold.";
+    case SZ_ERR_NORAM:      return "Not enough memory: this archive needs more "
+                                   "RAM in one block than this machine can "
+                                   "spare.";
     default:                return "Unknown error.";
     }
 }

@@ -94,8 +94,37 @@ static const char *ValueOf( const char *line )
 /* Is this one of ours?  Foreign keys are preserved verbatim on save. */
 static int IsKnownKey( const char *line )
 {
-    return KeyIs( line, "ExtractFolders" );
+    return KeyIs( line, "ExtractFolders" ) ||
+           KeyIs( line, "FolderView" )     ||
+           KeyIs( line, "MemoryLimitMB" );
 }
+
+/* Display setting with nowhere else to live (see ARCPREF.H). */
+static int g_folderView = 1;
+
+int  ArcPrefFolderView( void )       { return g_folderView; }
+void ArcPrefSetFolderView( int on )  { g_folderView = on ? 1 : 0; }
+
+/* Non-negative decimal, or 0 for anything that is not one.  atoi would do,
+ * but it drags in a locale-aware conversion this module has no other use
+ * for, and a stray "-1" reading as a huge unsigned would be worse than a 0. */
+static UInt32 ParseMB( const char *v )
+{
+    UInt32 n = 0;
+
+    v = SkipBlanks( v );
+    if ( *v < '0' || *v > '9' ) return 0;
+    while ( *v >= '0' && *v <= '9' )
+    {
+        if ( n > 100000UL ) return 100000UL;      /* far past any real machine */
+        n = n * 10 + (UInt32)( *v++ - '0' );
+    }
+    return n;
+}
+
+/* The limit the user last set, remembered so a save writes back what was
+ * read rather than the figure the measurement happened to land on. */
+static UInt32 g_memLimitMB = 0;
 
 /*---- Load -----------------------------------------------------------------*/
 
@@ -120,6 +149,16 @@ void ArcPrefLoad( void )
              * positive reading keeps the file readable by hand. */
             const char *v = ValueOf( p );
             ArcSetFlattenPaths( ( *v == '0' ) ? 1 : 0 );
+        }
+        else if ( KeyIs( p, "FolderView" ) )
+        {
+            const char *v = ValueOf( p );
+            g_folderView = ( *v == '0' ) ? 0 : 1;
+        }
+        else if ( KeyIs( p, "MemoryLimitMB" ) )
+        {
+            g_memLimitMB = ParseMB( ValueOf( p ) );
+            ArcMemSetLimit( g_memLimitMB );      /* 0 = measure the machine */
         }
     }
     fclose( f );
@@ -157,6 +196,9 @@ int ArcPrefSave( void )
     fprintf( f, "; XArchive preferences\n" );
     fprintf( f, "%s\n", PREF_SECTION );
     fprintf( f, "ExtractFolders=%d\n", ArcFlattenPaths() ? 0 : 1 );
+    fprintf( f, "FolderView=%d\n", g_folderView );
+    fprintf( f, "; MemoryLimitMB: 0 measures the machine\n" );
+    fprintf( f, "MemoryLimitMB=%lu\n", (unsigned long)g_memLimitMB );
     {
         int i;
         for ( i = 0; i < nkeep; i++ )

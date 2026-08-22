@@ -68,8 +68,10 @@ struct RarArchive {
     UInt16   *headFlags;                 /* file-header flags                */
 };
 
-/* Make room for one more entry.  Returns 0 (and leaves the archive usable)
- * when out of memory. */
+/* Make room for one more entry.  Returns 1 on success, 0 when out of memory,
+ * and -1 when the entry limit itself is in the way - the caller has to tell
+ * those two apart, because one is a broken machine and the other is an
+ * archive this machine cannot hold the listing for. */
 static int RarGrow( RarArchive *z )
 {
     int       n;
@@ -78,9 +80,10 @@ static int RarGrow( RarArchive *z )
     UInt16   *nf;
 
     if ( z->numEntries < z->cap ) return 1;
+    if ( (UInt32)z->numEntries >= SZ_MAX_FILES ) return -1;
 
     n = z->cap ? z->cap * 2 : 32;
-    if ( n > SZ_MAX_FILES ) n = SZ_MAX_FILES;
+    if ( (UInt32)n > SZ_MAX_FILES ) n = (int)SZ_MAX_FILES;
     if ( n <= z->numEntries ) return 0;
 
     ne = (RarEntry *)realloc( z->entries, (size_t)n * sizeof( RarEntry ) );
@@ -233,9 +236,18 @@ int RarOpen( const char *path, RarArchive **out )
             if ( nameOff + (int)nameSize > (int)headSize )
                 nameSize = ( headSize > nameOff ) ? (UInt16)( headSize - nameOff ) : 0;
 
-            if ( !RarGrow( z ) ) { free( hdr ); rc = SZ_ERR_MEMORY; break; }
+            {
+                int g = RarGrow( z );
+                if ( g <= 0 )
+                {
+                    free( hdr );
+                    rc = ( g < 0 )
+                       ? ArcCheckEntryCount( (UInt32)z->numEntries + 1 )
+                       : SZ_ERR_MEMORY;
+                    break;
+                }
+            }
 
-            if ( z->numEntries < SZ_MAX_FILES )
             {
                 RarEntry *e = &z->entries[z->numEntries];
                 const Byte *np = hdr + nameOff;
@@ -282,8 +294,6 @@ int RarOpen( const char *path, RarArchive **out )
             }
             pos = pos + headSize + (long)addSize;
         }
-
-        if ( z->numEntries >= SZ_MAX_FILES ) break;
     }
 
     if ( rc != SZ_OK ) { RarClose( z ); return rc; }
@@ -358,9 +368,11 @@ static int RarExtractIndex( RarArchive *z, int idx, const char *destDir )
         if ( e->unpVer < 20 )
             return SZ_ERR_UNSUPPORTED;             /* RAR 1.x (v1)            */
         /* Non-solid RAR decodes to a buffer, so this entry has to fit in RAM
-         * whole (unlike the 7z folder path, which streams). */
+         * whole (unlike the 7z folder path, which streams).  NORAM rather
+         * than TOOBIG: the cap is a measured memory budget, so this is a
+         * shortage of RAM and not a configured limit (see SzDecodeFolder). */
         if ( e->packed > SZ_MAX_BUFFER_SIZE || e->size > SZ_MAX_BUFFER_SIZE )
-            return SZ_ERR_TOOBIG;
+            return SZ_ERR_NORAM;
 
         packBuf = (Byte *)malloc( e->packed ? e->packed : 1 );
         if ( !packBuf ) return SZ_ERR_MEMORY;

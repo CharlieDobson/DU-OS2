@@ -51,11 +51,21 @@ const char *ArcErrorText( int code );
  * ARE handled and which are not.  Safe to call with a NULL archive. */
 const char *ArcUnsupportedHint( ArcFile *a );
 
-/* Explanation for SZ_ERR_NORAM: the archive needs a compression dictionary
- * bigger than this build will hold in memory.  Unlike SZ_ERR_MEMORY (an
- * allocation that failed) this one is a refusal, and the user can act on it
- * by re-creating the archive with a smaller dictionary. */
+/* Explanation for SZ_ERR_NORAM: the archive needs more memory in one block
+ * than this machine can spare - usually a compression dictionary, sometimes
+ * a whole-stream buffer.  Unlike SZ_ERR_MEMORY (an allocation that was tried
+ * and failed) this one is a refusal made before trying, but both mean the
+ * same thing to the user and both should lead here.  The text quotes the
+ * measured limit (ArcMemLimitMB), so it is rebuilt on each call and the
+ * returned buffer is only good until the next one. */
 const char *ArcNoRamHint( void );
+
+/* Explanation for SZ_ERR_MEMORY: an allocation was attempted and the system
+ * refused it, even though it was inside the budget.  Deliberately separate
+ * from ArcNoRamHint, because the advice differs - here the archive is not
+ * necessarily too demanding, the machine is just busy or the hand-set
+ * MemoryLimitMB is optimistic.  Same static-buffer caveat. */
+const char *ArcMemFailHint( void );
 
 /* Short display name of the archive's format, e.g. "7z", "Zip", "RAR", "RAR5".
  * Safe to call with a NULL archive (returns "?"). */

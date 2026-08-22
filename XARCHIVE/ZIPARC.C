@@ -763,8 +763,8 @@ int ZipOpen( const char *path, ZipArchive **out )
     if ( er.diskNum != 0 || er.diskStart != 0 )
     { ZipClose( z ); return SZ_ERR_UNSUPPORTED; }
 
-    if ( er.entriesTotal > SZ_MAX_FILES )
-    { ZipClose( z ); return SZ_ERR_TOOBIG; }
+    rc = ArcCheckEntryCount( er.entriesTotal );
+    if ( rc != SZ_OK ) { ZipClose( z ); return rc; }
 
     if ( !ZipAllocTables( z, er.entriesTotal ) )
     { ZipClose( z ); return SZ_ERR_MEMORY; }

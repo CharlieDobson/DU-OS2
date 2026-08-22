@@ -13,6 +13,19 @@
  *     ; XArchive preferences
  *     [Options]
  *     ExtractFolders=1
+ *     FolderView=1
+ *     MemoryLimitMB=0
+ *
+ * FolderView is a DISPLAY setting: 1 browses the archive a folder at a time,
+ * 0 lists every entry at once with its full stored path.  It is kept here
+ * rather than in the front end so all three front ends can agree on it; a
+ * front end with no folder browsing simply ignores it.
+ *
+ * MemoryLimitMB caps how much the extractor will hold in RAM at once (the
+ * LZMA dictionary and the whole-stream buffers).  0, the default, means
+ * measure the machine and decide; see ArcMaxDictSize in ARCDEFS.H.  Set it
+ * only to hold the program back on a machine it is sharing, or to push past
+ * a measurement that came out too cautious.
  *
  * Keys this module does not recognise are preserved across a save, so a
  * newer build's settings are not destroyed by an older one.
@@ -35,6 +48,12 @@ void ArcPrefSetFileFromExe( const char *exePath );
 
 /* The resolved INI path, for diagnostics / About boxes.  Never NULL. */
 const char *ArcPrefFile( void );
+
+/* Folder browsing (see the format note above).  Unlike ExtractFolders, which
+ * lives in the backend as the flatten flag, this one has nowhere else to
+ * live, so the module holds it: default 1. */
+int  ArcPrefFolderView( void );
+void ArcPrefSetFolderView( int on );
 
 /* Read the INI and apply every setting it holds.  A missing or unreadable
  * file is not an error - the built-in defaults simply stand. */
