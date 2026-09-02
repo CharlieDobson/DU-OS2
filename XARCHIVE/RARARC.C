@@ -146,17 +146,18 @@ static void MakeDirs( const char *path, int includeLast )
 
 /* destDir\name with the name made filesystem-safe (ArcFsName, ARCFILE.C). */
 static void BuildOut( char *dst, int dstSize,
-                      const char *destDir, const char *name )
+                      const char *destDir, const char *name, int isDir )
 {
     char        fsname[SZ_MAX_NAME];
     const char *s = fsname;
     int         n = 0;
 
-    ArcFsName( fsname, sizeof( fsname ), name );
+    ArcFsName( fsname, sizeof( fsname ), name, isDir );
     if ( destDir && destDir[0] )
     {
         while ( destDir[n] && n < dstSize - 2 ) { dst[n] = destDir[n]; n++; }
-        if ( n > 0 && dst[n-1] != '\\' ) dst[n++] = '\\';
+        /* '/' counts as a separator too - see BuildPath in SZARC.C. */
+        if ( n > 0 && dst[n-1] != '\\' && dst[n-1] != '/' ) dst[n++] = '\\';
     }
     while ( *s && n < dstSize - 1 ) dst[n++] = *s++;
     dst[n] = '\0';
@@ -323,7 +324,14 @@ static int RarExtractIndex( RarArchive *z, int idx, const char *destDir )
     int       rc = SZ_OK;
 
     /* destDir == NULL means "test only": decode + CRC-check but write nothing. */
-    if ( destDir ) BuildOut( outPath, sizeof( outPath ), destDir, e->name );
+    if ( destDir )
+    {
+        BuildOut( outPath, sizeof( outPath ), destDir, e->name, e->isDir );
+        /* Nothing to create, or skipped/cancelled at the 8.3 prompt - see
+         * ArcNameVerdict in ARCDEFS.H. */
+        if ( ArcNameVerdict() == ARC_NAME_ABORT ) return SZ_ERR_CANCEL;
+        if ( ArcNameVerdict() == ARC_NAME_SKIP )  return SZ_OK;
+    }
 
     if ( e->isDir )
     {
@@ -481,12 +489,19 @@ static void SolidOpenNext( SolidSink *s )
             if ( s->curReq && s->destDir )    /* NULL destDir = test only */
             {
                 BuildOut( s->outPath, sizeof( s->outPath ),
-                          s->destDir, e->name );
+                          s->destDir, e->name, e->isDir );
                 /* Declined overwrite: demote to "not requested" - the chain
                  * still decodes through it, but nothing is written, CRC-
                  * checked, or timestamped, and the kept file is never
-                 * removed. */
-                if ( !ArcWantWrite( s->outPath ) )
+                 * removed.  A skipped or unnameable entry is demoted the same
+                 * way; a cancel has to stop the chain outright. */
+                if ( ArcNameVerdict() == ARC_NAME_ABORT )
+                {
+                    s->rc     = SZ_ERR_CANCEL;   /* the callers all check rc */
+                    s->curReq = 0;
+                }
+                else if ( ArcNameVerdict() == ARC_NAME_SKIP ||
+                          !ArcWantWrite( s->outPath ) )
                     s->curReq = 0;
             }
             if ( s->curReq )
@@ -550,7 +565,9 @@ static int SolidExtract( RarArchive *z, const int *indices, int count,
             if ( req[i] && z->entries[i].isDir && z->entries[i].name[0] )
             {
                 char outPath[SZ_MAX_NAME * 4];
-                BuildOut( outPath, sizeof( outPath ), destDir, z->entries[i].name );
+                BuildOut( outPath, sizeof( outPath ), destDir, z->entries[i].name,
+                          z->entries[i].isDir );
+                if ( ArcNameVerdict() != ARC_NAME_OK ) continue;
                 MakeDirs( outPath, 1 );
             }
 
@@ -639,7 +656,9 @@ static int SolidExtract( RarArchive *z, const int *indices, int count,
             {
                 char  outPath[SZ_MAX_NAME * 4];
                 FILE *out;
-                BuildOut( outPath, sizeof( outPath ), destDir, z->entries[i].name );
+                BuildOut( outPath, sizeof( outPath ), destDir, z->entries[i].name,
+                          z->entries[i].isDir );
+                if ( ArcNameVerdict() != ARC_NAME_OK ) continue;
                 if ( !ArcWantWrite( outPath ) ) continue;
                 MakeDirs( outPath, 0 );
                 out = fopen( outPath, "wb" );

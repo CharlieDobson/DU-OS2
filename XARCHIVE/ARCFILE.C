@@ -64,6 +64,25 @@ static const unsigned char SIG_RAR[6] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07 };
 static UInt32 g_memBudget = 0;      /* 0 = not measured yet          */
 static UInt32 g_memForced = 0;      /* MemoryLimitMB, 0 = auto       */
 
+/* The two raw readings the budget is derived from, kept so a user can be
+ * asked what their machine actually reported instead of only what the
+ * program decided.  "1 GB of RAM but it says 46 MB" is not answerable from
+ * the budget alone: it is one number with three quite different causes
+ * behind it, and these two separate them.
+ *
+ *   g_memSysFree - what the system claims is free in one block (DPMI 0500h
+ *                  under DOS, GlobalMemoryStatus under Win32, DosQuerySysInfo
+ *                  under OS/2).  0 when it would not say.
+ *   g_memProbed  - the largest block malloc actually produced.
+ *
+ * A g_memSysFree near 64 MB on a machine with far more than that is the
+ * classic one: the XMS 2.0 "free extended memory" call reports KILOBYTES in
+ * a 16-bit register, so it saturates at 65535 KB and no extender asking it
+ * can ever see past 64 MB.  XMS 3.0 (function 88h, HIMEM.SYS 3.x) has the
+ * 32-bit version of the same call.  See ArcMemReport. */
+static UInt32 g_memSysFree = 0;
+static UInt32 g_memProbed  = 0;
+
 void ArcMemSetLimit( UInt32 mb )
 {
     g_memForced = mb;
@@ -158,7 +177,32 @@ static UInt32 ArcMemBudget( void )
     }
 
     sys = ArcMemSystemFree();
-    hi  = sys ? sys : ARC_MEM_CEILING;
+
+    /*---- What the system says is a HINT, not a lid ------------------------ *
+     * The system figure exists to stop the probe measuring memory that is
+     * not really there.  That is a live danger on Win32 and OS/2, where a
+     * large malloc succeeds by growing the swap file and then measures
+     * address space rather than RAM - so there it stays a hard cap.
+     *
+     * Under DOS it is neither necessary nor safe.  Nothing overcommits: a
+     * malloc that succeeds has the memory, so the probe cannot be fooled and
+     * needs no lid.  And the figure itself is not to be trusted downward -
+     * the DPMI host is answering out of a pool it obtained through XMS, and
+     * the XMS 2.0 free-memory call reports kilobytes in a 16-bit register, so
+     * a machine with a gigabyte can be told 64 MB and nothing further up the
+     * stack ever learns otherwise.  Capping the probe at that figure turned a
+     * host's underestimate into OUR refusal, on a machine that would have
+     * handed over the memory if it had simply been asked.
+     *
+     * So on DOS the probe runs to the ceiling and lets malloc give the
+     * answer; sys is kept only for the diagnostics box, which is where an
+     * underestimate is worth showing rather than acting on.
+     *---------------------------------------------------------------------- */
+#if defined(_WIN32) || defined(__OS2__)
+    hi = sys ? sys : ARC_MEM_CEILING;
+#else
+    hi = ARC_MEM_CEILING + ARC_MEM_CEILING / 2;
+#endif
 
     /* Never ask the heap for more than the largest dictionary that can exist,
      * plus the third we are about to give away - probing past that would only
@@ -167,6 +211,10 @@ static UInt32 ArcMemBudget( void )
         hi = ARC_MEM_CEILING + ARC_MEM_CEILING / 2;
 
     got = ArcMemProbeHeap( hi );
+
+    g_memSysFree = sys;                      /* keep the two raw readings */
+    g_memProbed  = got;
+
     got -= got / 4;                          /* leave a quarter for the rest */
 
     if ( got < ARC_MEM_FLOOR )   got = ARC_MEM_FLOOR;
@@ -179,6 +227,23 @@ static UInt32 ArcMemBudget( void )
 UInt32 ArcMaxDictSize( void )   { return ArcMemBudget(); }
 UInt32 ArcMaxBufferSize( void ) { return ArcMemBudget(); }
 UInt32 ArcMemLimitMB( void )    { return ArcMemBudget() / ( 1024UL * 1024 ); }
+
+/*---- Where the budget came from ------------------------------------------- *
+ * The three numbers the decision was made from, so a report of "1 GB of RAM
+ * and it says 46 MB" can be settled rather than guessed at.  Reading them
+ * forces the measurement if it has not happened yet, so they always describe
+ * the budget in force.
+ *-------------------------------------------------------------------------- */
+void ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB,
+                   int *forced )
+{
+    UInt32 budget = ArcMemBudget();          /* measures on the first call */
+
+    if ( sysFreeMB ) *sysFreeMB = g_memSysFree / ( 1024UL * 1024 );
+    if ( largestMB ) *largestMB = g_memProbed / ( 1024UL * 1024 );
+    if ( budgetMB )  *budgetMB  = budget / ( 1024UL * 1024 );
+    if ( forced )    *forced    = ( g_memForced != 0 );
+}
 
 /*---- How many entries will fit (see ARCDEFS.H) ---------------------------- *
  * What one listed entry costs while an archive is open: the backend's entry
@@ -1058,13 +1123,20 @@ static void CleanLong( char *comp )
  * Returns 1 when nothing had to be given up - the stored name already WAS an
  * 8.3 name and only its case changed - and 0 when characters were dropped,
  * substituted, or truncated away.  That 0 is what earns the name a numeric
- * tail; a name that survives intact never gets one. */
-static int Clean83( const char *comp, char *base, char *ext )
+ * tail; a name that survives intact never gets one.
+ *
+ * 'wantExt' 0 means there is no such thing as an extension in this name: no
+ * dot is looked for, and every character that survives goes into the base.
+ * That is how a FOLDER is shortened - see ArcFsName in ARCDEFS.H.  The dots
+ * are still dropped and still cost the name its exactness, which is right:
+ * the name did lose something. */
+static int Clean83( const char *comp, char *base, char *ext, int wantExt )
 {
     int bi = 0, xi = 0, i, dot = -1, exact = 1;
 
-    for ( i = 0; comp[i]; i++ )
-        if ( comp[i] == '.' ) dot = i;
+    if ( wantExt )
+        for ( i = 0; comp[i]; i++ )
+            if ( comp[i] == '.' ) dot = i;
     if ( dot == 0 ) dot = -1;          /* ".profile": the whole name is the base */
 
     for ( i = 0; comp[i]; i++ )
@@ -1234,10 +1306,24 @@ static void SnClear( SnNode **tab )
     }
 }
 
+/* The verdict on the name ArcFsName was last given.  g_snAbort is separate and
+ * STICKY: once the user cancels, every later name reports ABORT without the
+ * prompt going up again, so a backend unwinding a solid folder entry by entry
+ * does not ask four hundred more times on the way out. */
+static int g_nameVerdict = ARC_NAME_OK;
+static int g_snAbort     = 0;
+
+int ArcNameVerdict( void )
+{
+    return g_snAbort ? ARC_NAME_ABORT : g_nameVerdict;
+}
+
 void ArcResetNames( void )
 {
     SnClear( g_snMap );
     SnClear( g_snUsed );
+    g_nameVerdict = ARC_NAME_OK;
+    g_snAbort     = 0;
 }
 
 /* The 8.3 name one stored component gets inside one destination folder.
@@ -1259,7 +1345,46 @@ static int SnSameName( const char *a, const char *b )
     return *a == *b;
 }
 
-static void Resolve83( const char *parent, const char *orig, char *comp )
+/*---- Letting the user name it instead ------------------------------------- *
+ * With no prompt installed nothing below changes: a name that will not fit
+ * 8.3 gets the ~N tail and the extraction never stops.  That stays the
+ * default, because it is the only behaviour that can run unattended.
+ *
+ * A front end that installs one is asked ONCE per (folder, stored name) -
+ * the memo table above sees to that, so a folder mentioned by four hundred
+ * entries is still one question - and only for names that actually have to
+ * lose something.  A name that already fits 8.3 is never worth asking about.
+ *
+ * Whatever comes back is run through Clean83 like any other name: the user
+ * is choosing between legal names, not being handed the ability to write
+ * "my file.txt" onto a FAT volume.  If their choice is already taken by a
+ * DIFFERENT stored name, it gets the ~N treatment on top - the alternative
+ * is letting one entry silently land on another, which is the bug the tail
+ * exists to prevent.
+ *-------------------------------------------------------------------------- */
+static ArcShortNamePrompt g_snAsk     = 0;
+static void              *g_snAskUser = 0;
+
+void ArcSetShortNamePrompt( ArcShortNamePrompt fn, void *user )
+{
+    g_snAsk     = fn;
+    g_snAskUser = user;
+}
+
+/* Is 'comp' free in 'parent', or already ours?  The one question the
+ * numbering loop and the user's answer both have to pass. */
+static int SnNameFree( const char *parent, const char *comp, const char *orig )
+{
+    char    key[SZ_MAX_NAME * 2 + 8];
+    SnNode *hit;
+
+    SnKey( key, sizeof( key ), parent, comp );
+    hit = SnFind( g_snUsed, key );
+    return ( !hit || SnSameName( hit->val, orig ) );
+}
+
+static void Resolve83( const char *parent, const char *orig, char *comp,
+                       int isDir )
 {
     char    base[10], ext[4];
     char    key[SZ_MAX_NAME * 2 + 8];
@@ -1270,22 +1395,71 @@ static void Resolve83( const char *parent, const char *orig, char *comp )
     hit = SnFind( g_snMap, key );
     if ( hit ) { lstrcpy( comp, hit->val ); return; }
 
-    if ( Clean83( orig, base, ext ) )
+    if ( Clean83( orig, base, ext, 1 ) )
     {
         Join83( comp, base, ext );      /* already an 8.3 name: leave it alone */
         GuardDevice( comp );
     }
     else
     {
+        /* It has to be shortened, and for a FOLDER that means the extension
+         * goes: the dots in "...(3.5-720k)(5.25-360k)" are disk capacities,
+         * and three characters of one presented as a file type is worse than
+         * no extension at all.  Re-clean with no extension so the whole name
+         * competes for the eight characters there are.  Only reached when the
+         * name did not already fit, so DATA.OLD is never touched. */
+        if ( isDir ) Clean83( orig, base, ext, 0 );
+
         /* Count up until the name is either free or already ours.  "Already
          * ours" is what makes this safe to re-run for a component we have met
          * before but could not afford to memo. */
         for ( n = 1; n < 1000000; n++ )
         {
             Tail83( comp, base, ext, n );
-            SnKey( key, sizeof( key ), parent, comp );
-            hit = SnFind( g_snUsed, key );
-            if ( !hit || SnSameName( hit->val, orig ) ) break;
+            if ( SnNameFree( parent, comp, orig ) ) break;
+        }
+
+        /* The auto-renamed name is now the SUGGESTION.  Ask, and if the user
+         * offers something else, legalise it and make room for it. */
+        if ( g_snAsk && !g_snAbort )
+        {
+            char chosen[16];
+            int  said;
+
+            lstrcpyn( chosen, comp, sizeof( chosen ) );
+            said = g_snAsk( g_snAskUser, parent, orig, chosen, sizeof( chosen ) );
+
+            if ( said == ARC_SN_ABORT )
+            {
+                g_snAbort = 1;
+                return;                 /* nothing memoed: the run is over */
+            }
+            if ( said == ARC_SN_SKIP )
+            {
+                g_nameVerdict = ARC_NAME_SKIP;
+                return;                 /* likewise - do not reserve a name */
+            }
+            if ( said == ARC_SN_USE && chosen[0] )
+            {
+                char ubase[10], uext[4], cand[16];
+
+                /* A name the USER typed keeps its extension whatever it names:
+                 * they typed the dot on purpose.  The folder rule above is
+                 * about what to discard when a name is cut down automatically,
+                 * and nothing here is automatic. */
+                Clean83( chosen, ubase, uext, 1 );
+                Join83( cand, ubase, uext );
+                GuardDevice( cand );
+
+                if ( SnNameFree( parent, cand, orig ) )
+                    lstrcpy( comp, cand );
+                else
+                    for ( n = 1; n < 1000000; n++ )
+                    {
+                        Tail83( comp, ubase, uext, n );
+                        if ( SnNameFree( parent, comp, orig ) ) break;
+                    }
+            }
         }
     }
 
@@ -1295,14 +1469,18 @@ static void Resolve83( const char *parent, const char *orig, char *comp )
     SnAdd( g_snMap, key, comp );
 }
 
-void ArcFsName( char *dst, int dstSize, const char *name )
+void ArcFsName( char *dst, int dstSize, const char *name, int isDir )
 {
     char        orig[SZ_MAX_NAME + 2];
     char        comp[SZ_MAX_NAME + 2];   /* +2: GuardDevice may grow it by one */
     const char *s  = name;
     int         di = 0, ci, e83;
+    int         real = 0;        /* components that were more than "." */
+    int         compIsDir;       /* this component, not the whole entry     */
 
     if ( dstSize <= 0 ) return;
+    g_nameVerdict = ARC_NAME_OK;
+    if ( g_snAbort ) { dst[0] = '\0'; return; }
     if ( g_names83 < 0 )
         g_names83 = NamesNeed83( NULL );
     e83 = g_names83;
@@ -1318,6 +1496,16 @@ void ArcFsName( char *dst, int dstSize, const char *name )
         orig[ci] = '\0';
         if ( ci == 0 ) break;
 
+        /* Anything with a path component after it is a folder whatever the
+         * entry as a whole is; only the last one has to be taken on trust
+         * from the caller.  Trailing separators are skipped first, so
+         * "FOLDER/" is the last component and not an empty one after it. */
+        {
+            const char *look = s;
+            while ( *look == '\\' || *look == '/' ) look++;
+            compIsDir = ( *look != '\0' ) ? 1 : isDir;
+        }
+
         /* "Extract without paths": every component lands at the top of the
          * destination, so the one before it is dropped instead of kept as a
          * parent.  Done here rather than to the finished path, because the
@@ -1328,6 +1516,7 @@ void ArcFsName( char *dst, int dstSize, const char *name )
 
         if ( orig[0] == '.' && orig[1] == '\0' )
             continue;                           /* "." drops out entirely */
+        ++real;
         if ( orig[0] == '.' && orig[1] == '.' && orig[2] == '\0' )
         {
             comp[0] = comp[1] = '_';            /* cannot climb out of dest */
@@ -1336,7 +1525,12 @@ void ArcFsName( char *dst, int dstSize, const char *name )
         else if ( e83 )
         {
             dst[di] = '\0';                     /* the parent, for the registry */
-            Resolve83( dst, orig, comp );
+            Resolve83( dst, orig, comp, compIsDir );
+            if ( g_snAbort || g_nameVerdict == ARC_NAME_SKIP )
+            {
+                dst[0] = '\0';                  /* caller checks the verdict */
+                return;
+            }
         }
         else
         {
@@ -1350,7 +1544,21 @@ void ArcFsName( char *dst, int dstSize, const char *name )
             dst[di++] = comp[ci];
     }
 
-    if ( di == 0 && dstSize > 1 )        /* never hand back an empty name */
-        dst[di++] = '_';
+    /* Nothing left.  Two different reasons, and they need opposite answers:
+     *
+     *   every component was "."  - the entry names the destination itself
+     *     ("." is the whole of it).  There is nothing to create, and the "_"
+     *     this used to fall back on produced a stray directory called _ in
+     *     every extraction of a Unix-made archive.  Say SKIP.
+     *
+     *   there were real components and they all vanished - the name was made
+     *     entirely of characters the filesystem forbids.  That IS an entry;
+     *     dropping it silently would lose data, so it keeps the "_" and the
+     *     collision numbering sorts out the second one. */
+    if ( di == 0 )
+    {
+        if ( !real ) g_nameVerdict = ARC_NAME_SKIP;
+        else if ( dstSize > 1 ) dst[di++] = '_';
+    }
     dst[di] = '\0';
 }

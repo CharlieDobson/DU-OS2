@@ -627,17 +627,18 @@ static void MakeDirs( const char *path, int includeLast )
 
 /* destDir\name with the name made filesystem-safe (ArcFsName, ARCFILE.C). */
 static void BuildOut( char *dst, int dstSize,
-                      const char *destDir, const char *name )
+                      const char *destDir, const char *name, int isDir )
 {
     char        fsname[SZ_MAX_NAME];
     const char *s = fsname;
     int         n = 0;
 
-    ArcFsName( fsname, sizeof( fsname ), name );
+    ArcFsName( fsname, sizeof( fsname ), name, isDir );
     if ( destDir && destDir[0] )
     {
         while ( destDir[n] && n < dstSize - 2 ) { dst[n] = destDir[n]; n++; }
-        if ( n > 0 && dst[n-1] != '\\' ) dst[n++] = '\\';
+        /* '/' counts as a separator too - see BuildPath in SZARC.C. */
+        if ( n > 0 && dst[n-1] != '\\' && dst[n-1] != '/' ) dst[n++] = '\\';
     }
     while ( *s && n < dstSize - 1 ) dst[n++] = *s++;
     dst[n] = '\0';
@@ -655,7 +656,14 @@ static int DiskExtractIndex( DiskArchive *d, int idx, const char *destDir )
     UInt32         remain, cluster, guard;
     int            rc;
 
-    if ( destDir ) BuildOut( outPath, sizeof( outPath ), destDir, e->name );
+    if ( destDir )
+    {
+        BuildOut( outPath, sizeof( outPath ), destDir, e->name, e->isDir );
+        /* Nothing to create, or skipped/cancelled at the 8.3 prompt - see
+         * ArcNameVerdict in ARCDEFS.H. */
+        if ( ArcNameVerdict() == ARC_NAME_ABORT ) return SZ_ERR_CANCEL;
+        if ( ArcNameVerdict() == ARC_NAME_SKIP )  return SZ_OK;
+    }
 
     if ( e->isDir )
     {

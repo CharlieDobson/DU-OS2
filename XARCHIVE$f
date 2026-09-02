@@ -173,33 +173,8 @@ void   ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB,
  * The numbering is per destination folder and is remembered for the length of
  * one extraction, which ArcResetNames clears.  ArcExtractAll and
  * ArcExtractItems call it; nothing else needs to.
- *
- * 'isDir' says whether the LAST component of 'name' is a directory - every
- * component before it is one by definition, and ArcFsName works that out for
- * itself.  It matters because a FOLDER THAT HAS TO BE SHORTENED KEEPS NO
- * EXTENSION.  A DOS software collection is full of folders like
- *
- *     3D FloorPlan Designer 2.0 for DOS (1993)(3.5-720k)(5.25-360k)
- *
- * where every dot is a version number or a disk capacity and none of them is
- * an extension.  Splitting on the last one gave 3DFLOO~1.25- - three
- * characters of a floppy size, presented as a file type.  Such a folder now
- * becomes 3DFLOO~1, the whole name squeezed into the eight characters there
- * are.  A folder that ALREADY fits is still left exactly as it is, so a
- * directory called DATA.OLD stays DATA.OLD; the rule only governs what to
- * give up when something has to be given up.
- *
- * Files are unchanged: an extension is the one part of a file name worth
- * protecting, so "A Long File Name Here.markdown" still becomes ALONGF~1.MAR.
- *
- * The caller has to say, because the archive knows and the name does not: 7z
- * records directories in an attribute and stores no trailing separator, so
- * there is nothing in the string to read it from.  Guessing from position -
- * "a component with something after it is a folder" - is wrong for a stored
- * directory ENTRY, and the per-extraction registry would then hand the same
- * folder a different name depending on which entry the archive listed first.
  *-------------------------------------------------------------------------- */
-void ArcFsName( char *dst, int dstSize, const char *name, int isDir );
+void ArcFsName( char *dst, int dstSize, const char *name );
 void ArcResetNames( void );
 
 /*---- What ArcFsName decided about the entry it was just given ------------- *

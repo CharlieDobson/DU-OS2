@@ -96,6 +96,7 @@ static int IsKnownKey( const char *line )
 {
     return KeyIs( line, "ExtractFolders" ) ||
            KeyIs( line, "FolderView" )     ||
+           KeyIs( line, "AskShortNames" )  ||
            KeyIs( line, "MemoryLimitMB" );
 }
 
@@ -104,6 +105,15 @@ static int g_folderView = 1;
 
 int  ArcPrefFolderView( void )       { return g_folderView; }
 void ArcPrefSetFolderView( int on )  { g_folderView = on ? 1 : 0; }
+
+/* Whether a front end offers the user the short name of a long file during
+ * extraction, rather than auto-renaming it.  Off by default: auto-renaming
+ * is the only behaviour that can run unattended, and a front end that cannot
+ * ask a question simply ignores this. */
+static int g_askShortNames = 0;
+
+int  ArcPrefAskShortNames( void )      { return g_askShortNames; }
+void ArcPrefSetAskShortNames( int on ) { g_askShortNames = on ? 1 : 0; }
 
 /* Non-negative decimal, or 0 for anything that is not one.  atoi would do,
  * but it drags in a locale-aware conversion this module has no other use
@@ -155,6 +165,13 @@ void ArcPrefLoad( void )
             const char *v = ValueOf( p );
             g_folderView = ( *v == '0' ) ? 0 : 1;
         }
+        else if ( KeyIs( p, "AskShortNames" ) )
+        {
+            /* The one setting here that defaults to OFF, so it reads the
+             * other way round: only an explicit 1 turns it on. */
+            const char *v = ValueOf( p );
+            g_askShortNames = ( *v == '1' ) ? 1 : 0;
+        }
         else if ( KeyIs( p, "MemoryLimitMB" ) )
         {
             g_memLimitMB = ParseMB( ValueOf( p ) );
@@ -197,6 +214,8 @@ int ArcPrefSave( void )
     fprintf( f, "%s\n", PREF_SECTION );
     fprintf( f, "ExtractFolders=%d\n", ArcFlattenPaths() ? 0 : 1 );
     fprintf( f, "FolderView=%d\n", g_folderView );
+    fprintf( f, "; AskShortNames: 1 asks you to name each long file on an 8.3 drive\n" );
+    fprintf( f, "AskShortNames=%d\n", g_askShortNames );
     fprintf( f, "; MemoryLimitMB: 0 measures the machine\n" );
     fprintf( f, "MemoryLimitMB=%lu\n", (unsigned long)g_memLimitMB );
     {

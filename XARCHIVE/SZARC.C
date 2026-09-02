@@ -1276,6 +1276,28 @@ static void BcjX86Decode( Byte *data, UInt32 size )
     BcjX86Chunk( &b, data, size );      /* the <5-byte tail never converts */
 }
 
+/*---- What an LZMA dictionary will ACTUALLY cost --------------------------- *
+ * The coder declares a dictionary size, and it is tempting to weigh that
+ * figure against the memory budget.  It is the wrong figure.  A dictionary is
+ * a window on to output that has already been produced, so a match can never
+ * reach further back than the stream is long: LZMADEC's WinOpen allocates
+ * min(dictSize, unpackSize), and the BUFFERED entry points allocate no
+ * dictionary at all - the caller's output buffer is the window.
+ *
+ * Weighing the DECLARED size turned away archives that fit easily.  A 3 MB
+ * .7z compressed at LZMA:26 declares a 64 MB dictionary and may unpack to
+ * eight; on a machine that measured a 46 MB budget it was refused for want of
+ * memory it was never going to ask for.  Weigh what gets allocated instead.
+ *
+ * unpackSize == 0 means "not known here", and then the declared size is all
+ * there is to go on and it stands.
+ *-------------------------------------------------------------------------- */
+static UInt32 SzDictCost( UInt32 dictSize, UInt32 unpackSize )
+{
+    if ( unpackSize && unpackSize < dictSize ) return unpackSize;
+    return dictSize;
+}
+
 /*---- Decode one folder to a freshly malloc'd buffer ---------------------- */
 static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
 {
@@ -1330,7 +1352,7 @@ static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
                 UInt32 dictSize = fo->props[1] | ( (UInt32)fo->props[2] << 8 ) |
                                   ( (UInt32)fo->props[3] << 16 ) |
                                   ( (UInt32)fo->props[4] << 24 );
-                if ( dictSize > SZ_MAX_DICT_SIZE )
+                if ( SzDictCost( dictSize, mainSize ) > SZ_MAX_DICT_SIZE )
                     rc = SZ_ERR_NORAM;
                 else
                     rc = LzmaDecode( fo->props, fo->propsSize,
@@ -1351,7 +1373,7 @@ static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
                     UInt32 dictSize = ( pbyte == 40 )
                         ? 0xFFFFFFFFUL
                         : ( (UInt32)( 2 | ( pbyte & 1 ) ) << ( pbyte / 2 + 11 ) );
-                    if ( dictSize > SZ_MAX_DICT_SIZE )
+                    if ( SzDictCost( dictSize, mainSize ) > SZ_MAX_DICT_SIZE )
                         rc = SZ_ERR_NORAM;
                     else
                         rc = Lzma2Decode( pbyte, packBuf, packSize,
@@ -1712,13 +1734,27 @@ static void MakeParentTree( const char *filePath )
  * normalises '/' to '\' (invalid characters, device names, 8.3 truncation
  * on DOS/Win32s; see ARCFILE.C). */
 static void BuildPath( char *dst, int dstSize,
-                       const char *destDir, const char *name )
+                       const char *destDir, const char *name, int isDir )
 {
-    char rel[SZ_MAX_NAME];
+    char        rel[SZ_MAX_NAME];
+    const char *s;
+    int         n = 0;
 
-    ArcFsName( rel, sizeof( rel ), name );
-    wsprintf( dst, "%s\\%s", (LPSTR)destDir, (LPSTR)rel );
-    dst[dstSize - 1] = '\0';
+    ArcFsName( rel, sizeof( rel ), name, isDir );
+
+    /* Join with EXACTLY one separator.  A destination that already ends in
+     * one is the whole reason this is not a wsprintf( "%s\\%s" ): the root of
+     * a drive is spelt "C:\", and pasting another backslash on made
+     * "C:\\FILE.TXT", which INT 21h will not open - so extracting to the root
+     * of any drive failed while every subfolder worked.  '/' counts as a
+     * separator too: a destination typed as "C:/" is the same folder. */
+    if ( destDir && destDir[0] )
+    {
+        while ( destDir[n] && n < dstSize - 2 ) { dst[n] = destDir[n]; n++; }
+        if ( n > 0 && dst[n-1] != '\\' && dst[n-1] != '/' ) dst[n++] = '\\';
+    }
+    for ( s = rel; *s && n < dstSize - 1; s++ ) dst[n++] = *s;
+    dst[n] = '\0';
 }
 
 /*---- Extraction ---------------------------------------------------------- */
@@ -1740,7 +1776,12 @@ static int WriteEmptyEntry( const SzEntry *e, const char *destDir )
     char  outPath[SZ_MAX_NAME * 4];
     FILE *fout;
     if ( !destDir ) return SZ_OK;              /* test only */
-    BuildPath( outPath, sizeof( outPath ), destDir, e->name );
+    /* An empty file, never a directory. */
+    BuildPath( outPath, sizeof( outPath ), destDir, e->name, 0 );
+    /* Nothing to create, or skipped/cancelled at the 8.3 prompt - see
+     * ArcNameVerdict in ARCDEFS.H. */
+    if ( ArcNameVerdict() == ARC_NAME_ABORT ) return SZ_ERR_CANCEL;
+    if ( ArcNameVerdict() == ARC_NAME_SKIP )  return SZ_OK;
     if ( !ArcWantWrite( outPath ) )
         return SZ_OK;                  /* exists and the user chose to keep it */
     MakeParentTree( outPath );
@@ -1757,7 +1798,8 @@ static void WriteDirEntry( const SzEntry *e, const char *destDir )
     char outPath[SZ_MAX_NAME * 4];
     if ( !destDir ) return;                    /* test only */
     if ( ArcFlattenPaths() ) return;           /* extracting without paths */
-    BuildPath( outPath, sizeof( outPath ), destDir, e->name );
+    BuildPath( outPath, sizeof( outPath ), destDir, e->name, 1 );
+    if ( ArcNameVerdict() != ARC_NAME_OK ) return;   /* "." makes no folder */
     MakeTree( outPath );
 }
 
@@ -2098,7 +2140,8 @@ static int SzDecodeSubCoder( SzArchive *a, SzFolder *fo, int coderIdx,
             UInt32 dictSize = cd->props[1] | ( (UInt32)cd->props[2] << 8 ) |
                               ( (UInt32)cd->props[3] << 16 ) |
                               ( (UInt32)cd->props[4] << 24 );
-            if ( dictSize > SZ_MAX_DICT_SIZE ) rc = SZ_ERR_NORAM;
+            if ( SzDictCost( dictSize, unpackSize ) > SZ_MAX_DICT_SIZE )
+                 rc = SZ_ERR_NORAM;
             else rc = LzmaDecode( cd->props, cd->propsSize,
                                   packBuf, packSize, dst, unpackSize );
         }
@@ -2115,7 +2158,8 @@ static int SzDecodeSubCoder( SzArchive *a, SzFolder *fo, int coderIdx,
                 UInt32 dictSize = ( pb == 40 )
                     ? 0xFFFFFFFFUL
                     : ( (UInt32)( 2 | ( pb & 1 ) ) << ( pb / 2 + 11 ) );
-                if ( dictSize > SZ_MAX_DICT_SIZE ) rc = SZ_ERR_NORAM;
+                if ( SzDictCost( dictSize, unpackSize ) > SZ_MAX_DICT_SIZE )
+                     rc = SZ_ERR_NORAM;
                 else rc = Lzma2Decode( pb, packBuf, packSize, dst, unpackSize );
             }
         }
@@ -2211,10 +2255,22 @@ static int SzSinkOpen( SzSink *s )
 
     if ( s->destDir )
     {
-        BuildPath( s->curPath, sizeof( s->curPath ), s->destDir, e->name );
-        /* Declined overwrite: decode past like an unwanted entry, and never
+        /* A folder's entries reach the sink as files; the directory entries
+         * go through WriteDirEntry. */
+        BuildPath( s->curPath, sizeof( s->curPath ), s->destDir, e->name, 0 );
+        /* A cancelled 8.3 prompt ends the run.  This is the one place where
+         * that has to be checked BEFORE the overwrite question, because a
+         * solid folder cannot be re-entered: if we decoded past the rest of it
+         * we would have to keep asking. */
+        if ( ArcNameVerdict() == ARC_NAME_ABORT )
+        {
+            s->rc = SZ_ERR_CANCEL;
+            return 0;
+        }
+        /* Declined overwrite, a skipped entry, or a name that produces
+         * nothing: decode past like an unwanted entry, and never
          * CRC-fail/remove/timestamp the file the user chose to keep. */
-        if ( !ArcWantWrite( s->curPath ) )
+        if ( ArcNameVerdict() == ARC_NAME_SKIP || !ArcWantWrite( s->curPath ) )
         {
             s->curSkip = 1;
             return 1;
@@ -2488,7 +2544,7 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
                 UInt32 dictSize = fo->props[1] | ( (UInt32)fo->props[2] << 8 ) |
                                   ( (UInt32)fo->props[3] << 16 ) |
                                   ( (UInt32)fo->props[4] << 24 );
-                if ( dictSize > SZ_MAX_DICT_SIZE )
+                if ( SzDictCost( dictSize, fo->mainUnpackSize ) > SZ_MAX_DICT_SIZE )
                     rc = SZ_ERR_NORAM;
                 else
                     rc = LzmaDecodeStream( fo->props, fo->propsSize,
@@ -2511,7 +2567,7 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
                     UInt32 dictSize = ( pbyte == 40 )
                         ? 0xFFFFFFFFUL
                         : ( (UInt32)( 2 | ( pbyte & 1 ) ) << ( pbyte / 2 + 11 ) );
-                    if ( dictSize > SZ_MAX_DICT_SIZE )
+                    if ( SzDictCost( dictSize, fo->mainUnpackSize ) > SZ_MAX_DICT_SIZE )
                         rc = SZ_ERR_NORAM;
                     else
                         rc = Lzma2DecodeStream( pbyte,

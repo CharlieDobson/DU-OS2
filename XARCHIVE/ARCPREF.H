@@ -14,6 +14,7 @@
  *     [Options]
  *     ExtractFolders=1
  *     FolderView=1
+ *     AskShortNames=0
  *     MemoryLimitMB=0
  *
  * FolderView is a DISPLAY setting: 1 browses the archive a folder at a time,
@@ -54,6 +55,15 @@ const char *ArcPrefFile( void );
  * live, so the module holds it: default 1. */
 int  ArcPrefFolderView( void );
 void ArcPrefSetFolderView( int on );
+
+/* Whether the front end asks the user to name each long file it has to
+ * shorten during extraction, instead of auto-renaming it to LONGFI~1.TXT.
+ * Default 0 (auto-rename), because that is the only behaviour that can run
+ * unattended.  Like FolderView this is a front-end setting kept here so all
+ * three front ends agree; the backend hook it drives is
+ * ArcSetShortNamePrompt in ARCDEFS.H. */
+int  ArcPrefAskShortNames( void );
+void ArcPrefSetAskShortNames( int on );
 
 /* Read the INI and apply every setting it holds.  A missing or unreadable
  * file is not an error - the built-in defaults simply stand. */

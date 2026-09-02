@@ -692,50 +692,81 @@ static void MakeDirs( const char *path, int includeLast )
 /* Build destDir\name, with the name made filesystem-safe (invalid characters,
  * device names, 8.3 truncation on DOS/Win32s - see ArcFsName in ARCFILE.C). */
 static void BuildOut( char *dst, int dstSize,
-                      const char *destDir, const char *name )
+                      const char *destDir, const char *name, int isDir )
 {
     char        fsname[SZ_MAX_NAME];
     const char *s = fsname;
     int         n = 0;
 
-    ArcFsName( fsname, sizeof( fsname ), name );
+    ArcFsName( fsname, sizeof( fsname ), name, isDir );
     if ( destDir && destDir[0] )
     {
         while ( destDir[n] && n < dstSize - 2 ) { dst[n] = destDir[n]; n++; }
-        if ( n > 0 && dst[n-1] != '\\' ) dst[n++] = '\\';
+        /* '/' counts as an already-present separator too: "C:/" is the root
+         * of C: spelt the other way round, and doubling it would build a path
+         * DOS cannot open (see BuildPath in SZARC.C). */
+        if ( n > 0 && dst[n-1] != '\\' && dst[n-1] != '/' ) dst[n++] = '\\';
     }
     while ( *s && n < dstSize - 1 ) dst[n++] = *s++;
     dst[n] = '\0';
 }
 
 /*---- End-of-central-directory scan --------------------------------------- */
+/* The EOCD sits at the very end of the file unless a zip comment follows it,
+ * and a comment length is 16 bits, so the record can begin no earlier than
+ * 65557 bytes from EOF - hence the size of the window searched here.
+ *
+ * This used to walk backwards from EOF one byte at a time with an fseek and a
+ * four-byte fread per position.  On a real zip that costs little, because the
+ * signature is usually found in the first probe or two; but on a file that is
+ * NOT a zip the loop runs to exhaustion - 65515 seek/read pairs, measured at
+ * around 12 seconds per pass under DOS/32A.  The file browser offers every
+ * .exe to this parser for the sake of self-extracting archives, so that was
+ * the common case, not the rare one.  Reading the tail once and scanning it in
+ * memory is what SzFindStartHeader in SZARC.C already does for the 7z
+ * signature; this now matches it. */
+#define ZIP_EOCD_WINDOW 65556L      /* furthest back the record can start */
+
 static int FindEndRec( FILE *fp, EndRec *er, long *eocdPos )
 {
-    long          fileLen, pos;
-    unsigned char buf[4];
+    unsigned char *buf;
+    long           fileLen, base, want, got, i;
+    int            rc = SZ_ERR_SIG;
 
     fseek( fp, 0L, SEEK_END );
     fileLen = ftell( fp );
-    if ( fileLen < 22L ) return SZ_ERR_SIG;
+    if ( fileLen < (long)sizeof( EndRec ) ) return SZ_ERR_SIG;
 
-    pos = fileLen - 22L;
-    for ( ; pos >= 0L && ( fileLen - pos ) < 65557L; pos-- )
+    want = ( fileLen < ZIP_EOCD_WINDOW ) ? fileLen : ZIP_EOCD_WINDOW;
+    base = fileLen - want;
+
+    buf = (unsigned char *)malloc( (size_t)want );
+    if ( !buf ) return SZ_ERR_MEMORY;
+
+    if ( fseek( fp, base, SEEK_SET ) != 0 ) { free( buf ); return SZ_ERR_READ; }
+    got = (long)fread( buf, 1, (size_t)want, fp );
+
+    /* Highest candidate first, so a comment that happens to contain the
+     * signature cannot mask the real record - same order as the old walk. */
+    for ( i = got - (long)sizeof( EndRec ); i >= 0L; i-- )
     {
-        fseek( fp, pos, SEEK_SET );
-        if ( fread( buf, 1, 4, fp ) != 4 ) continue;
-        if ( buf[0]=='P' && buf[1]=='K' && buf[2]==5 && buf[3]==6 )
+        if ( buf[i]=='P' && buf[i+1]=='K' && buf[i+2]==5 && buf[i+3]==6 )
         {
-            fseek( fp, pos, SEEK_SET );
-            if ( fread( er, sizeof( EndRec ), 1, fp ) == 1 &&
-                 er->sig == SIG_END &&
-                 pos + (long)sizeof( EndRec ) + er->commentLen == fileLen )
+            EndRec cand;
+            memcpy( &cand, buf + i, sizeof( EndRec ) );
+            if ( cand.sig == SIG_END &&
+                 base + i + (long)sizeof( EndRec ) + cand.commentLen == fileLen )
             {
-                *eocdPos = pos;
-                return SZ_OK;
+                *er      = cand;
+                *eocdPos = base + i;
+                rc       = SZ_OK;
+                break;
             }
         }
     }
-    return SZ_ERR_SIG;
+
+    free( buf );
+    return rc;
 }
 
 /*---- Open + parse central directory -------------------------------------- */
@@ -850,7 +881,15 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
     int           rc;
 
     /* destDir == NULL means "test only": decode + CRC-check but write nothing. */
-    if ( destDir ) BuildOut( outPath, sizeof( outPath ), destDir, e->name );
+    if ( destDir )
+    {
+        BuildOut( outPath, sizeof( outPath ), destDir, e->name, e->isDir );
+        /* The name may have produced nothing to create - an entry that is
+         * just "." - or the user may have skipped or cancelled at the 8.3
+         * prompt.  See ArcNameVerdict in ARCDEFS.H. */
+        if ( ArcNameVerdict() == ARC_NAME_ABORT ) return SZ_ERR_CANCEL;
+        if ( ArcNameVerdict() == ARC_NAME_SKIP )  return SZ_OK;
+    }
 
     if ( e->isDir )
     {

@@ -204,6 +204,28 @@ static int WinFlush( CWin *w )
     return 1;
 }
 
+/* How much output may accumulate before the sink is given some.
+ *
+ * The ring used to be handed over ONLY when it wrapped, which tied the size of
+ * the first delivery to the size of the dictionary: with a 16 MB dictionary
+ * nothing at all reached the sink - no filename for the progress box, no bytes
+ * in any output file - until 16 MB had been decoded.  Measured in DOSBox on
+ * one 1.8 MB archive, time before the first entry was even named:
+ *
+ *      1 MB dictionary   0 s        16 MB dictionary   45 s
+ *      4 MB dictionary   1 s
+ *
+ * which is the bug a tester reported as "the extraction window is empty for
+ * the first five seconds".  Flushing is unrelated to correctness: the bytes
+ * stay in the ring for matches to reach back into, and 'flushed' only marks
+ * how much of it the sink has seen.  So the delivery size can be chosen freely,
+ * and 64K keeps the display honest without making the per-block overhead
+ * (a sink call, a boundary walk, an fwrite) matter.
+ *
+ * A partial block was always possible - every stream ends with one - so no
+ * sink needed changing for this. */
+#define LZ_FLUSH_CHUNK 65536U
+
 static int WinPutByte( CWin *w, Byte b )
 {
     w->win[w->pos++] = b;
@@ -212,6 +234,10 @@ static int WinPutByte( CWin *w, Byte b )
     {
         if ( !WinFlush( w ) ) return 0;
         w->pos = w->flushed = 0;
+    }
+    else if ( w->emit && w->pos - w->flushed >= LZ_FLUSH_CHUNK )
+    {
+        if ( !WinFlush( w ) ) return 0;
     }
     return 1;
 }

@@ -1,0 +1,147 @@
+XArchive for OS/2 - port notes
+==============================
+
+THE BACKEND IS A VERBATIM COPY, AND IS MEANT TO STAY ONE
+    Every source in this directory except PMMAIN.C, OS2PLAT.C, COMPAT.C and
+    windows.h is a byte-for-byte copy of the file of the same name in
+    S:\CPP\DU32\XARCHIVE.  They are copies rather than shared files because
+    the two trees build with different toolchains and layouts; nothing but
+    discipline keeps them identical.
+
+    To check, from anywhere:
+
+        for %F in (ARCFILE.C SZARC.C ZIPARC.C RARARC.C RAR3DEC.C RAR5ARC.C ^
+                   DISKARC.C LZMADEC.C CRC32.C ARCPREF.C ^
+                   ARCDEFS.H ARCFILE.H ARCPREF.H SZARC.H ZIPARC.H RARARC.H ^
+                   RAR3DEC.H RAR5ARC.H DISKARC.H LZMADEC.H CRC32.H ^
+                   PLATFORM.H) do ^
+          fc /b %F S:\CPP\DU32\XARCHIVE\%F
+
+    Any difference is drift, not a port: the platform is dealt with by
+    #if defined(__OS2__) inside those files and by the windows.h shim, never
+    by editing a copy.  If one of them has to change for OS/2, change it in
+    the DU32 tree behind an __OS2__ guard and copy the whole file back.
+
+    Last synced 2026-09-01.  That sync carried eight files - ARCFILE.C,
+    SZARC.C, ZIPARC.C, RARARC.C, RAR5ARC.C, DISKARC.C, LZMADEC.C and
+    ARCDEFS.H - for three fixes, all of them from DOS field reports and all of
+    them equally true here:
+
+      LZMADEC.C WinFlush  handed the sink its output only when the ring
+        WRAPPED, so the first delivery was one whole dictionary's worth: no
+        progress callback and no bytes in any file until that much had been
+        decoded.  Measured under DOS/32A: 0 s at a 1 MB dictionary, 45 s at
+        16 MB.  It now also flushes every 64K.  The bytes stay in the ring for
+        matches, so this is a delivery-size change and not a correctness one.
+
+      ArcFsName / ArcNameVerdict  a name can now produce NOTHING, and the
+        backends have to be told.  Two ways: an entry that is just "." (the
+        destination said the long way - it used to become a stray directory
+        called "_"), and the user answering Skip or Cancel at the 8.3 prompt.
+        Cancel used to mean "keep the automatic name", so cancelling extracted
+        the whole archive anyway.  Every backend now reads ArcNameVerdict()
+        after building an output path.
+
+      ArcFsName( ..., int isDir )  a folder that has to be SHORTENED to 8.3
+        now keeps no extension: "3D FloorPlan Designer 2.0 for DOS (1993)
+        (3.5-720k)(5.25-360k)" was becoming 3DFLOO~1.25- - three characters of
+        a floppy size presented as a file type - and is now 3DFLOO~1.  A folder
+        that already fits (DATA.OLD) is untouched, and files keep their
+        extensions.  The caller has to say which it is, because 7z records
+        directories in an attribute with no trailing separator and the name
+        cannot be read for it.  Ten call sites; the signature was changed
+        rather than overloaded so the compiler would find them all - which it
+        did, here as well as in DU32.
+
+      The 8.3 prompt contract  gained ARC_SN_SKIP and ARC_SN_ABORT.  No PM
+        code installs a prompt (only the DOS TUI does - 8.3 mangling is a DOS
+        and Win32s-on-FAT problem), so nothing in this tree calls it; the
+        backend still has to honour it, which is what the unit test checks.
+
+    BUILD\OS2T.C gained an ArcNameVerdict stub and three cases around
+    WriteDirEntry - OK creates the directory, SKIP and ABORT do not.  It found
+    the change on its own: the first build after the sync failed to LINK on an
+    undefined ArcNameVerdict, which is exactly the alarm this test exists to
+    raise.  Verified discriminating: with the verdict check removed from
+    WriteDirEntry it fails the SKIP and ABORT cases and passes the rest.
+
+    The 2026-08-29 sync carried ZIPARC.C alone:
+
+      ZIPARC.C FindEndRec  found the zip end-of-central-directory record by
+        walking backwards from EOF one byte at a time, an fseek and a
+        four-byte fread per position.  On a file that is not a zip the loop
+        runs to exhaustion - 65515 seek/read pairs - and every .exe is offered
+        to this parser for the sake of self-extracting archives.  Under
+        DOS/32A that was 4.2 seconds spent deciding a file was not an archive.
+        The record can start no earlier than 65557 bytes from EOF, so the tail
+        is now read once and scanned in memory, which is what SZARC.C's
+        SzFindStartHeader already did for the 7z signature.
+
+        Nothing about this is DOS-specific: a per-byte seek is slower than one
+        read on OS/2 too, though a 32-bit OS with a real file cache will hide
+        far more of it than a DOS extender did.  The value here is that the
+        two trees do not drift, and that the OS/2 build stops making the same
+        pass over every .exe the user points at.
+
+    The 2026-08-28 sync carried two bug fixes across:
+
+      SZARC.C BuildPath  joined the destination and the entry name with
+        wsprintf( "%s\\%s" ), so a destination that already ended in a
+        separator got a second one.  The root of a drive is spelt "C:\", so
+        extracting there produced "C:\\FILE.TXT" - which is not a file on C:
+        at all.  OS/2, like DOS, reads a drive letter followed by two path
+        characters as a UNC network name.  Every backend now joins with
+        exactly one separator and counts '/' as one too.
+
+      SZARC.C SzDictCost  the six LZMA dictionary checks weighed the size the
+        coder DECLARES against the memory budget.  A dictionary is a window
+        on to output already produced, so LZMADEC's WinOpen has always
+        allocated min(dictSize, unpackSize) - and the buffered entry points
+        allocate no dictionary at all.  A 64 MB declaration over a folder
+        unpacking to 8 MB cost 8 and was refused for wanting 64.  The checks
+        now weigh what gets allocated.
+
+    ARCFILE.C's probe-bound change in the same sync is DOS-only by
+    construction: OS/2 keeps the DosQuerySysInfo figure as a hard cap on the
+    malloc probe, because a large allocation here succeeds by growing the
+    swap file and would otherwise measure address space rather than RAM.
+
+BUILD\MKTEST.CMD - the backend unit test
+    The OS/2 executable cannot be run on the Windows box this is cross-built
+    on, and the BuildPath bug above is invisible to both emulators that are
+    available: DOSBox forgives a doubled separator and so does Windows NT.
+    So MKTEST.CMD compiles THIS TREE'S SZARC.C, through THIS TREE'S
+    windows.h, as an ordinary NT console program and checks the string
+    BuildPath builds rather than the file that appears afterwards.
+
+    It is a unit test of the two fixes above, not a substitute for running
+    XARCHIVE.EXE on OS/2.  Verified discriminating: with BuildPath reverted
+    to the old wsprintf it fails exactly the four separator cases and passes
+    the rest.
+
+WHAT THIS PORT DOES NOT HAVE (and neither does the Win32s GUI)
+    The DOS TUI gained several things in the 2026-08-28 round that live
+    entirely in its front end.  Most do not apply here - PM ticks a menu item
+    natively (IDM_ARCHIVE_PATHS already does), Alt already reaches the menu
+    bar, and there is no folder-view/flat-view mode on this front end at all.
+
+    Two DO apply, and are absent from BOTH GUIs, so the two are still in sync
+    with each other:
+
+      - a memory diagnostic.  ArcMemReport() is in the shared backend and
+        reports what the system claimed, what the largest block actually
+        obtained was, and the budget.  An OS/2 user who hits "not enough
+        memory" has the same unanswerable question a DOS user did.  The
+        wording would differ: the XMS 2.0 64 MB ceiling that explains it on
+        DOS has no counterpart here, where the cause is DosQuerySysInfo or
+        genuine fragmentation.
+      - the short-name prompt.  ArcSetShortNamePrompt() is in the shared
+        backend and Os2NamesNeed83() already returns 1 for a FAT target, so
+        an OS/2 user extracting to a FAT volume gets the same LONGFI~1.TXT
+        renaming with no say in it.  Adding it needs a new dialog resource.
+
+    Both were left out deliberately: adding menu items to two GUIs that
+    cannot be run from here is a scope-and-risk call, not a mechanical sync.
+
+    Also unsynced and deliberate for now: the About box says "XArchive v1.0"
+    in both GUIs while the DOS TUI says v1.2.
