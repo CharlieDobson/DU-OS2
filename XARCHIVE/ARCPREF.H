@@ -15,21 +15,21 @@
  *     ExtractFolders=1
  *     FolderView=1
  *     AskShortNames=0
- *     MemoryLimitMB=0
  *
  * FolderView is a DISPLAY setting: 1 browses the archive a folder at a time,
  * 0 lists every entry at once with its full stored path.  It is kept here
  * rather than in the front end so all three front ends can agree on it; a
  * front end with no folder browsing simply ignores it.
  *
- * MemoryLimitMB caps how much the extractor will hold in RAM at once (the
- * LZMA dictionary and the whole-stream buffers).  0, the default, means
- * measure the machine and decide; see ArcMaxDictSize in ARCDEFS.H.  Set it
- * only to hold the program back on a machine it is sharing, or to push past
- * a measurement that came out too cautious.
+ * MemoryLimitMB was here and is GONE (2026-09-06).  The budget is measured
+ * from the machine - see ArcMaxDictSize in ARCDEFS.H - and a hand-set cap
+ * could only make that measurement worse: too low and the program refused
+ * archives the machine could have handled, too high and it promised memory
+ * that was never there.  An existing key is stripped on the next save.
  *
  * Keys this module does not recognise are preserved across a save, so a
- * newer build's settings are not destroyed by an older one.
+ * newer build's settings are not destroyed by an older one.  A key this
+ * module has RETIRED is not foreign and is not preserved (see IsKnownKey).
  *
  * Where the file lives is the caller's business - the three platforms find
  * their own executable differently (argv[0], GetModuleFileName,

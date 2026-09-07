@@ -22,7 +22,31 @@ THE BACKEND IS A VERBATIM COPY, AND IS MEANT TO STAY ONE
     by editing a copy.  If one of them has to change for OS/2, change it in
     the DU32 tree behind an __OS2__ guard and copy the whole file back.
 
-    Last synced 2026-09-01.  That sync carried eight files - ARCFILE.C,
+    Last synced 2026-09-06, six files: LZMADEC.C for the SpecPos index below,
+    and ARCFILE.C, ARCPREF.C, ARCDEFS.H, ARCFILE.H, ARCPREF.H for the
+    removal of the MemoryLimitMB preference.  Before that, 2026-09-01.
+
+      MemoryLimitMB  gone from XARCHIVE.INI, along with ArcMemSetLimit and
+        ArcMemReport's 'forced' out-parameter (the PM front end never called
+        ArcMemReport, so nothing here had to change for the new signature).
+        The budget is measured from the machine and a hand-set cap could only
+        make that worse in either direction.  ARCPREF.C still NAMES the key in
+        IsKnownKey, marked retired: keys it does not recognise are preserved
+        across a save, so a key merely dropped from the reader would live in
+        the file forever.  MKOS2.CMD builds clean and MKTEST.CMD passes.
+
+      LZMADEC.C  the SpecPos index in the distance decode was a chain of
+        pointer + and - with UNSIGNED operands (dist, posSlot) in the address
+        arithmetic at every step; MSVC 2.2 warns about it on the Win32s build.
+        It is one plain int now, added to the pointer once.  No behaviour
+        change (modern MSVC /Wall and wcc386 -bt=nt -w4 -za are silent either
+        way, and every CLI output is byte-identical), but it is in the shared
+        decoder, so it belongs here too.  Note for the next line number that
+        gets quoted: MSVC 2.2 reports a multi-line statement at its CLOSING
+        line, which sent the first two attempts at this to the wrong line
+        entirely.
+
+    The 2026-09-01 sync carried eight files - ARCFILE.C,
     SZARC.C, ZIPARC.C, RARARC.C, RAR5ARC.C, DISKARC.C, LZMADEC.C and
     ARCDEFS.H - for three fixes, all of them from DOS field reports and all of
     them equally true here:

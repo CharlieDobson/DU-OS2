@@ -24,13 +24,17 @@ rem  This is a UNIT test of the two 2026-08-28 backend fixes.  It is not a
 rem  substitute for running XARCHIVE.EXE on OS/2; it is what can be checked
 rem  without one.
 rem ==========================================================================
-if not defined WATCOM set WATCOM=C:\WATCOM
+if "%WATCOM%"=="" set WATCOM=C:\WATCOM
 if not exist "%WATCOM%\binnt\wcl386.exe" goto nowatcom
 
 set INCLUDE=%WATCOM%\H
 set PATH=%WATCOM%\BINNT;%WATCOM%\BINW;%PATH%
 
-pushd "%~dp0"
+rem  NT 3.51's cmd.exe has no %~dp0.  Win32 folds "<file>\.."
+rem  lexically, so "%0\.." is the directory holding this script, and
+rem  pushd - unlike cd - changes the drive as well.
+pushd "%0\.."
+if not exist MKTEST.CMD goto nohome
 
 rem  wcl386 exits 0 even on compile errors, so deleting the target first is
 rem  the only reliable success signal (the same trap as MKTUI.CMD).
@@ -56,24 +60,37 @@ echo.
 echo Backend unit test PASSED.
 popd
 endlocal
-goto :eof
+goto end
 
 :testfailed
 echo.
 echo *** BACKEND UNIT TEST FAILED - see the FAIL lines above.
 popd
 endlocal
-exit /b 1
+goto failrc
 
 :failed
 echo.
 echo *** BUILD FAILED - see the wcl386 errors above.
 popd
 endlocal
-exit /b 1
+goto failrc
 
 :nowatcom
 echo.
 echo *** Open Watcom was not found at "%WATCOM%".
 endlocal
-exit /b 1
+goto failrc
+
+:nohome
+echo *** Could not switch to the directory holding MKTEST.CMD.
+echo *** Run MKTEST.CMD from that directory; a path with spaces in it
+echo *** cannot be found this way on NT 3.51.
+
+:failrc
+rem  NT 3.51's cmd.exe has no EXIT /B, and its EXIT ignores an exit code.
+rem  A FIND that matches nothing is how this script hands ERRORLEVEL 1
+rem  back to whoever called it, so it must be the LAST thing run.
+ver | find "@@" > nul
+
+:end

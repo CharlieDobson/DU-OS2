@@ -22,7 +22,7 @@ rem  Watcom location.  An existing %WATCOM% is honoured -- a normal Open
 rem  Watcom install sets it -- so the fallback below only matters when the
 rem  variable is unset.  A path containing spaces will not work: Watcom's
 rem  -i= option takes no quoting.
-if not defined WATCOM set WATCOM=C:\WATCOM
+if "%WATCOM%"=="" set WATCOM=C:\WATCOM
 
 if not exist "%WATCOM%\binnt\wlink.exe" goto nowatcom
 
@@ -31,14 +31,21 @@ set PATH=%WATCOM%\BINNT;%WATCOM%\BINW;%PATH%
 
 rem  -xs / -xr are C++ switches; this tree is C, so the flags are just the
 rem  optimiser, quiet mode and the warning level the other ports use.
-set CFLAGS=-bt=os2 -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=%WATCOM%\H -i=%WATCOM%\H\OS2
+rem  These flags are spelled out at each compile line below rather than
+rem  held in CFLAGS.  NT 3.51's SET splits on the LAST '=', so it refuses
+rem  any value containing one: "set CFLAGS=-bt=..." sets nothing there and
+rem  reports only "The syntax of the command is incorrect".
 
 rem  A gap-buffer editor keeps its document on the heap, so the stack only
 rem  has to cover PM's callback depth -- but 256 KB matches the other OS/2
 rem  ports and costs nothing but address space.
 set STACK=262144
 
-pushd "%~dp0"
+rem  NT 3.51's cmd.exe has no %~dp0.  Win32 folds "<file>\.."
+rem  lexically, so "%0\.." is the directory holding this script, and
+rem  pushd - unlike cd - changes the drive as well.
+pushd "%0\.."
+if not exist MKOS2.CMD goto nohome
 
 del ENHNOTE.EXE >nul 2>&1
 del ENHNOTE.res >nul 2>&1
@@ -80,11 +87,11 @@ rem --------------------------------------------------------------------------
 rem  2. compile
 rem --------------------------------------------------------------------------
 echo Compiling...
-wcc386 ..\PMMAIN.C  %CFLAGS%
+wcc386 ..\PMMAIN.C  -bt=os2 -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=%WATCOM%\H -i=%WATCOM%\H\OS2
 if errorlevel 1 goto failed
-wcc386 ..\EDITCTL.C %CFLAGS%
+wcc386 ..\EDITCTL.C -bt=os2 -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=%WATCOM%\H -i=%WATCOM%\H\OS2
 if errorlevel 1 goto failed
-wcc386 ..\GAPBUF.C  %CFLAGS%
+wcc386 ..\GAPBUF.C  -bt=os2 -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=%WATCOM%\H -i=%WATCOM%\H\OS2
 if errorlevel 1 goto failed
 
 rem --------------------------------------------------------------------------
@@ -118,7 +125,7 @@ echo.
 echo Built BUILD\ENHNOTE.EXE  (OS/2 2.x / Warp, 32-bit Presentation Manager).
 popd
 endlocal
-goto :eof
+goto end
 
 :nowatcom
 echo.
@@ -128,11 +135,24 @@ echo *** Set the WATCOM environment variable to your Open Watcom 1.9
 echo *** installation directory, or edit the fallback near the top of
 echo *** this script.
 endlocal
-exit /b 1
+goto failrc
 
 :failed
 echo.
 echo *** BUILD FAILED - see the wcc386/wrc/wlink errors above.
 popd
 endlocal
-exit /b 1
+goto failrc
+
+:nohome
+echo *** Could not switch to the directory holding MKOS2.CMD.
+echo *** Run MKOS2.CMD from that directory; a path with spaces in it
+echo *** cannot be found this way on NT 3.51.
+
+:failrc
+rem  NT 3.51's cmd.exe has no EXIT /B, and its EXIT ignores an exit code.
+rem  A FIND that matches nothing is how this script hands ERRORLEVEL 1
+rem  back to whoever called it, so it must be the LAST thing run.
+ver | find "@@" > nul
+
+:end

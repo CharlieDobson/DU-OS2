@@ -537,9 +537,26 @@ static int LzmaRun( CLzma *s, CRangeDec *rc, CWin *w, UInt32 limit )
                     dist = ( 2 | ( posSlot & 1 ) ) << numDirectBits;
                     if ( posSlot < kEndPosModelIndex )
                     {
-                        dist += RcBitTreeRev( rc,
-                                  probs + oSpecPos + dist - posSlot - 1,
-                                  numDirectBits );
+                        /* The index into the SpecPos table, worked out in one
+                         * plain int instead of as a chain of pointer + and -.
+                         * Written the second way it mixed UNSIGNED operands
+                         * (dist, posSlot) into the address arithmetic at every
+                         * step, which is what MSVC 2.2 warns about on the
+                         * Win32s build; done this way there is one integer
+                         * expression and one pointer addition.
+                         *
+                         * Every term here is small and positive - posSlot is
+                         * under 14 in this branch, so numDirectBits is at most
+                         * 5 and dist at most 96 - so the int cannot overflow.
+                         *
+                         * The -1 is the bit tree's index bias, not a fencepost
+                         * error: RcBitTreeRev walks probs[m] starting at m = 1,
+                         * so its base has to sit one short of the table.  At
+                         * posSlot 4 the index really is -1 and the first cell
+                         * read is oSpecPos itself. */
+                        int idx = (int)oSpecPos + (int)dist
+                                - (int)posSlot - 1;
+                        dist += RcBitTreeRev( rc, probs + idx, numDirectBits );
                     }
                     else
                     {

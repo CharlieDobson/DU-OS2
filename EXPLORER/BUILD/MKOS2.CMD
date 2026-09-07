@@ -22,7 +22,7 @@ rem  Watcom location.  An existing %WATCOM% is honoured -- a normal Open
 rem  Watcom install sets it -- so the fallback below only matters when the
 rem  variable is unset.  A path containing spaces will not work: Watcom's
 rem  -i= option takes no quoting.
-if not defined WATCOM set WATCOM=C:\WATCOM
+if "%WATCOM%"=="" set WATCOM=C:\WATCOM
 
 if not exist "%WATCOM%\binnt\wlink.exe" goto nowatcom
 set INCLUDE=%WATCOM%\H;%WATCOM%\H\OS2
@@ -35,18 +35,25 @@ rem              ..\..\COMMON\PMWORKER.C, and _beginthread needs the
 rem              multithreaded libraries.  EVERY module must have it -- mixing
 rem              gives an image whose errno and heap are not thread-safe, and
 rem              the resulting corruption is intermittent rather than loud.
-set CFLAGS=-bt=os2 -bm -otexan -zq -w4 -e25 -xs -xr -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
-
-rem  Same flags minus -xs / -xr, which wcc386 rejects: they are C++ switches
+rem  The flags are written out at the two compile steps below rather than held
+rem  in CFLAGS / CFLAGS_C.  NT 3.51's SET splits on the LAST '=', so it refuses
+rem  any value containing one: "set CFLAGS=-bt=os2 ..." sets nothing there and
+rem  reports only "The syntax of the command is incorrect".  The C++ modules go
+rem  through one FOR loop, so each flag list is still written exactly once.
+rem
+rem  The C step drops -xs / -xr, which wcc386 rejects: they are C++ switches
 rem  (exception tables, RTTI) and PMWORKER.C is plain C.
-set CFLAGS_C=-bt=os2 -bm -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
 
 rem  !! STACK !!  FILEOPS.CPP's CopyTree / DeleteTree / TreeSize and
 rem  SEARCH.CPP's DoSearch all recurse one frame per directory level, and
 rem  each frame carries a CCHMAXPATH buffer or two.  256 KB, not the default.
 set STACK=262144
 
-pushd "%~dp0"
+rem  NT 3.51's cmd.exe has no %~dp0.  Win32 folds "<file>\.."
+rem  lexically, so "%0\.." is the directory holding this script, and
+rem  pushd - unlike cd - changes the drive as well.
+pushd "%0\.."
+if not exist MKOS2.CMD goto nohome
 
 del EXPLORER.EXE >nul 2>&1
 del EXPLORER.res >nul 2>&1
@@ -89,30 +96,14 @@ rem --------------------------------------------------------------------------
 rem  2. compile
 rem --------------------------------------------------------------------------
 echo Compiling...
-wpp386 ..\PMMAIN.CPP  %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\DRIVES.CPP  %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\DIRVIEW.CPP %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\PAINT.CPP   %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\TOOLBAR.CPP %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\STATBAR.CPP %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\SEARCH.CPP  %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\FILEOPS.CPP %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\PROPS.CPP   %CFLAGS%
-if errorlevel 1 goto failed
-wpp386 ..\NETWORK.CPP %CFLAGS%
-if errorlevel 1 goto failed
+for %%F in (PMMAIN DRIVES DIRVIEW PAINT TOOLBAR STATBAR SEARCH FILEOPS PROPS NETWORK) do (
+  wpp386 ..\%%F.CPP -bt=os2 -bm -otexan -zq -w4 -e25 -xs -xr -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
+  if errorlevel 1 goto failed
+)
 
 rem  The shared worker is plain C (XArchive and Enhanced Notepad link it too),
-rem  so it goes through wcc386 rather than wpp386.
-wcc386 ..\..\COMMON\PMWORKER.C %CFLAGS_C%
+rem  so it goes through wcc386 rather than wpp386, without -xs / -xr.
+wcc386 ..\..\COMMON\PMWORKER.C -bt=os2 -bm -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
 if errorlevel 1 goto failed
 
 rem --------------------------------------------------------------------------
@@ -150,7 +141,7 @@ echo.
 echo Built BUILD\EXPLORER.EXE  (OS/2 2.x / Warp, 32-bit Presentation Manager).
 popd
 endlocal
-goto :eof
+goto end
 
 :nowatcom
 echo.
@@ -160,11 +151,24 @@ echo *** Set the WATCOM environment variable to your Open Watcom 1.9
 echo *** installation directory, or edit the fallback near the top of
 echo *** this script.
 endlocal
-exit /b 1
+goto failrc
 
 :failed
 echo.
 echo *** BUILD FAILED - see the wpp386/wrc/wlink errors above.
 popd
 endlocal
-exit /b 1
+goto failrc
+
+:nohome
+echo *** Could not switch to the directory holding MKOS2.CMD.
+echo *** Run MKOS2.CMD from that directory; a path with spaces in it
+echo *** cannot be found this way on NT 3.51.
+
+:failrc
+rem  NT 3.51's cmd.exe has no EXIT /B, and its EXIT ignores an exit code.
+rem  A FIND that matches nothing is how this script hands ERRORLEVEL 1
+rem  back to whoever called it, so it must be the LAST thing run.
+ver | find "@@" > nul
+
+:end

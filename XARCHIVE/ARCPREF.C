@@ -91,13 +91,19 @@ static const char *ValueOf( const char *line )
     return eq ? SkipBlanks( eq + 1 ) : "";
 }
 
-/* Is this one of ours?  Foreign keys are preserved verbatim on save. */
+/* Is this one of ours?  Foreign keys are preserved verbatim on save.
+ *
+ * RETIRED keys belong in this list too, which is why MemoryLimitMB is still
+ * here after nothing reads it: a key that is merely dropped from the reader
+ * counts as foreign and would be PRESERVED, so an old INI would keep offering
+ * a setting that no longer does anything.  Naming it here strips it on the
+ * next save instead. */
 static int IsKnownKey( const char *line )
 {
     return KeyIs( line, "ExtractFolders" ) ||
            KeyIs( line, "FolderView" )     ||
            KeyIs( line, "AskShortNames" )  ||
-           KeyIs( line, "MemoryLimitMB" );
+           KeyIs( line, "MemoryLimitMB" );      /* retired 2026-09-06 */
 }
 
 /* Display setting with nowhere else to live (see ARCPREF.H). */
@@ -114,27 +120,6 @@ static int g_askShortNames = 0;
 
 int  ArcPrefAskShortNames( void )      { return g_askShortNames; }
 void ArcPrefSetAskShortNames( int on ) { g_askShortNames = on ? 1 : 0; }
-
-/* Non-negative decimal, or 0 for anything that is not one.  atoi would do,
- * but it drags in a locale-aware conversion this module has no other use
- * for, and a stray "-1" reading as a huge unsigned would be worse than a 0. */
-static UInt32 ParseMB( const char *v )
-{
-    UInt32 n = 0;
-
-    v = SkipBlanks( v );
-    if ( *v < '0' || *v > '9' ) return 0;
-    while ( *v >= '0' && *v <= '9' )
-    {
-        if ( n > 100000UL ) return 100000UL;      /* far past any real machine */
-        n = n * 10 + (UInt32)( *v++ - '0' );
-    }
-    return n;
-}
-
-/* The limit the user last set, remembered so a save writes back what was
- * read rather than the figure the measurement happened to land on. */
-static UInt32 g_memLimitMB = 0;
 
 /*---- Load -----------------------------------------------------------------*/
 
@@ -172,11 +157,7 @@ void ArcPrefLoad( void )
             const char *v = ValueOf( p );
             g_askShortNames = ( *v == '1' ) ? 1 : 0;
         }
-        else if ( KeyIs( p, "MemoryLimitMB" ) )
-        {
-            g_memLimitMB = ParseMB( ValueOf( p ) );
-            ArcMemSetLimit( g_memLimitMB );      /* 0 = measure the machine */
-        }
+        /* MemoryLimitMB is deliberately not read: see IsKnownKey. */
     }
     fclose( f );
 }
@@ -216,8 +197,6 @@ int ArcPrefSave( void )
     fprintf( f, "FolderView=%d\n", g_folderView );
     fprintf( f, "; AskShortNames: 1 asks you to name each long file on an 8.3 drive\n" );
     fprintf( f, "AskShortNames=%d\n", g_askShortNames );
-    fprintf( f, "; MemoryLimitMB: 0 measures the machine\n" );
-    fprintf( f, "MemoryLimitMB=%lu\n", (unsigned long)g_memLimitMB );
     {
         int i;
         for ( i = 0; i < nkeep; i++ )

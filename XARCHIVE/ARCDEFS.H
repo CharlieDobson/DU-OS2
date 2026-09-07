@@ -115,9 +115,14 @@ int    ArcCheckEntryCount( UInt32 n );
  *   OS/2          DosQuerySysInfo, free physical memory.
  *
  * Measured once on first use and then latched, so nothing is re-probed in the
- * middle of an extraction.  ArcMemSetLimit overrides the measurement (the
- * MemoryLimitMB preference, 0 = measure); ArcMemLimitMB reports what is in
- * force so a message can quote the real number instead of a baked-in one.
+ * middle of an extraction.  ArcMemLimitMB reports the figure so a message can
+ * quote the real number instead of a baked-in one.
+ *
+ * There is NO WAY TO SET THIS BY HAND any more (the MemoryLimitMB preference
+ * went on 2026-09-06).  A hand-set cap could only make the measurement worse
+ * in one of two directions: too low and the program refused archives the
+ * machine could have handled, too high and it promised memory that was never
+ * there and failed further in, with a worse message.
  *
  * The floor is what the program insists on being allowed to try even on a
  * machine that reports almost nothing free; the ceiling is 7-Zip's own largest
@@ -130,7 +135,6 @@ UInt32 ArcMaxDictSize( void );      /* LZMA sliding dictionary               */
 UInt32 ArcMaxBufferSize( void );    /* biggest whole-file buffer: a RAR entry,
                                        a mounted disk image, the 7z header   */
 UInt32 ArcMemLimitMB( void );       /* the budget in whole MB, for messages  */
-void   ArcMemSetLimit( UInt32 mb ); /* 0 = measure the machine (the default) */
 
 /* The workings behind ArcMemLimitMB, in whole MB, for a diagnostics box.
  * The budget is one number with three quite different causes behind it, and
@@ -144,12 +148,9 @@ void   ArcMemSetLimit( UInt32 mb ); /* 0 = measure the machine (the default) */
  *   largestMB - the largest block malloc actually produced when probed, which
  *               is bounded above by sysFreeMB.
  *   budgetMB  - what the program allows itself: three quarters of largestMB,
- *               clamped to the floor and ceiling above, or the MemoryLimitMB
- *               preference when one is set.
- *   forced    - non-zero when MemoryLimitMB set it and nothing was measured.
+ *               clamped to the floor and ceiling above.
  * Any pointer may be NULL.  Forces the measurement if it has not run. */
-void   ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB,
-                     int *forced );
+void   ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB );
 
 #define SZ_MAX_DICT_SIZE    ArcMaxDictSize()
 #define SZ_MAX_BUFFER_SIZE  ArcMaxBufferSize()

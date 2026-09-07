@@ -63,8 +63,8 @@ const char *ArcNoRamHint( void );
 /* Explanation for SZ_ERR_MEMORY: an allocation was attempted and the system
  * refused it, even though it was inside the budget.  Deliberately separate
  * from ArcNoRamHint, because the advice differs - here the archive is not
- * necessarily too demanding, the machine is just busy or the hand-set
- * MemoryLimitMB is optimistic.  Same static-buffer caveat. */
+ * necessarily too demanding, the machine is just busier now than it was when
+ * the budget was measured.  Same static-buffer caveat. */
 const char *ArcMemFailHint( void );
 
 /* Short display name of the archive's format, e.g. "7z", "Zip", "RAR", "RAR5".

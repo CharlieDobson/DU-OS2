@@ -62,7 +62,6 @@ static const unsigned char SIG_RAR[6] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07 };
 #endif
 
 static UInt32 g_memBudget = 0;      /* 0 = not measured yet          */
-static UInt32 g_memForced = 0;      /* MemoryLimitMB, 0 = auto       */
 
 /* The two raw readings the budget is derived from, kept so a user can be
  * asked what their machine actually reported instead of only what the
@@ -82,12 +81,6 @@ static UInt32 g_memForced = 0;      /* MemoryLimitMB, 0 = auto       */
  * 32-bit version of the same call.  See ArcMemReport. */
 static UInt32 g_memSysFree = 0;
 static UInt32 g_memProbed  = 0;
-
-void ArcMemSetLimit( UInt32 mb )
-{
-    g_memForced = mb;
-    g_memBudget = 0;                /* re-decide on the next question */
-}
 
 /* What the system claims is available, in bytes, or 0 when it will not say.
  * Only ever used as the upper bound of the heap probe, never as the answer. */
@@ -167,15 +160,6 @@ static UInt32 ArcMemBudget( void )
 
     if ( g_memBudget ) return g_memBudget;
 
-    if ( g_memForced )                       /* the preference wins outright */
-    {
-        g_memBudget = ( g_memForced > ARC_MEM_CEILING / ( 1024UL * 1024 ) )
-                    ? ARC_MEM_CEILING
-                    : g_memForced * 1024UL * 1024;
-        if ( g_memBudget < ARC_MEM_FLOOR ) g_memBudget = ARC_MEM_FLOOR;
-        return g_memBudget;
-    }
-
     sys = ArcMemSystemFree();
 
     /*---- What the system says is a HINT, not a lid ------------------------ *
@@ -234,15 +218,13 @@ UInt32 ArcMemLimitMB( void )    { return ArcMemBudget() / ( 1024UL * 1024 ); }
  * forces the measurement if it has not happened yet, so they always describe
  * the budget in force.
  *-------------------------------------------------------------------------- */
-void ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB,
-                   int *forced )
+void ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB )
 {
     UInt32 budget = ArcMemBudget();          /* measures on the first call */
 
     if ( sysFreeMB ) *sysFreeMB = g_memSysFree / ( 1024UL * 1024 );
     if ( largestMB ) *largestMB = g_memProbed / ( 1024UL * 1024 );
     if ( budgetMB )  *budgetMB  = budget / ( 1024UL * 1024 );
-    if ( forced )    *forced    = ( g_memForced != 0 );
 }
 
 /*---- How many entries will fit (see ARCDEFS.H) ---------------------------- *
@@ -813,8 +795,8 @@ const char *ArcNoRamHint( void )
              "It needs more than the %lu MB this machine can spare in one "
              "block, usually because it was compressed with a large "
              "dictionary.\n"
-             "Free some memory, or raise MemoryLimitMB in XARCHIVE.INI if "
-             "there is more to give.\n"
+             "Close other programs, or unload what else is resident, and try "
+             "again.\n"
              "Failing that, re-create the archive with a dictionary of %lu MB "
              "or less (in 7-Zip, the Dictionary size setting, or simply a "
              "lower compression level).",
@@ -835,9 +817,9 @@ const char *ArcMemFailHint( void )
              "Not enough memory for this archive.\n"
              "It asked for less than the %lu MB this program allows itself, "
              "and the system still could not provide it in one block.\n"
-             "Close other programs and try again.  If the limit is set by "
-             "hand in XARCHIVE.INI, lower MemoryLimitMB to match what this "
-             "machine really has.\n"
+             "Close other programs and try again - the budget was measured "
+             "when the program started and the machine may have less to give "
+             "now than it did then.\n"
              "Failing that, re-create the archive with a smaller dictionary "
              "(in 7-Zip, the Dictionary size setting, or simply a lower "
              "compression level).",

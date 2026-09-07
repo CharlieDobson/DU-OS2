@@ -22,7 +22,7 @@ rem  Watcom location.  An existing %WATCOM% is honoured -- a normal Open
 rem  Watcom install sets it -- so the fallback below only matters when the
 rem  variable is unset.  A path containing spaces will not work: Watcom's
 rem  -i= option takes no quoting.
-if not defined WATCOM set WATCOM=C:\WATCOM
+if "%WATCOM%"=="" set WATCOM=C:\WATCOM
 
 if not exist "%WATCOM%\binnt\wlink.exe" goto nowatcom
 
@@ -37,7 +37,10 @@ rem  -bm : MULTITHREADED runtime.  Extraction, the integrity test and the
 rem        archive-header parse each run on a worker thread via
 rem        ..\..\COMMON\PMWORKER.C, and _beginthread needs the multithreaded
 rem        libraries.  Every module must have it, backends included.
-set CFLAGS=-bt=os2 -bm -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
+rem  These flags are spelled out at each compile line below rather than
+rem  held in CFLAGS.  NT 3.51's SET splits on the LAST '=', so it refuses
+rem  any value containing one: "set CFLAGS=-bt=..." sets nothing there and
+rem  reports only "The syntax of the command is incorrect".
 
 rem  256 KB, as the other OS/2 ports use.  The archive backends were made
 rem  heap-based rather than stack-hungry for the 64 KB DOS build, so there is
@@ -45,7 +48,11 @@ rem  plenty of head-room here; the deepest chain is dialog -> extract -> the
 rem  RAR solid sink.
 set STACK=262144
 
-pushd "%~dp0"
+rem  NT 3.51's cmd.exe has no %~dp0.  Win32 folds "<file>\.."
+rem  lexically, so "%0\.." is the directory holding this script, and
+rem  pushd - unlike cd - changes the drive as well.
+pushd "%0\.."
+if not exist MKOS2.CMD goto nohome
 
 del XARCHIVE.EXE >nul 2>&1
 del XARCHIVE.res >nul 2>&1
@@ -92,13 +99,13 @@ rem     backend, copied from the Win32s tree unchanged.
 rem --------------------------------------------------------------------------
 echo Compiling...
 for %%F in (PMMAIN OS2PLAT COMPAT ARCFILE ARCPREF SZARC ZIPARC RARARC RAR3DEC RAR5ARC DISKARC LZMADEC CRC32) do (
-  wcc386 ..\%%F.C %CFLAGS%
+  wcc386 ..\%%F.C -bt=os2 -bm -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
   if errorlevel 1 goto failed
   if not exist %%F.obj goto failed
 )
 
 rem  The shared worker, from the tree the other OS/2 ports use.
-wcc386 ..\..\COMMON\PMWORKER.C %CFLAGS%
+wcc386 ..\..\COMMON\PMWORKER.C -bt=os2 -bm -otexan -zq -w4 -e25 -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
 if errorlevel 1 goto failed
 
 rem --------------------------------------------------------------------------
@@ -134,7 +141,7 @@ echo.
 echo Built BUILD\XARCHIVE.EXE  (OS/2 2.x / Warp, 32-bit Presentation Manager).
 popd
 endlocal
-goto :eof
+goto end
 
 :nowatcom
 echo.
@@ -144,11 +151,24 @@ echo *** Set the WATCOM environment variable to your Open Watcom 1.9
 echo *** installation directory, or edit the fallback near the top of
 echo *** this script.
 endlocal
-exit /b 1
+goto failrc
 
 :failed
 echo.
 echo *** BUILD FAILED - see the wcc386/wrc/wlink errors above.
 popd
 endlocal
-exit /b 1
+goto failrc
+
+:nohome
+echo *** Could not switch to the directory holding MKOS2.CMD.
+echo *** Run MKOS2.CMD from that directory; a path with spaces in it
+echo *** cannot be found this way on NT 3.51.
+
+:failrc
+rem  NT 3.51's cmd.exe has no EXIT /B, and its EXIT ignores an exit code.
+rem  A FIND that matches nothing is how this script hands ERRORLEVEL 1
+rem  back to whoever called it, so it must be the LAST thing run.
+ver | find "@@" > nul
+
+:end
