@@ -35,6 +35,8 @@
 #define IDD_NEWFOLDER                   107
 #define IDD_FOLDERPICK                  108
 #define IDD_OVERWRITE                   109
+#define IDD_PASSWORD                    110
+#define IDD_COMMENT                     111
 
 /* commands (menu items and the toolbar buttons alike) */
 #define IDM_FILE_OPEN                   201
@@ -44,6 +46,7 @@
 #define IDM_ARCHIVE_INFO                207
 #define IDM_ARCHIVE_TEST                208
 #define IDM_ARCHIVE_PATHS               209   /* checkable: keep folder names */
+#define IDM_ARCHIVE_COMMENT             210
 #define IDM_HELP_ABOUT                  301
 
 /* controls */
@@ -65,6 +68,12 @@
  * and No buttons; PM has no such stock IDs, so they get numbers here. */
 #define IDC_OW_YES                      1015
 #define IDC_OW_NO                       1016
+#define IDC_PW_EDIT                     1017
+#define IDC_PW_PROMPT                   1018
+/* 1019 is skipped so this control keeps the SAME number as its Win32s
+ * twin: that tree's next free was 1017, this one's was 1019, and 1020 is
+ * the first number free in both. */
+#define IDC_COMMENT_TEXT                1020
 #define IDC_STATIC                      -1
 
 #endif /* RESOURCE_H */

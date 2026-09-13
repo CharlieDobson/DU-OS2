@@ -16,7 +16,9 @@
 #include <direct.h>      /* _mkdir */
 
 #include "ziparc.h"
+#include "arccryp.h"    /* ZipCrypto + WinZip AES */
 #include "platform.h"   /* SetFileDosMTime */
+#include "volio.h"      /* .zip.001/.002/... joined into one stream */
 
 /*---- ZIP structure constants --------------------------------------------- */
 #define SIG_LOCAL   0x04034B50UL
@@ -26,9 +28,64 @@
 #define METHOD_STORE   0
 #define METHOD_IMPLODE 6
 #define METHOD_DEFLATE 8
+#define METHOD_AES     99      /* not a compression method at all: a marker
+                                * saying "see the 0x9901 extra field for the
+                                * real one".  An extractor that does not know
+                                * this reports a WinZip AES entry as using an
+                                * unknown method, which is how they usually
+                                * present themselves.                       */
 
 #define FLAG_DATADESC  0x0008
 #define FLAG_ENCRYPTED 0x0001
+
+#define EXTRA_AES      0x9901  /* WinZip AES extra field                    */
+#define AES_AUTH_LEN   10      /* truncated HMAC-SHA1 tag after the data    */
+#define AES_PWVER_LEN  2       /* password check bytes after the salt       */
+#define ZC_HDR_LEN     12      /* ZipCrypto encryption header               */
+
+/*---------------------------------------------------------------------------
+ * One entry's decryptor.
+ *
+ * Both zip encryption schemes are stream ciphers from the reader's point of
+ * view, which is what makes this tidy: a single filter sits between the file
+ * and the decompressor, and the decompressor never learns that the archive was
+ * encrypted at all.  Everything above BrFill and the stored-copy loop is
+ * unchanged from the days when zips were plaintext.
+ *
+ * The HMAC is deliberately fed the CIPHERTEXT, before decryption, because that
+ * is what WinZip authenticates - encrypt-then-MAC.  Feeding it the plaintext
+ * would be a perfectly reasonable-looking mistake that produces a tag mismatch
+ * on every correct archive.
+ *--------------------------------------------------------------------------*/
+#define CIPH_NONE  0
+#define CIPH_ZC    1
+#define CIPH_AES   2
+
+typedef struct {
+    int           kind;
+    ZipCryptState zc;
+    AesCtrState   ctr;
+    HmacSha1Ctx   mac;
+    unsigned long nproc;        /* ciphertext bytes seen; see CiphFinish */
+} ZipCipher;
+
+static void CiphDecrypt( ZipCipher *c, unsigned char *buf, unsigned long len )
+{
+    if ( !c || c->kind == CIPH_NONE )
+        return;
+
+    c->nproc += len;
+
+    if ( c->kind == CIPH_ZC )
+    {
+        ZipCryptDecrypt( &c->zc, buf, (UInt32)len );
+    }
+    else
+    {
+        HmacSha1Update( &c->mac, buf, (unsigned)len );   /* ciphertext! */
+        AesCtrXor( &c->ctr, buf, (UInt32)len );
+    }
+}
 
 #pragma pack(1)
 typedef struct {
@@ -112,25 +169,38 @@ static unsigned long UpdateCrc( unsigned long crc,
 #define WSIZE_MASK   (WSIZE - 1)
 
 typedef struct {
-    FILE         *fp;
+    VolFile      *fp;
     unsigned long bitsLeft;
     unsigned long bitBuf;
     unsigned long bytesLeft;
     int           eof;
+    ZipCipher    *ciph;         /* NULL for a plaintext entry */
 } BitReader;
 
-static void BrInit( BitReader *br, FILE *fp, unsigned long compSize )
+static void BrInit( BitReader *br, VolFile *fp, unsigned long compSize,
+                    ZipCipher *ciph )
 {
     br->fp = fp; br->bitsLeft = 0; br->bitBuf = 0;
     br->bytesLeft = compSize; br->eof = 0;
+    br->ciph = ciph;
 }
 
 static int BrFill( BitReader *br )
 {
     int c;
     if ( br->bytesLeft == 0 ) { br->eof = 1; return -1; }
-    c = fgetc( br->fp );
+    c = VolGetc( br->fp );
     if ( c == EOF ) { br->eof = 1; return -1; }
+    /* The one place a compressed stream turns into bytes, and therefore the
+     * one place decryption has to happen.  A byte at a time is not as costly
+     * as it looks: ZipCrypto is byte-oriented anyway, and AES-CTR only runs
+     * the block cipher once per sixteen calls. */
+    if ( br->ciph )
+    {
+        unsigned char b = (unsigned char)c;
+        CiphDecrypt( br->ciph, &b, 1 );
+        c = b;
+    }
     br->bytesLeft--;
     br->bitBuf |= ( (unsigned long)(unsigned char)c ) << br->bitsLeft;
     br->bitsLeft += 8;
@@ -333,10 +403,10 @@ static const int clOrder[19] = {
     16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15
 };
 
-static int Inflate( FILE *in, FILE *out,
+static int Inflate( VolFile *in, FILE *out,
                     unsigned char *memSink, unsigned long memCap,
                     unsigned long compSize, unsigned long uncompSize,
-                    unsigned long *crcOut )
+                    unsigned long *crcOut, ZipCipher *ciph )
 {
     unsigned char *window;
     unsigned char  llit[288], ldist[32];
@@ -365,7 +435,7 @@ static int Inflate( FILE *in, FILE *out,
 
     o.out = out; o.mem = memSink; o.memPos = 0; o.memCap = memCap;
     o.len = 0; o.crc = 0; o.rc = SZ_OK;
-    BrInit( &br, in, compSize );
+    BrInit( &br, in, compSize, ciph );
 
     for ( ;; )
     {
@@ -538,10 +608,11 @@ static int SfDecode( SfTree *t, BitReader *br )
     return -1;
 }
 
-static int Explode( FILE *in, FILE *out,
+static int Explode( VolFile *in, FILE *out,
                     unsigned char *memSink, unsigned long memCap,
                     unsigned long compSize, unsigned long uncompSize,
-                    unsigned int gpflag, unsigned long *crcOut )
+                    unsigned int gpflag, unsigned long *crcOut,
+                    ZipCipher *ciph )
 {
     unsigned char *window;
     SfTree        *litT, *lenT, *distT;
@@ -571,7 +642,7 @@ static int Explode( FILE *in, FILE *out,
 
     o.out = out; o.mem = memSink; o.memPos = 0; o.memCap = memCap;
     o.len = 0; o.crc = 0; o.rc = SZ_OK;
-    BrInit( &br, in, compSize );
+    BrInit( &br, in, compSize, ciph );
 
     if ( threeTrees && SfLoad( litT, &br, 256 ) ) { rc = SZ_ERR_DATA; goto edone; }
     if ( SfLoad( lenT,  &br, 64 ) )               { rc = SZ_ERR_DATA; goto edone; }
@@ -641,7 +712,7 @@ edone:
  * (SZ_MAX_FILES is only the refusal limit).  Fixed tables here would cost
  * ~5 MB for every zip opened, however few files it holds. */
 struct ZipArchive {
-    FILE    *fp;
+    VolFile *fp;
     long     bias;                          /* SFX stub offset bias         */
     int      numEntries;
     ZipEntry      *entries;                 /* public: name/size/crc/isDir  */
@@ -649,7 +720,69 @@ struct ZipArchive {
     unsigned int  *method;
     unsigned int  *flags;
     long          *localOffset;
+    char          *comment;                 /* EOCD comment, NULL if none   */
+
+    /* WinZip AES, per entry.  strength is 0 for an entry that is not AES -
+     * which includes ZipCrypto entries, whose scheme carries no parameters at
+     * all and needs nothing remembered here. */
+    Byte          *aesStrength;             /* 1 = 128, 2 = 192, 3 = 256    */
+    Byte          *aesVer;                  /* 1 = AE-1 (has CRC), 2 = AE-2 */
+
+    /* The password, held for the life of the archive because every entry
+     * needs it and the user should be asked once.  Not scrubbed on close:
+     * this is a single-user DOS box with no swap file and no other process to
+     * hide it from, and pretending otherwise would be security theatre. */
+    char           password[ AC_MAX_PW + 1 ];
+    int            havePw;
 };
+
+/* The zip's own comment: the bytes after the end-of-central-directory record,
+ * which is the one place a zip keeps free text.  Read here rather than in
+ * FindEndRec because FindEndRec runs on files that turn out not to be zips at
+ * all, and it has no business allocating for those.  A comment of zero length
+ * stays NULL, which is what "no comment" means to the caller. */
+static void ZipReadComment( ZipArchive *z, long eocdPos, unsigned short len )
+{
+    if ( !len ) return;
+    z->comment = (char *)malloc( (size_t)len + 1 );
+    if ( !z->comment ) return;                     /* best effort, like names */
+    if ( VolSeek( z->fp, eocdPos + (long)sizeof( EndRec ), SEEK_SET ) != 0 ||
+         VolRead( z->comment, 1, len, z->fp ) != len )
+    { free( z->comment ); z->comment = NULL; return; }
+    z->comment[len] = '\0';
+}
+
+/*---- The largest single extraction this archive will ask for -------------- *
+ * Zip is the cheap one and it is cheap by a wide margin: extraction to disk
+ * streams through a fixed 32 KB sliding window and an 8 KB output buffer, and
+ * neither Inflate nor Explode allocates anything that grows with the entry.
+ * It is the same figure for a 2 KB zip and a 2 GB one, which is precisely why
+ * a single program-wide memory check could never have been right - see
+ * ArcMemNeeded in ARCFILE.C.
+ *
+ * Measured against the tracking allocator: NASTY.ZIP peaks at 44 KB with a
+ * 32 KB largest block, which is the window.  The trees are a few hundred
+ * bytes each and are counted here rather than waved away, since on the
+ * machines this matters a few hundred bytes is a real fraction.
+ *
+ * z MAY BE NULL, and that is load-bearing rather than mere tolerance:
+ * ArcMemStartupOk asks this function what the cheapest possible extraction
+ * costs before any archive has been opened, so that the "this machine
+ * cannot extract anything" floor is derived from the code that does the
+ * work instead of being a second constant that can drift away from it.
+ *-------------------------------------------------------------------------- */
+UInt32 ZipMemNeeded( ZipArchive *z )
+{
+    UInt32 trees = (UInt32)( sizeof( HuffTree ) * 3 + sizeof( SfTree ) * 3 );
+
+    (void)z;
+    return (UInt32)WSIZE + (UInt32)OBUF_SIZE + trees;
+}
+
+const char *ZipComment( ZipArchive *z )
+{
+    return ( z && z->comment && z->comment[0] ) ? z->comment : NULL;
+}
 
 /* Allocate the parallel entry tables for 'n' entries.  0 on failure. */
 static int ZipAllocTables( ZipArchive *z, unsigned n )
@@ -660,8 +793,155 @@ static int ZipAllocTables( ZipArchive *z, unsigned n )
     z->method      = (unsigned int *)calloc( n, sizeof( unsigned int ) );
     z->flags       = (unsigned int *)calloc( n, sizeof( unsigned int ) );
     z->localOffset = (long *)calloc( n, sizeof( long ) );
+    z->aesStrength = (Byte *)calloc( n, sizeof( Byte ) );
+    z->aesVer      = (Byte *)calloc( n, sizeof( Byte ) );
     return ( z->entries && z->compSize && z->method &&
-             z->flags && z->localOffset );
+             z->flags && z->localOffset && z->aesStrength && z->aesVer );
+}
+
+/*---------------------------------------------------------------------------
+ * Set up the decryptor for one entry.
+ *
+ * Called with the file positioned at the first byte of the entry's data (just
+ * past the local header).  On success the file sits at the first byte of
+ * COMPRESSED data - the encryption header or salt having been consumed - and
+ * *dataLen is the compressed length with the encryption overhead removed.
+ * That subtraction matters: compSize in the directory counts the salt, the
+ * password verifier and the authentication tag, none of which are compressed
+ * data, and handing the unadjusted figure to the decompressor makes it read
+ * the tag as if it were deflate codes.
+ *
+ * Returns SZ_ERR_PASSWORD when the entry is encrypted and no password is set -
+ * the signal for the front end to prompt - and SZ_ERR_BADPASS when one is set
+ * and demonstrably wrong.
+ *--------------------------------------------------------------------------*/
+static int CiphBegin( ZipArchive *z, int idx, ZipCipher *ciph,
+                      unsigned long *dataLen )
+{
+    ZipEntry *e = &z->entries[idx];
+
+    memset( ciph, 0, sizeof( *ciph ) );
+    ciph->kind = CIPH_NONE;
+    *dataLen   = z->compSize[idx];
+
+    if ( !( z->flags[idx] & FLAG_ENCRYPTED ) )
+        return SZ_OK;
+    if ( !z->havePw )
+        return SZ_ERR_PASSWORD;
+
+    if ( z->aesStrength[idx] )
+    {
+        Byte salt[16], wantVer[2], gotVer[2];
+        Byte cipherKey[32], macKey[32];
+        int  keyBytes, saltLen, rc;
+        unsigned long overhead;
+
+        saltLen = ZipAesSaltLen( z->aesStrength[idx] );
+        if ( !saltLen )
+            return SZ_ERR_FORMAT;
+
+        overhead = (unsigned long)saltLen + AES_PWVER_LEN + AES_AUTH_LEN;
+        if ( *dataLen < overhead )
+            return SZ_ERR_FORMAT;
+
+        if ( VolRead( salt, 1, saltLen, z->fp ) != (size_t)saltLen )
+            return SZ_ERR_READ;
+        if ( VolRead( gotVer, 1, AES_PWVER_LEN, z->fp ) != AES_PWVER_LEN )
+            return SZ_ERR_READ;
+
+        rc = ZipAesDeriveKeys( z->password, salt, z->aesStrength[idx],
+                               cipherKey, macKey, wantVer, &keyBytes );
+        if ( rc != SZ_OK )
+            return rc;                       /* AES-192: unsupported        */
+
+        /* Two bytes of check value.  Cheap, and it means a wrong password
+         * costs the user a prompt rather than a whole failed extraction. */
+        if ( wantVer[0] != gotVer[0] || wantVer[1] != gotVer[1] )
+            return SZ_ERR_BADPASS;
+
+        rc = AesCtrInit( &ciph->ctr, cipherKey, keyBytes );
+        if ( rc != SZ_OK )
+            return rc;
+        HmacSha1Init( &ciph->mac, macKey, keyBytes );
+        ciph->kind = CIPH_AES;
+        *dataLen  -= overhead;
+        return SZ_OK;
+    }
+
+    {
+        Byte hdr[ ZC_HDR_LEN ];
+
+        if ( *dataLen < ZC_HDR_LEN )
+            return SZ_ERR_FORMAT;
+        if ( VolRead( hdr, 1, ZC_HDR_LEN, z->fp ) != ZC_HDR_LEN )
+            return SZ_ERR_READ;
+
+        ZipCryptInit( &ciph->zc, z->password );
+        ZipCryptDecrypt( &ciph->zc, hdr, ZC_HDR_LEN );
+        if ( !ZipCryptCheck( hdr, e->crc, e->modTime,
+                             ( z->flags[idx] & FLAG_DATADESC ) ? 1 : 0 ) )
+            return SZ_ERR_BADPASS;
+
+        ciph->kind = CIPH_ZC;
+        *dataLen  -= ZC_HDR_LEN;
+    }
+    return SZ_OK;
+}
+
+/*---------------------------------------------------------------------------
+ * Finish an entry: verify the WinZip authentication tag.
+ *
+ * Two things make this fiddlier than "read ten bytes and compare".
+ *
+ * First, the tag covers EVERY ciphertext byte, and the decompressor is not
+ * obliged to have read them all - inflate stops at the end-of-stream symbol
+ * and can leave padding behind.  So anything unread is streamed through the
+ * MAC here before finalising.  Hashing only what inflate happened to want
+ * would make the check pass or fail depending on the compressor's padding,
+ * which is the sort of bug that appears in one archive out of fifty.
+ *
+ * Second, the file has to be positioned explicitly rather than assumed: the
+ * decompressor left it wherever its look-ahead stopped.
+ *
+ * A mismatch is reported as SZ_ERR_CRC, not SZ_ERR_BADPASS.  By this point the
+ * password has already passed its own check, so the overwhelmingly likely
+ * explanation is a damaged archive, and telling the user to retype a correct
+ * password would send them the wrong way.
+ *--------------------------------------------------------------------------*/
+static int CiphFinish( ZipArchive *z, ZipCipher *ciph,
+                       long dataStart, unsigned long dataLen )
+{
+    Byte tag[20], want[ AES_AUTH_LEN ], buf[512];
+
+    if ( ciph->kind != CIPH_AES )
+        return SZ_OK;
+
+    if ( ciph->nproc < dataLen )
+    {
+        unsigned long left = dataLen - ciph->nproc;
+
+        if ( VolSeek( z->fp, dataStart + (long)ciph->nproc, SEEK_SET ) != 0 )
+            return SZ_ERR_READ;
+        while ( left )
+        {
+            unsigned int n = ( left > sizeof( buf ) )
+                           ? (unsigned int)sizeof( buf ) : (unsigned int)left;
+            if ( VolRead( buf, 1, n, z->fp ) != n )
+                return SZ_ERR_READ;
+            CiphDecrypt( ciph, buf, n );    /* for the MAC; plaintext dropped */
+            left -= n;
+        }
+    }
+
+    if ( VolSeek( z->fp, dataStart + (long)dataLen, SEEK_SET ) != 0 )
+        return SZ_ERR_READ;
+    if ( VolRead( want, 1, AES_AUTH_LEN, z->fp ) != AES_AUTH_LEN )
+        return SZ_ERR_READ;
+
+    HmacSha1Final( &ciph->mac, tag );
+    if ( memcmp( tag, want, AES_AUTH_LEN ) != 0 )
+        return SZ_ERR_CRC;
+    return SZ_OK;
 }
 
 /*---- Path helpers -------------------------------------------------------- */
@@ -727,14 +1007,14 @@ static void BuildOut( char *dst, int dstSize,
  * signature; this now matches it. */
 #define ZIP_EOCD_WINDOW 65556L      /* furthest back the record can start */
 
-static int FindEndRec( FILE *fp, EndRec *er, long *eocdPos )
+static int FindEndRec( VolFile *fp, EndRec *er, long *eocdPos )
 {
     unsigned char *buf;
     long           fileLen, base, want, got, i;
     int            rc = SZ_ERR_SIG;
 
-    fseek( fp, 0L, SEEK_END );
-    fileLen = ftell( fp );
+    VolSeek( fp, 0L, SEEK_END );
+    fileLen = VolTell( fp );
     if ( fileLen < (long)sizeof( EndRec ) ) return SZ_ERR_SIG;
 
     want = ( fileLen < ZIP_EOCD_WINDOW ) ? fileLen : ZIP_EOCD_WINDOW;
@@ -743,8 +1023,8 @@ static int FindEndRec( FILE *fp, EndRec *er, long *eocdPos )
     buf = (unsigned char *)malloc( (size_t)want );
     if ( !buf ) return SZ_ERR_MEMORY;
 
-    if ( fseek( fp, base, SEEK_SET ) != 0 ) { free( buf ); return SZ_ERR_READ; }
-    got = (long)fread( buf, 1, (size_t)want, fp );
+    if ( VolSeek( fp, base, SEEK_SET ) != 0 ) { free( buf ); return SZ_ERR_READ; }
+    got = (long)VolRead( buf, 1, (size_t)want, fp );
 
     /* Highest candidate first, so a comment that happens to contain the
      * signature cannot mask the real record - same order as the old walk. */
@@ -785,11 +1065,35 @@ int ZipOpen( const char *path, ZipArchive **out )
     z = (ZipArchive *)calloc( 1, sizeof( ZipArchive ) );
     if ( !z ) return SZ_ERR_MEMORY;
 
-    z->fp = fopen( path, "rb" );
-    if ( !z->fp ) { ZipClose( z ); return SZ_ERR_OPEN; }
+    /* VolOpen joins a .zip.001/.002/... set - 7-Zip splits a finished zip by
+     * raw bytes, so the join IS the original file.  A true SPANNED zip is a
+     * different thing entirely (.z01/.z02/.zip, per-disk offsets) and is
+     * caught below by its non-zero disk numbers. */
+    rc = VolOpen( path, &z->fp );
+    if ( rc != SZ_OK ) { ZipClose( z ); return rc; }
 
     rc = FindEndRec( z->fp, &er, &eocdPos );
-    if ( rc ) { ZipClose( z ); return rc; }
+    if ( rc )
+    {
+        /* No end-of-central-directory.  Across a split set that usually means
+         * the LAST volume - which is where the EOCD lives - has not been
+         * copied.  But only say so if this really is a zip: a stray .001 that
+         * is not an archive at all must still be reported as "not an archive",
+         * so require the local-file-header magic before blaming a volume. */
+        if ( rc == SZ_ERR_SIG && VolIsSet( z->fp ) )
+        {
+            unsigned char lfh[4];
+
+            if ( VolSeek( z->fp, 0L, SEEK_SET ) == 0 &&
+                 VolRead( lfh, 1, 4, z->fp ) == 4 &&
+                 lfh[0] == 0x50 && lfh[1] == 0x4B &&
+                 lfh[2] == 0x03 && lfh[3] == 0x04 )
+                rc = SZ_ERR_VOLUME;
+        }
+        ZipClose( z ); return rc;
+    }
+
+    ZipReadComment( z, eocdPos, er.commentLen );
 
     if ( er.diskNum != 0 || er.diskStart != 0 )
     { ZipClose( z ); return SZ_ERR_UNSUPPORTED; }
@@ -805,7 +1109,7 @@ int ZipOpen( const char *path, ZipArchive **out )
      * EOCD begins, giving the bias to add to every offset. */
     z->bias = ( eocdPos - (long)er.dirSize ) - (long)er.dirOffset;
 
-    if ( fseek( z->fp, (long)er.dirOffset + z->bias, SEEK_SET ) != 0 )
+    if ( VolSeek( z->fp, (long)er.dirOffset + z->bias, SEEK_SET ) != 0 )
     { ZipClose( z ); return SZ_ERR_FORMAT; }
 
     z->numEntries = 0;
@@ -813,22 +1117,65 @@ int ZipOpen( const char *path, ZipArchive **out )
     {
         ZipEntry *e;
         unsigned int fnLen;
+        unsigned int aesMethod;
+        Byte         aesStrength, aesVer;
         int          j, last;
 
-        if ( fread( &ch, sizeof( CentralHdr ), 1, z->fp ) != 1 )
+        if ( VolRead( &ch, sizeof( CentralHdr ), 1, z->fp ) != 1 )
         { ZipClose( z ); return SZ_ERR_READ; }
         if ( ch.sig != SIG_CENT )
         { ZipClose( z ); return SZ_ERR_FORMAT; }
 
         fnLen = ( ch.fnLen < SZ_MAX_NAME - 1 ) ? ch.fnLen : SZ_MAX_NAME - 1;
-        if ( fread( fname, 1, fnLen, z->fp ) != fnLen )
+        if ( VolRead( fname, 1, fnLen, z->fp ) != fnLen )
         { ZipClose( z ); return SZ_ERR_READ; }
         fname[fnLen] = '\0';
         /* skip any of the field we clamped, plus extra + comment */
-        resumePos = ftell( z->fp ) + (long)( ch.fnLen - fnLen ) +
+        resumePos = VolTell( z->fp ) + (long)( ch.fnLen - fnLen ) +
                     (long)ch.extraLen + (long)ch.commentLen;
 
+        /* The extra field used to be skipped wholesale.  It cannot be any
+         * more: a WinZip AES entry keeps its REAL compression method in there,
+         * and its method word says 99, so skipping the extra field leaves no
+         * way to decompress the entry even once it has been decrypted. */
         e = &z->entries[z->numEntries];
+        aesStrength = 0;
+        aesVer      = 0;
+        aesMethod   = ch.method;
+        if ( ch.method == METHOD_AES && ch.extraLen > 0 )
+        {
+            Byte  ex[ 512 ];
+            unsigned int exLen = ( ch.extraLen < sizeof( ex ) )
+                               ? ch.extraLen : (unsigned int)sizeof( ex );
+            long  exPos = VolTell( z->fp ) + (long)( ch.fnLen - fnLen );
+
+            if ( VolSeek( z->fp, exPos, SEEK_SET ) == 0 &&
+                 VolRead( ex, 1, exLen, z->fp ) == exLen )
+            {
+                unsigned int p = 0;
+
+                /* Walk the [id][size][data] chain looking for 0x9901.  The
+                 * bounds test is  p + 4 + size <= exLen  rather than the
+                 * tempting  p < exLen : a truncated final header would
+                 * otherwise be read past the end of the buffer. */
+                while ( p + 4 <= exLen )
+                {
+                    unsigned int id  = ex[p] | ( (unsigned int)ex[p+1] << 8 );
+                    unsigned int siz = ex[p+2] | ( (unsigned int)ex[p+3] << 8 );
+
+                    if ( p + 4 + siz > exLen ) break;
+                    if ( id == EXTRA_AES && siz >= 7 )
+                    {
+                        aesVer      = ex[p+4];      /* 1 = AE-1, 2 = AE-2  */
+                        aesStrength = ex[p+8];
+                        aesMethod   = ex[p+9] |
+                                      ( (unsigned int)ex[p+10] << 8 );
+                        break;
+                    }
+                    p += 4 + siz;
+                }
+            }
+        }
         for ( j = 0; fname[j]; j++ )
             e->name[j] = ( fname[j] == '/' ) ? '\\' : fname[j];
         e->name[j] = '\0';
@@ -840,17 +1187,21 @@ int ZipOpen( const char *path, ZipArchive **out )
         e->size       = ch.uncompSize;
         e->packed     = ch.compSize;
         e->crc        = ch.crc32;
-        e->methodCode = ch.method;
+        /* For an AES entry these are the REAL method, not 99, so the list view
+         * says "Deflate" and the dispatch below needs no special case. */
+        e->methodCode = (int)aesMethod;
         e->modDate    = ch.modDate;
         e->modTime    = ch.modTime;
         e->attrib     = ch.extAttr;
         z->compSize[z->numEntries]    = ch.compSize;
-        z->method[z->numEntries]      = ch.method;
+        z->method[z->numEntries]      = aesMethod;
+        z->aesStrength[z->numEntries] = aesStrength;
+        z->aesVer[z->numEntries]      = aesVer;
         z->flags[z->numEntries]       = ch.flags;
         z->localOffset[z->numEntries] = ch.localOffset;
         z->numEntries++;
 
-        fseek( z->fp, resumePos, SEEK_SET );
+        VolSeek( z->fp, resumePos, SEEK_SET );
     }
 
     *out = z;
@@ -860,6 +1211,11 @@ int ZipOpen( const char *path, ZipArchive **out )
 int ZipNumEntries( ZipArchive *z )
 {
     return z ? z->numEntries : 0;
+}
+
+int ZipVolumeCount( ZipArchive *z )
+{
+    return ( z && z->fp ) ? VolCount( z->fp ) : 1;
 }
 
 const ZipEntry *ZipGetEntry( ZipArchive *z, int index )
@@ -879,6 +1235,9 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
     unsigned int  toRead;
     unsigned char buf[512];
     int           rc;
+    ZipCipher     ciph;
+    unsigned long dataLen;
+    long          dataStart;
 
     /* destDir == NULL means "test only": decode + CRC-check but write nothing. */
     if ( destDir )
@@ -899,7 +1258,6 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
     if ( destDir && !ArcWantWrite( outPath ) )
         return SZ_OK;                  /* exists and the user chose to keep it */
 
-    if ( z->flags[idx] & FLAG_ENCRYPTED )                 return SZ_ERR_UNSUPPORTED;
     if ( z->method[idx] != METHOD_STORE &&
          z->method[idx] != METHOD_DEFLATE &&
          z->method[idx] != METHOD_IMPLODE )               return SZ_ERR_UNSUPPORTED;
@@ -907,14 +1265,20 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
     /* The local header repeats the name/extra fields; read it to find where
      * the compressed data actually starts (extra fields can differ from the
      * central directory copy). */
-    if ( fseek( z->fp, z->localOffset[idx] + z->bias, SEEK_SET ) != 0 )
+    if ( VolSeek( z->fp, z->localOffset[idx] + z->bias, SEEK_SET ) != 0 )
         return SZ_ERR_READ;
-    if ( fread( &lh, sizeof( LocalHdr ), 1, z->fp ) != 1 )
+    if ( VolRead( &lh, sizeof( LocalHdr ), 1, z->fp ) != 1 )
         return SZ_ERR_READ;
     if ( lh.sig != SIG_LOCAL )
         return SZ_ERR_FORMAT;
-    if ( fseek( z->fp, (long)lh.fnLen + (long)lh.extraLen, SEEK_CUR ) != 0 )
+    if ( VolSeek( z->fp, (long)lh.fnLen + (long)lh.extraLen, SEEK_CUR ) != 0 )
         return SZ_ERR_READ;
+
+    /* Decryption is set up BEFORE the output file is created, so that a
+     * missing or wrong password leaves no zero-length file behind. */
+    rc = CiphBegin( z, idx, &ciph, &dataLen );
+    if ( rc != SZ_OK ) return rc;
+    dataStart = VolTell( z->fp );
 
     if ( destDir )
     {
@@ -934,7 +1298,8 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
         while ( remain > 0 )
         {
             toRead = ( remain > 512UL ) ? 512U : (unsigned int)remain;
-            if ( fread( buf, 1, toRead, z->fp ) != toRead ) { rc = SZ_ERR_READ;  break; }
+            if ( VolRead( buf, 1, toRead, z->fp ) != toRead ) { rc = SZ_ERR_READ;  break; }
+            CiphDecrypt( &ciph, buf, toRead );
             crc = UpdateCrc( crc, buf, toRead );
             if ( out && fwrite( buf, 1, toRead, out ) != toRead ) { rc = SZ_ERR_WRITE; break; }
             remain -= toRead;
@@ -943,17 +1308,23 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
     }
     else if ( z->method[idx] == METHOD_IMPLODE )
     {
-        rc = Explode( z->fp, out, NULL, 0, z->compSize[idx], e->size,
-                      z->flags[idx], &crc );
+        rc = Explode( z->fp, out, NULL, 0, dataLen, e->size,
+                      z->flags[idx], &crc, &ciph );
     }
     else
     {
-        rc = Inflate( z->fp, out, NULL, 0, z->compSize[idx], e->size, &crc );
+        rc = Inflate( z->fp, out, NULL, 0, dataLen, e->size, &crc, &ciph );
     }
 
     if ( out ) fclose( out );
 
-    if ( rc == SZ_OK && crc != e->crc )
+    if ( rc == SZ_OK )
+        rc = CiphFinish( z, &ciph, dataStart, dataLen );
+
+    /* AE-2 does not store a CRC - the field is written as zero - so checking
+     * it would fail every correct AE-2 entry.  The authentication tag that
+     * CiphFinish just verified is the integrity check for those. */
+    if ( rc == SZ_OK && z->aesVer[idx] != 2 && crc != e->crc )
         rc = SZ_ERR_CRC;
     if ( rc == SZ_OK )
     {
@@ -973,6 +1344,9 @@ int ZipExtractToMemory( ZipArchive *z, int index,
     unsigned char *buf;
     unsigned long crc = 0;
     int           rc;
+    ZipCipher     ciph;
+    unsigned long dataLen;
+    long          dataStart;
 
     *outBuf = NULL;
     *outLen = 0;
@@ -980,44 +1354,52 @@ int ZipExtractToMemory( ZipArchive *z, int index,
 
     e = &z->entries[index];
     if ( e->isDir )                                       return SZ_ERR_FORMAT;
-    if ( z->flags[index] & FLAG_ENCRYPTED )               return SZ_ERR_UNSUPPORTED;
     if ( z->method[index] != METHOD_STORE &&
          z->method[index] != METHOD_DEFLATE &&
          z->method[index] != METHOD_IMPLODE )             return SZ_ERR_UNSUPPORTED;
 
-    if ( fseek( z->fp, z->localOffset[index] + z->bias, SEEK_SET ) != 0 )
+    if ( VolSeek( z->fp, z->localOffset[index] + z->bias, SEEK_SET ) != 0 )
         return SZ_ERR_READ;
-    if ( fread( &lh, sizeof( LocalHdr ), 1, z->fp ) != 1 )
+    if ( VolRead( &lh, sizeof( LocalHdr ), 1, z->fp ) != 1 )
         return SZ_ERR_READ;
     if ( lh.sig != SIG_LOCAL )
         return SZ_ERR_FORMAT;
-    if ( fseek( z->fp, (long)lh.fnLen + (long)lh.extraLen, SEEK_CUR ) != 0 )
+    if ( VolSeek( z->fp, (long)lh.fnLen + (long)lh.extraLen, SEEK_CUR ) != 0 )
         return SZ_ERR_READ;
+
+    rc = CiphBegin( z, index, &ciph, &dataLen );
+    if ( rc != SZ_OK ) return rc;
+    dataStart = VolTell( z->fp );
 
     buf = (unsigned char *)malloc( e->size ? e->size : 1 );
     if ( !buf ) return SZ_ERR_MEMORY;
 
     if ( z->method[index] == METHOD_STORE )
     {
-        if ( e->size && fread( buf, 1, e->size, z->fp ) != e->size )
+        if ( e->size && VolRead( buf, 1, e->size, z->fp ) != e->size )
         { free( buf ); return SZ_ERR_READ; }
+        CiphDecrypt( &ciph, buf, e->size );
         crc = UpdateCrc( 0, buf, e->size );
         rc  = SZ_OK;
     }
     else if ( z->method[index] == METHOD_IMPLODE )
     {
         rc = Explode( z->fp, NULL, buf, e->size,
-                      z->compSize[index], e->size, z->flags[index], &crc );
+                      dataLen, e->size, z->flags[index], &crc, &ciph );
         if ( rc != SZ_OK ) { free( buf ); return rc; }
     }
     else
     {
         rc = Inflate( z->fp, NULL, buf, e->size,
-                      z->compSize[index], e->size, &crc );
+                      dataLen, e->size, &crc, &ciph );
         if ( rc != SZ_OK ) { free( buf ); return rc; }
     }
 
-    if ( crc != e->crc ) { free( buf ); return SZ_ERR_CRC; }
+    rc = CiphFinish( z, &ciph, dataStart, dataLen );
+    if ( rc != SZ_OK ) { free( buf ); return rc; }
+
+    if ( z->aesVer[index] != 2 && crc != e->crc )
+    { free( buf ); return SZ_ERR_CRC; }
 
     *outBuf = buf;
     *outLen = e->size;
@@ -1062,12 +1444,50 @@ void ZipClose( ZipArchive *z )
 {
     if ( z )
     {
-        if ( z->fp )          fclose( z->fp );
+        if ( z->fp )          VolClose( z->fp );
         if ( z->entries )     free( z->entries );
         if ( z->compSize )    free( z->compSize );
         if ( z->method )      free( z->method );
         if ( z->flags )       free( z->flags );
         if ( z->localOffset ) free( z->localOffset );
+        if ( z->comment )     free( z->comment );
+        if ( z->aesStrength ) free( z->aesStrength );
+        if ( z->aesVer )      free( z->aesVer );
         free( z );
     }
+}
+
+/*---- Password ------------------------------------------------------------ */
+
+void ZipSetPassword( ZipArchive *z, const char *pw )
+{
+    if ( !z ) return;
+
+    if ( !pw || !pw[0] )
+    {
+        z->password[0] = '\0';
+        z->havePw      = 0;
+        return;
+    }
+
+    strncpy( z->password, pw, AC_MAX_PW );
+    z->password[ AC_MAX_PW ] = '\0';
+    z->havePw = 1;
+}
+
+int ZipEntryEncrypted( ZipArchive *z, int index )
+{
+    if ( !z || index < 0 || index >= z->numEntries ) return 0;
+    return ( z->flags[index] & FLAG_ENCRYPTED ) ? 1 : 0;
+}
+
+int ZipNeedsPassword( ZipArchive *z )
+{
+    int i;
+
+    if ( !z ) return 0;
+    for ( i = 0; i < z->numEntries; i++ )
+        if ( z->flags[i] & FLAG_ENCRYPTED )
+            return 1;
+    return 0;
 }

@@ -12,7 +12,9 @@
 #include "szarc.h"
 #include "lzmadec.h"
 #include "crc32.h"
+#include "arccryp.h"    /* AES-256-CBC + the 7z key derivation */
 #include "platform.h"   /* SetFileMTime */
+#include "volio.h"      /* .7z.001/.002/... joined into one stream */
 
 /*---- 7z property IDs ----------------------------------------------------- */
 #define k7zEnd                  0x00
@@ -55,6 +57,16 @@
 #define SZ_C_LZMA2    3
 #define SZ_C_BCJ_X86  4
 #define SZ_C_BCJ2     5
+#define SZ_C_AES      6         /* 06F10701: AES-256-CBC over the packed
+                                 * stream.  Unlike every other coder here it
+                                 * is not a codec at all - it changes no
+                                 * lengths and produces no structure, it just
+                                 * unwraps the bytes on their way in.       */
+
+/* The AES coder's properties are far bigger than any codec's: a cycles-power
+ * byte, a sizes byte, then up to 16 bytes of salt and 16 of IV.  Coder props
+ * used to be 8 bytes because LZMA needs 5. */
+#define SZ_MAX_CODER_PROPS  40
 
 /*---- Internal structures ------------------------------------------------- *
  * A folder is a small graph of coders.  Every coder is parsed STRUCTURALLY,
@@ -77,7 +89,7 @@
  *-------------------------------------------------------------------------- */
 typedef struct {
     int    kind;            /* SZ_C_*                                        */
-    Byte   props[8];
+    Byte   props[SZ_MAX_CODER_PROPS];
     UInt32 propsSize;
     UInt32 numIn, numOut;
     UInt32 firstIn;         /* folder-local index of this coder's first in   */
@@ -97,6 +109,15 @@ typedef struct {
     UInt32 unpackSize;      /* folder final output size                      */
     int    hasCrc;
     UInt32 crc;
+
+    /* AES, when the folder's packed stream is wrapped in the 06F10701 coder.
+     * The props carry the salt, the IV and the iteration count, so they are
+     * kept whole and turned into a key only at decode time - deriving one is
+     * expensive enough (half a million SHA-256 rounds at the 7-Zip default)
+     * that doing it while merely LISTING an archive would be felt. */
+    int      encrypted;
+    Byte     aesProps[SZ_MAX_CODER_PROPS];
+    UInt32   aesPropsSize;
 
     /* Generic structure, filled for every folder including unsupported ones */
     int      unsupported;   /* 1 = parsed but not decodable                  */
@@ -121,7 +142,7 @@ typedef struct {
 } SzFolder;
 
 struct SzArchive {
-    FILE    *fp;
+    VolFile    *fp;
     UInt32   baseOffset;                    /* body start (past start hdr)  */
 
     UInt32   packPos;
@@ -138,7 +159,20 @@ struct SzArchive {
      * table here would cost ~4.8 MB for every archive opened, however small. */
     int      numEntries;
     SzEntry *entries;
+
+    /* The password, set before opening when the header itself is encrypted and
+     * otherwise before extracting.  Held for the archive's lifetime: one
+     * password covers every folder, and the key derivation is far too slow to
+     * repeat per entry. */
+    char     password[ AC_MAX_PW + 1 ];
+    int      havePw;
 };
+
+/* Declared here, defined down with the streaming reader: DecodeFolder needs it
+ * hundreds of lines before that point.  Watcom would accept the implicit
+ * declaration in C89 and quietly assume the wrong prototype; saying it out
+ * loud is what keeps the two builds agreeing. */
+static int SzFolderKey( SzArchive *a, const SzFolder *fo, AesCbcState *cbc );
 
 /*---- Buffer reader over the (decoded) header ----------------------------- */
 typedef struct {
@@ -411,19 +445,126 @@ static int CoderMethod( int kind )
  * fo->unsupported instead of failing: the caller carries on parsing either
  * way, so an unknown codec costs its own entries and nothing else.
  *-------------------------------------------------------------------------- */
+/*
+ * An encrypted folder is the same pipeline as an unencrypted one with one
+ * extra link welded on the FRONT:
+ *
+ *     packed stream -> AES -> LZMA/LZMA2/Copy -> [BCJ] -> folder output
+ *
+ * That is the opposite end from BCJ, which filters the main coder's output,
+ * and it is why encryption cannot simply reuse the filter slot.  What makes it
+ * tractable is that AES here is length-preserving and stateless between calls
+ * once keyed: strip the coder from the graph, decrypt the packed bytes as they
+ * are read, and every stage downstream is exactly the pipeline that was
+ * already working.  So the job of this function is to RECOGNISE the shape and
+ * then describe the folder as if the AES coder were not there.
+ *
+ * Returns the AES coder index, or -1 if the folder has none.  Refuses (via
+ * *bad) anything structurally odd - two AES coders, an AES coder that is not
+ * fed directly by a packed stream - rather than guessing.
+ */
+static int FolderAesCoder( const SzFolder *fo, int *bad )
+{
+    UInt32 c, n = fo->numCoders;
+    int    idx = -1;
+
+    *bad = 0;
+    if ( n > SZ_MAX_CODERS ) n = SZ_MAX_CODERS;
+
+    for ( c = 0; c < n; c++ )
+        if ( fo->coders[c].kind == SZ_C_AES )
+        {
+            if ( idx >= 0 ) { *bad = 1; return -1; }   /* two of them */
+            idx = (int)c;
+        }
+
+    if ( idx < 0 ) return -1;
+
+    /* One in, one out, and its input must come straight off the disk. */
+    if ( fo->coders[idx].numIn != 1 || fo->coders[idx].numOut != 1 )
+    { *bad = 1; return -1; }
+    if ( FolderPackForIn( fo, fo->coders[idx].firstIn ) != 0 )
+    { *bad = 1; return -1; }
+
+    return idx;
+}
+
 static void ClassifyFolder( SzFolder *fo )
 {
     UInt32 finalOut = 0;
     UInt32 o;
     int    bi;
+    int    aesIdx, aesBad;
 
     fo->unsupported = 1;
     fo->isBcj2      = 0;
+    fo->encrypted   = 0;
 
     if ( fo->numCoders > SZ_MAX_CODERS ) return;
     if ( !fo->hasFinalOut ) return;       /* not a single-result folder */
     finalOut = fo->finalOutLocal;
     (void)o;
+
+    aesIdx = FolderAesCoder( fo, &aesBad );
+    if ( aesBad ) return;                 /* unsupported, and says so         */
+
+    if ( aesIdx >= 0 )
+    {
+        /* --- encrypted: AES + main [+ BCJ] --------------------------------
+         * Only these two shapes are accepted.  An encrypted BCJ2 folder is
+         * conceivable and is not handled: BCJ2 reads four packed streams and
+         * each would need its own decryptor, which is a real amount of work
+         * for a combination 7-Zip does not produce by default.  It lists and
+         * reports unsupported rather than half-decoding.
+         *----------------------------------------------------------------- */
+        int    mainIdx = -1, filtIdx = -1;
+        UInt32 c;
+
+        for ( c = 0; c < fo->numCoders; c++ )
+        {
+            if ( (int)c == aesIdx ) continue;
+            if ( CoderIsMain( fo->coders[c].kind ) )       mainIdx = (int)c;
+            else if ( fo->coders[c].kind == SZ_C_BCJ_X86 ) filtIdx = (int)c;
+            else return;                  /* something we do not decode      */
+        }
+        if ( mainIdx < 0 ) return;
+        if ( fo->numPackStreams != 1 ) return;
+
+        /* AES output must feed the main coder's input. */
+        {
+            int b = FolderBindForIn( fo, fo->coders[mainIdx].firstIn );
+            if ( b < 0 ) return;
+            if ( fo->bpOut[b] != fo->coders[aesIdx].firstOut ) return;
+        }
+
+        if ( filtIdx < 0 )
+        {
+            if ( fo->numCoders != 2 || fo->numBindPairs != 1 ) return;
+            if ( finalOut != fo->coders[mainIdx].firstOut ) return;
+            fo->filter = SZ_F_NONE;
+        }
+        else
+        {
+            int b;
+            if ( fo->numCoders != 3 || fo->numBindPairs != 2 ) return;
+            b = FolderBindForIn( fo, fo->coders[filtIdx].firstIn );
+            if ( b < 0 ) return;
+            if ( fo->bpOut[b] != fo->coders[mainIdx].firstOut ) return;
+            if ( finalOut != fo->coders[filtIdx].firstOut ) return;
+            fo->filter = SZ_F_BCJ_X86;
+        }
+
+        fo->method       = CoderMethod( fo->coders[mainIdx].kind );
+        fo->propsSize    = fo->coders[mainIdx].propsSize;
+        memcpy( fo->props, fo->coders[mainIdx].props, sizeof( fo->props ) );
+        fo->mainOutLocal = fo->coders[mainIdx].firstOut;
+        fo->encrypted    = 1;
+        fo->aesPropsSize = fo->coders[aesIdx].propsSize;
+        memcpy( fo->aesProps, fo->coders[aesIdx].props,
+                sizeof( fo->aesProps ) );
+        fo->unsupported  = 0;
+        return;
+    }
 
     /* --- one coder: straight from the packed stream --------------------- */
     if ( fo->numCoders == 1 )
@@ -584,6 +725,9 @@ static int ReadFolder( ParseState *ps, SzFolder *fo )
         else if ( idSize == 4 && id[0] == 0x03 && id[1] == 0x03 &&
                   id[2] == 0x01 && id[3] == 0x1B )
             cd.kind = SZ_C_BCJ2;
+        else if ( idSize == 4 && id[0] == 0x06 && id[1] == 0xF1 &&
+                  id[2] == 0x07 && id[3] == 0x01 )
+            cd.kind = SZ_C_AES;
 
         if ( hasAttr )
         {
@@ -1298,7 +1442,58 @@ static UInt32 SzDictCost( UInt32 dictSize, UInt32 unpackSize )
     return dictSize;
 }
 
+/*---- What one folder's dictionary will cost, from its coder props --------- *
+ * The same arithmetic the three decode sites do inline, gathered in one place
+ * so SzMemNeeded below cannot drift from what actually gets allocated.
+ *-------------------------------------------------------------------------- */
+static UInt32 SzFolderDictCost( const SzFolder *fo )
+{
+    if ( fo->method == SZ_M_LZMA && fo->propsSize >= 5 )
+    {
+        UInt32 dictSize = fo->props[1] | ( (UInt32)fo->props[2] << 8 ) |
+                          ( (UInt32)fo->props[3] << 16 ) |
+                          ( (UInt32)fo->props[4] << 24 );
+        return SzDictCost( dictSize, fo->mainUnpackSize );
+    }
+    if ( fo->method == SZ_M_LZMA2 && fo->propsSize >= 1 && fo->props[0] <= 40 )
+    {
+        Byte   pbyte    = fo->props[0];
+        UInt32 dictSize = ( pbyte == 40 )
+            ? 0xFFFFFFFFUL
+            : ( (UInt32)( 2 | ( pbyte & 1 ) ) << ( pbyte / 2 + 11 ) );
+        return SzDictCost( dictSize, fo->mainUnpackSize );
+    }
+    return 0;                               /* stored, or nothing we decode */
+}
+
+/*---- The largest single extraction this archive will ask for -------------- *
+ * Extraction to disk STREAMS a folder (LzmaDecodeStream / Lzma2DecodeStream),
+ * so the dictionary is the whole story - there is no packed buffer and no
+ * output buffer to add to it.  The answer is therefore the biggest dictionary
+ * any one folder will allocate, and folders are decoded one at a time, so
+ * they do not add up.
+ *
+ * Measured against the tracking allocator: a .7z whose largest folder costs a
+ * 64 MB dictionary peaks at 65.7 MB with a 64 MB largest block, and one at
+ * 138 KB peaks at 292 KB.  Callers add the slack.
+ *-------------------------------------------------------------------------- */
+UInt32 SzMemNeeded( SzArchive *a )
+{
+    UInt32 best = 0, i;
+
+    if ( !a ) return 0;
+    for ( i = 0; i < a->numFolders; i++ )
+    {
+        UInt32 c;
+        if ( a->folders[i].unsupported ) continue;
+        c = SzFolderDictCost( &a->folders[i] );
+        if ( c > best ) best = c;
+    }
+    return best;
+}
+
 /*---- Decode one folder to a freshly malloc'd buffer ---------------------- */
+
 static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
 {
     SzFolder *fo       = &a->folders[fIdx];
@@ -1322,11 +1517,26 @@ static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
     packBuf = (Byte *)malloc( packSize ? packSize : 1 );
     if ( !packBuf ) return SZ_ERR_MEMORY;
 
-    if ( fseek( a->fp, (long)packOff, SEEK_SET ) != 0 ||
-         fread( packBuf, 1, packSize, a->fp ) != packSize )
+    if ( VolSeek( a->fp, (long)packOff, SEEK_SET ) != 0 ||
+         VolRead( packBuf, 1, packSize, a->fp ) != packSize )
     {
         free( packBuf );
         return SZ_ERR_READ;
+    }
+
+    /* Encrypted, and the whole packed stream is already in memory, so CBC is
+     * a single pass with nothing to carry.  This is also the path an ENCRYPTED
+     * HEADER takes (7-Zip's -mhe): the header is just a folder, so decrypting
+     * it needs no special case beyond having the password before the archive
+     * has been parsed - which is why SzOpenPw exists. */
+    if ( fo->encrypted )
+    {
+        AesCbcState cbc;
+        int         krc = SzFolderKey( a, fo, &cbc );
+
+        if ( krc != SZ_OK ) { free( packBuf ); return krc; }
+        if ( packSize & 15 ) { free( packBuf ); return SZ_ERR_DATA; }
+        AesCbcDecrypt( &cbc, packBuf, packSize );
     }
 
     /* Decode the main coder into a buffer sized by its own output stream; a
@@ -1416,13 +1626,13 @@ static const Byte g_sig[6] = { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C };
 /* Read and validate the 32-byte start header at file offset 'off'.  Returns 1
  * (and fills outHdr) only when both the 6-byte signature and the start-header
  * CRC check out, so a stray signature in a stub's code is rejected. */
-static int SzCheckStartHeader( FILE *fp, long off, Byte outHdr[32] )
+static int SzCheckStartHeader( VolFile *fp, long off, Byte outHdr[32] )
 {
     Byte   hdr[32];
     UInt32 startCrc;
 
-    if ( fseek( fp, off, SEEK_SET ) != 0 )  return 0;
-    if ( fread( hdr, 1, 32, fp ) != 32 )    return 0;
+    if ( VolSeek( fp, off, SEEK_SET ) != 0 )  return 0;
+    if ( VolRead( hdr, 1, 32, fp ) != 32 )    return 0;
     if ( memcmp( hdr, g_sig, 6 ) != 0 )     return 0;
     startCrc = hdr[8] | ( (UInt32)hdr[9] << 8 ) |
                ( (UInt32)hdr[10] << 16 ) | ( (UInt32)hdr[11] << 24 );
@@ -1436,7 +1646,7 @@ static int SzCheckStartHeader( FILE *fp, long off, Byte outHdr[32] )
  * success, SZ_ERR_SIG if no valid start header exists. */
 #define SZ_SFX_CHUNK 65536
 
-static int SzFindStartHeader( FILE *fp, Byte outHdr[32], UInt32 *outOff )
+static int SzFindStartHeader( VolFile *fp, Byte outHdr[32], UInt32 *outOff )
 {
     Byte *buf;
     long  fileLen, base;
@@ -1444,8 +1654,8 @@ static int SzFindStartHeader( FILE *fp, Byte outHdr[32], UInt32 *outOff )
 
     if ( SzCheckStartHeader( fp, 0, outHdr ) ) { *outOff = 0; return SZ_OK; }
 
-    if ( fseek( fp, 0, SEEK_END ) != 0 ) return SZ_ERR_READ;
-    fileLen = ftell( fp );
+    if ( VolSeek( fp, 0, SEEK_END ) != 0 ) return SZ_ERR_READ;
+    fileLen = VolTell( fp );
     if ( fileLen < 32 ) return SZ_ERR_SIG;
 
     buf = (Byte *)malloc( SZ_SFX_CHUNK + 5 );   /* +5 to span chunk boundaries */
@@ -1456,8 +1666,8 @@ static int SzFindStartHeader( FILE *fp, Byte outHdr[32], UInt32 *outOff )
         long toRead = fileLen - base;
         int  n, i;
         if ( toRead > SZ_SFX_CHUNK + 5 ) toRead = SZ_SFX_CHUNK + 5;
-        if ( fseek( fp, base, SEEK_SET ) != 0 ) break;
-        n = (int)fread( buf, 1, (size_t)toRead, fp );
+        if ( VolSeek( fp, base, SEEK_SET ) != 0 ) break;
+        n = (int)VolRead( buf, 1, (size_t)toRead, fp );
         for ( i = 0; i + 6 <= n; i++ )
         {
             if ( buf[i] == 0x37 && memcmp( buf + i, g_sig, 6 ) == 0 &&
@@ -1473,10 +1683,21 @@ static int SzFindStartHeader( FILE *fp, Byte outHdr[32], UInt32 *outOff )
     return found ? SZ_OK : SZ_ERR_SIG;
 }
 
-int SzOpen( const char *path, SzArchive **out )
+/*
+ * SzOpenPw - open, with a password available from the start.
+ *
+ * The password has to be settable BEFORE parsing, not merely before
+ * extracting, because 7-Zip can encrypt the header itself (-mhe=on).  Such an
+ * archive cannot even be LISTED without the key - the file names live inside
+ * the encrypted stream - so "open it, then ask" is not a possible order of
+ * operations for those.  SzOpen is simply the no-password case of this, and a
+ * caller that gets SZ_ERR_PASSWORD back from either should prompt and come
+ * back here.
+ */
+int SzOpenPw( const char *path, const char *pw, SzArchive **out )
 {
     SzArchive *a;
-    FILE      *fp;
+    VolFile      *fp;
     Byte       sigHdr[32];
     UInt32     hdrOff = 0;
     UInt32     nhOffLo, nhOffHi, nhSizeLo, nhSizeHi, nhCrc;
@@ -1488,12 +1709,14 @@ int SzOpen( const char *path, SzArchive **out )
 
     *out = NULL;
 
-    fp = fopen( path, "rb" );
-    if ( !fp ) return SZ_ERR_OPEN;
+    /* VolOpen joins a .7z.001/.002/... set into one stream; for an ordinary
+     * single file it yields exactly what the old fopen did. */
+    rc = VolOpen( path, &fp );
+    if ( rc != SZ_OK ) return rc;
 
     /* Offset 0 for a plain .7z, or after the stub of a self-extracting .exe. */
     rc = SzFindStartHeader( fp, sigHdr, &hdrOff );
-    if ( rc ) { fclose( fp ); return rc; }
+    if ( rc ) { VolClose( fp ); return rc; }
 
     nhOffLo  = sigHdr[12] | ( (UInt32)sigHdr[13] << 8 ) |
                ( (UInt32)sigHdr[14] << 16 ) | ( (UInt32)sigHdr[15] << 24 );
@@ -1506,13 +1729,23 @@ int SzOpen( const char *path, SzArchive **out )
     nhCrc    = sigHdr[28] | ( (UInt32)sigHdr[29] << 8 ) |
                ( (UInt32)sigHdr[30] << 16 ) | ( (UInt32)sigHdr[31] << 24 );
 
-    if ( nhOffHi != 0 || nhSizeHi != 0 ) { fclose( fp ); return SZ_ERR_TOOBIG; }
+    if ( nhOffHi != 0 || nhSizeHi != 0 ) { VolClose( fp ); return SZ_ERR_TOOBIG; }
 
     a = (SzArchive *)calloc( 1, sizeof( SzArchive ) );
-    if ( !a ) { fclose( fp ); return SZ_ERR_MEMORY; }
+    if ( !a ) { VolClose( fp ); return SZ_ERR_MEMORY; }
     a->fp         = fp;
     a->baseOffset = hdrOff + 32;    /* archive body follows the 32-byte header */
     a->numEntries = 0;
+
+    /* Set before any parsing, so a folder decode that happens during the
+     * header walk - which is exactly what an encrypted header is - already has
+     * what it needs. */
+    if ( pw && pw[0] )
+    {
+        strncpy( a->password, pw, AC_MAX_PW );
+        a->password[ AC_MAX_PW ] = '\0';
+        a->havePw = 1;
+    }
 
     if ( nhSizeLo == 0 )            /* empty archive: no files */
     {
@@ -1524,10 +1757,19 @@ int SzOpen( const char *path, SzArchive **out )
     headerBuf  = (Byte *)malloc( headerSize );
     if ( !headerBuf ) { rc = SZ_ERR_MEMORY; goto fail; }
 
-    if ( fseek( fp, (long)( a->baseOffset + nhOffLo ), SEEK_SET ) != 0 ||
-         fread( headerBuf, 1, headerSize, fp ) != headerSize )
+    if ( VolSeek( fp, (long)( a->baseOffset + nhOffLo ), SEEK_SET ) != 0 ||
+         VolRead( headerBuf, 1, headerSize, fp ) != headerSize )
     {
-        rc = SZ_ERR_READ; goto fail;
+        /* The start header says exactly where the end header sits, so
+         * "the bytes are not there" is a measurement, not a guess.  Across a
+         * split set that means a volume has not been copied; on a single file
+         * it means the file really is cut short.  Different faults, different
+         * advice - see SZ_ERR_VOLUME in ARCDEFS.H. */
+        rc = ( VolIsSet( fp ) &&
+               (long)( a->baseOffset + nhOffLo ) + (long)headerSize
+                   > VolSize( fp ) )
+             ? SZ_ERR_VOLUME : SZ_ERR_READ;
+        goto fail;
     }
     if ( Crc32Calc( headerBuf, headerSize ) != nhCrc )
     {
@@ -1564,6 +1806,11 @@ int SzOpen( const char *path, SzArchive **out )
         }
         tmp->fp         = fp;
         tmp->baseOffset = a->baseOffset;
+        /* The header folder is decoded through this temporary archive, so the
+         * password has to travel with it - without this an encrypted header
+         * asks for a password that was supplied, over and over. */
+        memcpy( tmp->password, a->password, sizeof( tmp->password ) );
+        tmp->havePw     = a->havePw;
         tps->a          = tmp;
         tps->numSubs    = 0;
         tps->rd         = ps->rd;        /* continue after the kEncodedHeader byte */
@@ -1622,6 +1869,11 @@ int SzGetNumEntries( SzArchive *a )
     return a ? a->numEntries : 0;
 }
 
+int SzVolumeCount( SzArchive *a )
+{
+    return ( a && a->fp ) ? VolCount( a->fp ) : 1;
+}
+
 const SzEntry *SzGetEntry( SzArchive *a, int index )
 {
     if ( !a || index < 0 || index >= a->numEntries )
@@ -1678,11 +1930,42 @@ UInt32 SzEntryPacked( SzArchive *a, int index )
     return a->packSizes[e->folderIndex];
 }
 
+int SzOpen( const char *path, SzArchive **out )
+{
+    return SzOpenPw( path, NULL, out );
+}
+
+void SzSetPassword( SzArchive *a, const char *pw )
+{
+    if ( !a ) return;
+
+    if ( !pw || !pw[0] )
+    {
+        a->password[0] = '\0';
+        a->havePw      = 0;
+        return;
+    }
+    strncpy( a->password, pw, AC_MAX_PW );
+    a->password[ AC_MAX_PW ] = '\0';
+    a->havePw = 1;
+}
+
+int SzNeedsPassword( SzArchive *a )
+{
+    UInt32 i;
+
+    if ( !a ) return 0;
+    for ( i = 0; i < a->numFolders; i++ )
+        if ( a->folders[i].encrypted )
+            return 1;
+    return 0;
+}
+
 void SzClose( SzArchive *a )
 {
     if ( a )
     {
-        if ( a->fp )      fclose( a->fp );
+        if ( a->fp )      VolClose( a->fp );
         if ( a->entries ) free( a->entries );
         free( a );
     }
@@ -1817,22 +2100,160 @@ static void WriteDirEntry( const SzEntry *e, const char *destDir )
  * buffers is ever held, so a 500 MB solid folder costs the same as a 5 MB one.
  *===========================================================================*/
 
-/*---- Packed input: read the folder's compressed bytes from the archive ---- */
+/*---- Packed input: read the folder's compressed bytes from the archive ----
+ * When the folder is encrypted the same reader decrypts on the way through, so
+ * the LZMA decoder above it is unchanged and unaware.
+ *
+ * The awkward part is that CBC only moves in 16-byte blocks while the decoder
+ * asks for whatever it happens to want.  Rather than force the caller into
+ * block-sized requests, whole blocks are decrypted straight into the caller's
+ * buffer and a single block of spill is carried here for the ragged tail.  The
+ * arithmetic that makes this safe: the encrypted stream length is always a
+ * multiple of 16, so reading ceil(delivered/16) blocks can never run past the
+ * end of the packed stream and into the next one.
+ *--------------------------------------------------------------------------*/
 typedef struct {
-    FILE  *fp;
+    VolFile  *fp;
     UInt32 remaining;
+
+    int         encrypted;
+    AesCbcState cbc;
+    Byte        carry[16];      /* decrypted spill from a partial block     */
+    int         carryPos, carryLen;
 } SzPackSrc;
+
+static void SzPackSrcInit( SzPackSrc *s, VolFile *fp, UInt32 remaining )
+{
+    memset( s, 0, sizeof( *s ) );
+    s->fp        = fp;
+    s->remaining = remaining;
+}
 
 static UInt32 SzReadPacked( void *user, Byte *buf, UInt32 len )
 {
     SzPackSrc *s = (SzPackSrc *)user;
     size_t     n;
+    UInt32     done = 0;
 
     if ( len > s->remaining ) len = s->remaining;
     if ( len == 0 ) return 0;
-    n = fread( buf, 1, len, s->fp );
-    s->remaining -= (UInt32)n;
-    return (UInt32)n;
+
+    if ( !s->encrypted )
+    {
+        n = VolRead( buf, 1, len, s->fp );
+        s->remaining -= (UInt32)n;
+        return (UInt32)n;
+    }
+
+    /* 1. anything left over from the last partial block */
+    while ( s->carryLen > 0 && done < len )
+    {
+        buf[ done++ ] = s->carry[ s->carryPos++ ];
+        s->carryLen--;
+    }
+
+    /* 2. whole blocks, decrypted in place in the caller's buffer */
+    {
+        UInt32 whole = ( len - done ) & ~15UL;
+
+        if ( whole )
+        {
+            n = VolRead( buf + done, 1, whole, s->fp );
+            n &= ~(size_t)15;               /* a short read cannot be used  */
+            if ( n )
+            {
+                AesCbcDecrypt( &s->cbc, buf + done, (UInt32)n );
+                done += (UInt32)n;
+            }
+            if ( n < whole )
+            {
+                s->remaining -= done;       /* truncated stream             */
+                return done;
+            }
+        }
+    }
+
+    /* 3. a ragged tail: decrypt one block and keep what is not wanted yet */
+    if ( done < len )
+    {
+        n = VolRead( s->carry, 1, 16, s->fp );
+        if ( n == 16 )
+        {
+            AesCbcDecrypt( &s->cbc, s->carry, 16 );
+            s->carryPos = 0;
+            s->carryLen = 16;
+            while ( s->carryLen > 0 && done < len )
+            {
+                buf[ done++ ] = s->carry[ s->carryPos++ ];
+                s->carryLen--;
+            }
+        }
+    }
+
+    s->remaining -= done;
+    return done;
+}
+
+/*---------------------------------------------------------------------------
+ * Turn a folder's AES coder properties into a keyed CBC state.
+ *
+ * The property layout is compact to the point of being cryptic:
+ *   byte 0   bits 0-5  numCyclesPower
+ *            bit  6    the IV is at least one byte long
+ *            bit  7    the salt is at least one byte long
+ *   byte 1   high nibble  extra salt bytes, low nibble  extra IV bytes
+ *   then     salt, then IV - the IV zero-padded to the full 16 on use.
+ *
+ * Returns SZ_ERR_PASSWORD when no password has been set: the caller turns that
+ * into a prompt.  Deriving the key is the expensive step (2^numCyclesPower
+ * SHA-256 rounds), so this is called once per folder and never per entry.
+ *--------------------------------------------------------------------------*/
+#define SZ_MAX_CYCLES_POWER 24      /* 16.7M rounds; 7-Zip's default is 19  */
+
+static int SzFolderKey( SzArchive *a, const SzFolder *fo, AesCbcState *cbc )
+{
+    const Byte *p = fo->aesProps;
+    Byte        salt[16], iv[16], key[32];
+    unsigned    saltSize, ivSize, off;
+    int         ncp;
+
+    if ( !a->havePw )
+        return SZ_ERR_PASSWORD;
+    if ( fo->aesPropsSize < 1 )
+        return SZ_ERR_FORMAT;
+
+    ncp      = p[0] & 0x3F;
+    saltSize = ( p[0] >> 7 ) & 1;
+    ivSize   = ( p[0] >> 6 ) & 1;
+
+    if ( fo->aesPropsSize >= 2 )
+    {
+        saltSize += (unsigned)( p[1] >> 4 );
+        ivSize   += (unsigned)( p[1] & 0x0F );
+        off       = 2;
+    }
+    else
+    {
+        if ( saltSize || ivSize ) return SZ_ERR_FORMAT;
+        off = 1;
+    }
+
+    if ( saltSize > 16 || ivSize > 16 )                  return SZ_ERR_FORMAT;
+    if ( fo->aesPropsSize < off + saltSize + ivSize )    return SZ_ERR_FORMAT;
+
+    /* A cycles power this high is not an archive anybody made on purpose; it
+     * is either damage or a denial-of-service, and either way the machine
+     * would appear to hang with no way to cancel - key derivation runs before
+     * the progress callback exists.  Refuse with a reason instead. */
+    if ( ncp > SZ_MAX_CYCLES_POWER && ncp != 0x3F )      return SZ_ERR_UNSUPPORTED;
+
+    memset( salt, 0, sizeof( salt ) );
+    memset( iv,   0, sizeof( iv ) );
+    if ( saltSize ) memcpy( salt, p + off, saltSize );
+    if ( ivSize )   memcpy( iv, p + off + saltSize, ivSize );
+
+    SzAesDeriveKey( a->password, ncp, salt, (int)saltSize, key );
+    return AesCbcInit( cbc, key, 32, iv );
 }
 
 /*---- BCJ x86 stage: filters the decoder's output on its way to the sink --- */
@@ -2115,8 +2536,8 @@ static int SzDecodeSubCoder( SzArchive *a, SzFolder *fo, int coderIdx,
 
     packBuf = (Byte *)malloc( packSize ? packSize : 1 );
     if ( !packBuf ) return SZ_ERR_MEMORY;
-    if ( fseek( a->fp, (long)packOff, SEEK_SET ) != 0 ||
-         fread( packBuf, 1, packSize, a->fp ) != packSize )
+    if ( VolSeek( a->fp, (long)packOff, SEEK_SET ) != 0 ||
+         VolRead( packBuf, 1, packSize, a->fp ) != packSize )
     {
         free( packBuf );
         return SZ_ERR_READ;
@@ -2191,8 +2612,8 @@ static int SzReadRawPack( SzArchive *a, int packIdx, Byte **outBuf,
 
     buf = (Byte *)malloc( len ? len : 1 );
     if ( !buf ) return SZ_ERR_MEMORY;
-    if ( fseek( a->fp, (long)off, SEEK_SET ) != 0 ||
-         fread( buf, 1, len, a->fp ) != len )
+    if ( VolSeek( a->fp, (long)off, SEEK_SET ) != 0 ||
+         VolRead( buf, 1, len, a->fp ) != len )
     {
         free( buf );
         return SZ_ERR_READ;
@@ -2507,9 +2928,21 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
         emitUser     = &bcj;
     }
 
-    src.fp        = a->fp;
-    src.remaining = packSize;
-    if ( fseek( a->fp, (long)packOff, SEEK_SET ) != 0 )
+    SzPackSrcInit( &src, a->fp, packSize );
+    if ( fo->encrypted )
+    {
+        int krc = SzFolderKey( a, fo, &src.cbc );
+        if ( krc != SZ_OK )
+        {
+            /* Free what the pipeline already allocated - returning straight
+             * out of here would leak the BCJ buffer and the order table. */
+            if ( bcj.buf ) free( bcj.buf );
+            free( order );
+            return krc;                 /* SZ_ERR_PASSWORD -> prompt        */
+        }
+        src.encrypted = 1;
+    }
+    if ( VolSeek( a->fp, (long)packOff, SEEK_SET ) != 0 )
         rc = SZ_ERR_READ;
 
     if ( rc == SZ_OK )
@@ -2521,8 +2954,23 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
             if ( !buf ) rc = SZ_ERR_MEMORY;
             else
             {
-                UInt32 left = packSize;
-                if ( packSize != fo->mainUnpackSize ) rc = SZ_ERR_DATA;
+                UInt32 left = fo->mainUnpackSize;
+
+                /* Unencrypted, a stored folder's packed and unpacked sizes are
+                 * the same thing.  ENCRYPTED, they are not: CBC works in
+                 * 16-byte blocks, so the packed stream is the data padded up
+                 * to the next boundary and is legitimately LONGER.  Requiring
+                 * equality here is what made every stored-and-encrypted
+                 * archive report corrupt data - and only for files whose size
+                 * was not already a multiple of 16, which is why two of four
+                 * test files passed and looked like a partial success. */
+                if ( fo->encrypted )
+                {
+                    UInt32 padded = ( fo->mainUnpackSize + 15 ) & ~15UL;
+                    if ( packSize != padded ) rc = SZ_ERR_DATA;
+                }
+                else if ( packSize != fo->mainUnpackSize )
+                    rc = SZ_ERR_DATA;
                 while ( rc == SZ_OK && left )
                 {
                     UInt32 got = SzReadPacked( &src, buf,
@@ -2615,6 +3063,20 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
     if ( jumpBuf )   free( jumpBuf );
     if ( rcBuf )     free( rcBuf );
     free( order );
+
+    /* 7z keeps no password check value anywhere, so a wrong password cannot
+     * be detected directly - it simply produces bytes that are not LZMA, and
+     * the decoder says so.  When the folder was encrypted, "the data is
+     * corrupt" is therefore far more likely to mean "that password is wrong",
+     * and saying the latter sends the user somewhere useful.
+     *
+     * The trade is deliberate and one-directional: a genuinely damaged
+     * encrypted archive gets described as a bad password.  That costs a
+     * retyped password.  The other way round - telling someone their archive
+     * is corrupt because they mistyped - costs them the archive. */
+    if ( fo->encrypted && ( rc == SZ_ERR_DATA || rc == SZ_ERR_CRC ) )
+        rc = SZ_ERR_BADPASS;
+
     return rc;
 }
 
@@ -2762,6 +3224,12 @@ const char *SzErrorText( int code )
     case SZ_ERR_NORAM:      return "Not enough memory: this archive needs more "
                                    "RAM in one block than this machine can "
                                    "spare.";
+    case SZ_ERR_PASSWORD:   return "This archive is encrypted - a password is "
+                                   "needed.";
+    case SZ_ERR_BADPASS:    return "Wrong password.";
+    case SZ_ERR_VOLUME:     return "This archive is in several volumes and "
+                                   "one of them is missing - copy the whole "
+                                   "set to one place and open the first.";
     default:                return "Unknown error.";
     }
 }

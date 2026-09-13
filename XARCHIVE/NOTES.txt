@@ -169,3 +169,240 @@ WHAT THIS PORT DOES NOT HAVE (and neither does the Win32s GUI)
 
     Also unsynced and deliberate for now: the About box says "XArchive v1.0"
     in both GUIs while the DOS TUI says v1.2.
+
+
+===========================================================================
+BACKEND RE-SYNC 2026-09-12 - decryption
+===========================================================================
+
+The shared backend was re-synced from S:\CPP\DU32\XARCHIVE after password
+support went in.  Six files are new here, seven changed, and all 21 shared
+files verified byte-identical afterwards:
+
+    new      ARCCRYP.C ARCCRYP.H   the archive-specific crypto layer
+             AES.C AES.H SHA.C SHA.H
+                 VERBATIM copies of NETSPLOR's crypto (S:\CPP\DU32\NSTLS),
+                 known-answer tested there.  Do not edit them in this tree or
+                 in DU32 - a fix belongs in NSTLS and is copied forward.  Two
+                 diverging copies of a cipher is a bug that stays invisible
+                 until it costs somebody their data.
+    changed  ARCDEFS.H   SZ_ERR_PASSWORD (13) and SZ_ERR_BADPASS (14)
+             ARCFILE.C/H ArcOpenPw, ArcSetPassword, ArcNeedsPassword
+             SZARC.C/H   AES coder 06F10701, encrypted folders and headers
+             ZIPARC.C/H  ZipCrypto and WinZip AES
+
+    The check, from S:\CPP\DU-OS2\XARCHIVE:
+
+        for %F in (ARCDEFS.H ARCFILE.C ARCFILE.H SZARC.C SZARC.H ZIPARC.C ^
+                   ZIPARC.H ARCCRYP.C ARCCRYP.H AES.C AES.H SHA.C SHA.H ^
+                   CRC32.C CRC32.H LZMADEC.C RARARC.C RAR3DEC.C RAR5ARC.C ^
+                   DISKARC.C ARCPREF.C) do fc /b %F S:\CPP\DU32\XARCHIVE\%F
+
+    All 21 identical, 2026-09-12.  BUILD\MKTEST.CMD still reports PASSED.
+
+THE PM FRONT END ASKS FOR THE PASSWORD UP FRONT, AND THE OTHER TWO DO NOT
+
+    This is the one place the OS/2 port genuinely has to differ, so it is
+    worth writing down rather than rediscovering.
+
+    The DOS and Win32s front ends retry in a LOOP around the failed call:
+
+        do { rc = ArcSomething( ... ); } while ( PasswordRetry( rc ) );
+
+    That is impossible here.  Archive work runs on a worker thread which may
+    make NO PM calls, so the prompt can only happen on the UI thread once the
+    job has already finished - and by then the worker has freed the selection
+    array that running the job again would need.  Rather than complicate who
+    owns that array, PMMAIN asks BEFORE starting any job that will touch entry
+    data (EnsurePassword, called from RunExtraction and DoTest).
+
+    That is the better order anyway: being asked at the START of a long
+    extraction beats being asked at the end of a failed one.
+
+    A wrong password is then reported by ArcOnDone, which also CLEARS the
+    stored one, so the next attempt asks again instead of failing identically
+    and silently.
+
+    The exception is an encrypted HEADER (7-Zip -mhe=on), which cannot be
+    listed at all without the password.  There ArcOnDone does restart the job,
+    because an open job allocates nothing - g_job.openPw carries the password
+    into the worker, and ArcOpenPw does the work.  On success that password is
+    carried into g_password, so the user is not asked a second time for the
+    entry data.
+
+    New resources: IDD_PASSWORD, IDC_PW_EDIT, IDC_PW_PROMPT.  The entry field
+    uses ES_UNREADABLE, which is PM's answer to Windows ES_PASSWORD.  The
+    prompt is a CONTROL rather than fixed text because it has two jobs - asking
+    the first time, and saying the last attempt was wrong; a second identical
+    dialog reads as though the program ignored what was typed.
+
+    NOT RUNTIME-VERIFIED.  This builds and the backend unit test passes, but
+    the PM dialog itself has not been seen on a real OS/2 machine - same
+    standing caveat as the rest of this port.  The backend half of it IS
+    verified, on DOS and against 7-Zip-written archives, and that is the half
+    the cryptography lives in.
+
+RE-SYNC 2026-09-12 (RAR3 ENCRYPTION)
+
+    RARARC.C/.H, ARCCRYP.C/.H and ARCFILE.C were re-copied from DU32 after
+    RAR3 (RAR 2.9/3.x/4.x) AES-128-CBC decryption was added.  The whole backend
+    was then re-checked file by file and is byte-identical to DU32's again.
+
+    Nothing in the PM front end changed: the password dialog added last round
+    already routes through ArcSetPassword / ArcNeedsPassword, and both now
+    answer for RAR4 the same way they already did for RAR5 and zip.  The one
+    thing that DID change under it is that ArcOpenPw now applies the password
+    to whatever format the sniffing settled on, instead of only to zip - so an
+    encrypted RAR4 opened with a password no longer needs a second call.
+
+    BUILD\MKOS2.CMD and BUILD\MKTEST.CMD needed no edits: ARCCRYP/AES/SHA
+    joined both lists last round and RARARC was always in them.  The PM build
+    was re-run and links clean.
+
+    Still not runtime-verified on real OS/2 hardware - the same standing caveat
+    as the rest of this port.  The backend half IS verified, on DOS and against
+    WinRAR 5.0-written archives.
+
+===========================================================================
+BACKEND RE-SYNC 2026-09-13 - encrypted headers (-hp)
+===========================================================================
+
+Five files copied forward from S:\CPP\DU32\XARCHIVE, no new files, and all 28
+shared files verified byte-identical afterwards (0 mismatches; only COMPAT.C,
+OS2PLAT.C and PMMAIN.C are OS/2-only, as always):
+
+    RARARC.C/H    RarOpenPw and RarReadBlock - RAR4 -hp
+    RAR5ARC.C/H   Rar5OpenPw and Rar5ReadBlock - RAR5 -hp
+    ARCFILE.C     both RARs now take the password at OPEN time, like 7z
+
+The PM front end needed no change, and that is worth noting rather than just
+being lucky: it already prompted and retried through ArcOpenPw whenever an
+open returned SZ_ERR_PASSWORD, because 7z's encoded header needed exactly
+that.  Two more formats with locked directories arrived behind a contract
+already in place.
+
+Both openers also refuse to report an EMPTY archive when no encrypted header
+could be read, and they tell the two causes apart: a short read is truncation
+(SZ_ERR_READ), a full read whose CRC fails is the password (SZ_ERR_BADPASS).
+Calling a truncated archive a wrong password would send the user off retyping
+a right one - last round's PPMd misreport wearing a different hat.
+
+MKOS2.CMD links clean and MKTEST.CMD passes (ALL PASS, 0 failures).
+
+BACKEND RE-SYNC 2026-09-13 (multi-volume)
+
+    The DU32 backend gained multi-volume support and VOLIO.C/VOLIO.H are new
+    files in it, so both were copied across and both build scripts updated:
+    MKOS2.CMD (the PM app) and MKTEST.CMD (the backend unit test, which
+    #includes SZARC.C and therefore needs every symbol SZARC.C now references).
+
+    Verified after the sync: 30 shared files compare byte-identical against
+    S:\CPP\DU32\XARCHIVE, MKOS2.CMD links clean, and MKTEST.CMD reports
+    ALL PASS (0 failures).
+
+    Nothing in the volume layer is platform-specific - it is stdio plus
+    filename arithmetic - so there was no OS/2-side work beyond the sync.  The
+    one-open-handle discipline it uses was chosen for DOS, where handles are
+    scarce; OS/2 would not have needed it but is not harmed by it.
+
+BACKEND RE-SYNC 2026-09-13 (solid chains)
+
+    RAR3DEC.C, RAR3DEC.H and RARARC.C re-copied from S:\CPP\DU32\XARCHIVE
+    after the solid-chain fix.  30 shared files, 0 mismatches (fc /b).
+
+    The fix: RAR closes each member of a solid chain with a block trailer
+    saying whether the next member brings fresh Huffman tables, and nothing
+    read it, so members after the first decoded with stale tables whenever
+    the encoder had started new ones.  A correct archive was reported corrupt
+    - or, on an encrypted chain, reported as a wrong password when the
+    password was right.  RAR2 is deliberately untouched: unpack v20 has no
+    such trailer, announcing new tables inline with symbol 269.
+
+    BUILD\MKTEST.CMD still passes.  It does not link RAR3DEC.C, so it does
+    not cover this change; the evidence is the twelve-fixture solid suite on
+    the DU32 side plus the real-DOS byte comparison.  MKOS2.CMD links clean.
+
+BACKEND RE-SYNC 2026-09-13 (group separators)
+
+    NUMFMT.C and NUMFMT.H are NEW and shared; PMMAIN.C now formats the Size
+    and Packed columns and the Archive Info totals through them, and calls
+    NumFmtInitFromEnv() before WinInitialize so the first listing drawn is
+    already right.  BUILD\MKOS2.CMD gained NUMFMT in both the compile loop
+    and the link list.  32 shared files, 0 mismatches.
+
+    OS/2 gets its separator from DosQueryCtryInfo's szThousandsSeparator -
+    the same field the OS/2 toolkit header in DOS6SRC\45\tl\inc\bsedos.h
+    declares.  The per-record szSize/szPacked buffers grew from 16 to
+    NUM_FMT_U32_MAX (24) because a grouped UInt32 with a multi-byte separator
+    would not fit 16.
+
+    MKOS2 links clean; MKTEST still ALL PASS (it does not link NUMFMT).
+
+COMMENT DIALOG 2026-09-13
+
+    The Archive pulldown gained "~Comments...", and RES\XARCHIVE.RC gained
+    IDD_COMMENT - a read-only WC_MLE with BOTH scrollbars, filled the same way
+    the Info box fills its own (MLM_SETIMPORTEXPORT then MLM_IMPORT with
+    refresh disabled across the pair, so a long comment does not repaint once
+    per line) and given "10.System Monospaced", because comments are routinely
+    laid out in columns or as ASCII art and PM's default font is proportional.
+
+    IDD_COMMENT is 111 and IDM_ARCHIVE_COMMENT is 210 - the same numbers as
+    the Win32s tree, per the rule at the top of RES\RESOURCE.H.  The CONTROL
+    id is 1020 in BOTH trees: this one's next free was 1019 and the Win32s
+    tree's was 1017, so 1020 is the first free on both sides and each header
+    notes the skipped numbers.
+
+    The text comes from the new shared ArcCommentText(), which rewrites every
+    line ending as CRLF - the MLE runs a lone LF straight on and would show a
+    twenty-line comment as one very long line.
+
+    Verified: MKOS2 compiles, links and binds, and the built XARCHIVE.EXE
+    contains "Archive Comment" and "Comments...", so the resources are really
+    in it.  MKTEST still ALL PASS.  32 shared files, 0 mismatches.
+
+    KNOWN, AND NOT FROM THIS CHANGE: a RAR4 comment written by WinRAR 5 does
+    not reach the dialog - RARARC.C reads only the old 0x75 block and only
+    when stored, while WinRAR 5 writes a PACKED NEWSUB (0x7A).  The menu item
+    greys as though there were none.  ZIP comments work.
+
+RE-SYNCED 2026-09-13 (the minimum RAM check, and RAR4 packed comments)
+
+    Backend re-copied from S:\CPP\DU32\XARCHIVE after both changes.  32 shared
+    files, 0 mismatches (fc /b).  MKOS2 compiles, links and binds; MKTEST is
+    still ALL PASS.
+
+    WHAT PMMAIN GAINED
+
+      - A startup warning when the machine cannot manage even the cheapest
+        extraction, shown once with Say() after WinShowWindow so it has a
+        parent to be modal over.  A WARNING and not a refusal: listing costs a
+        few KB an entry and works fine below that line, and being able to see
+        inside a file you cannot unpack is worth keeping.  The wording comes
+        from the shared ArcMemWarnText() so the two GUI ports and the TUI
+        cannot quote different numbers at the user; this port appends its own
+        closing sentence.
+
+      - A "Memory needed:" line in DoInfo, with the FREE figure shown only
+        when it is the bad news.  On a machine with room, "and 1,757,217 KB
+        free" is a number nobody needs.
+
+      - Two new locals in DoInfo (memLine, needKB/haveKB).  g_infoText is
+        1024 bytes and the addition is well inside it.
+
+    THE CHECK ITSELF IS IN THE BACKEND, called from ArcExtractAll,
+    ArcExtractItems and ArcTestAll, so this port cannot forget it and gets the
+    same refusal as the other two for free.  It is per ARCHIVE, not per
+    format: a zip costs 173 KB whatever it holds, while two .7z files that
+    list identically can want 64 KB and 64 MB.
+
+    ALSO FROM THE BACKEND, with no PM-side work: RAR4 comments written by
+    WinRAR 5 now reach the comment dialog added in the previous block.  That
+    "KNOWN" note above is therefore closed - RARARC reads the packed "CMT"
+    NEWSUB block now, encrypted archives included, and the menu item no longer
+    greys on a RAR that plainly has a comment.
+
+    STILL NOT VERIFIED ON HARDWARE.  Everything here is compile-, link- and
+    bind-checked on Windows plus the shared backend's own tests; the PM
+    behaviour of the new warning box and the Info line wants a real OS/2 box,
+    as the decoder re-entrancy note above still does.

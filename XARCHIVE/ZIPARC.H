@@ -34,6 +34,9 @@ typedef struct ZipArchive ZipArchive;
 int  ZipOpen( const char *path, ZipArchive **out );
 
 int  ZipNumEntries( ZipArchive *z );
+
+/* Volumes joined at open: 1 for an ordinary file, N for a .zip.001/.002/... set. */
+int  ZipVolumeCount( ZipArchive *z );
 const ZipEntry *ZipGetEntry( ZipArchive *z, int index );
 
 /* Decompress one entry entirely into a freshly malloc'd buffer (used to unwrap
@@ -50,6 +53,40 @@ int  ZipExtractAll( ZipArchive *z, const char *destDir,
                     SzProgress prog, void *user );
 int  ZipExtractItems( ZipArchive *z, const int *indices, int count,
                       const char *destDir, SzProgress prog, void *user );
+
+/* The zip's own comment - the bytes after the end-of-central-directory record,
+ * the one place a zip keeps free text - or NULL when it has none.  Owned by the
+ * archive and valid until ZipClose. */
+const char *ZipComment( ZipArchive *z );
+
+/* Peak bytes one extraction needs; see ArcMemNeeded in ARCFILE.H.  The answer
+ * does not depend on the archive - zip streams through a fixed window - so z
+ * may be NULL, which ArcMemStartupOk relies on. */
+UInt32 ZipMemNeeded( ZipArchive *z );
+
+/*---- Encryption ----------------------------------------------------------- *
+ * Zip has two incompatible schemes and this module reads both: PKWARE's
+ * original ZipCrypto, and WinZip AES (AE-1/AE-2) at 128 and 256 bits.  AES-192
+ * is refused with SZ_ERR_UNSUPPORTED rather than mis-decrypted - see ARCCRYP.C
+ * for why that gap is deliberate.
+ *
+ * The intended flow is: open, notice ZipNeedsPassword, prompt, set it, extract.
+ * Extraction of an encrypted entry with no password set returns
+ * SZ_ERR_PASSWORD, so a front end that would rather prompt lazily can simply
+ * extract and react to that - and one that forgets to handle it gets a clear
+ * error rather than a corrupt file.
+ *--------------------------------------------------------------------------*/
+
+/* Set (or with NULL / "" clear) the password used for every encrypted entry.
+ * Copied into the archive; the caller's buffer need not outlive the call. */
+void ZipSetPassword( ZipArchive *z, const char *pw );
+
+/* Does this entry carry the encrypted flag? */
+int  ZipEntryEncrypted( ZipArchive *z, int index );
+
+/* Does ANY entry need a password?  What a front end asks after opening, to
+ * decide whether to prompt before the user picks anything. */
+int  ZipNeedsPassword( ZipArchive *z );
 
 void ZipClose( ZipArchive *z );
 

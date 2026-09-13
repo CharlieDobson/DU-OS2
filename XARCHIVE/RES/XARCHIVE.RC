@@ -54,6 +54,7 @@ BEGIN
         MENUITEM "Extract ~folder names",   IDM_ARCHIVE_PATHS
         MENUITEM SEPARATOR
         MENUITEM "~Info...\tCtrl+I",        IDM_ARCHIVE_INFO
+        MENUITEM "~Comments...",            IDM_ARCHIVE_COMMENT
     END
 
     SUBMENU "~Help", IDM_HELP
@@ -149,6 +150,26 @@ BEGIN
 END
 
 /*---------------------------------------------------------------------------
+ * The archive comment.  Read-only, both scrollbars, and given a monospaced
+ * font in the dialog procedure: a comment is free text written by whoever
+ * made the archive, frequently laid out in columns or as ASCII art, and
+ * often longer than the box - so nothing here may re-wrap it.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_COMMENT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Archive Comment", IDD_COMMENT, 24, 24, 288, 196,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        CONTROL "", IDC_COMMENT_TEXT, 8, 28, 272, 160, RC_WC_MLE,
+                MLS_READONLY | MLS_VSCROLL | MLS_HSCROLL | MLS_BORDER |
+                WS_GROUP | WS_TABSTOP | WS_VISIBLE
+        DEFPUSHBUTTON "OK",         DID_OK,     124,  6,  40, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
  * Extract destination
  *-------------------------------------------------------------------------*/
 
@@ -171,6 +192,31 @@ END
 /*---------------------------------------------------------------------------
  * New folder name
  *-------------------------------------------------------------------------*/
+
+/*---------------------------------------------------------------------------
+ * Password.
+ *
+ * The prompt is a control rather than fixed text because it has two jobs:
+ * asking the first time, and saying the last attempt was wrong.  A second
+ * identical dialog reads as though the program ignored what was typed.
+ *
+ * ES_UNREADABLE is PM's equivalent of the Windows ES_PASSWORD style - the
+ * field shows placeholders instead of the characters.
+ *--------------------------------------------------------------------------*/
+DLGTEMPLATE IDD_PASSWORD LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Password", IDD_PASSWORD, 24, 24, 228, 76,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT      "This archive is encrypted.", IDC_PW_PROMPT,
+                                                 8, 56, 212,  8
+        ENTRYFIELD "",                  IDC_PW_EDIT,             8, 40, 212, 12,
+                                        ES_MARGIN | ES_AUTOSCROLL | ES_UNREADABLE
+        DEFPUSHBUTTON "OK",             DID_OK,               108,  8,  52, 14
+        PUSHBUTTON "Cancel",            DID_CANCEL,           168,  8,  52, 14
+    END
+END
 
 DLGTEMPLATE IDD_NEWFOLDER LOADONCALL MOVEABLE DISCARDABLE
 BEGIN

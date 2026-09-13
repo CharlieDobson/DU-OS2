@@ -9,11 +9,13 @@
 #include <string.h>
 
 #include "arcfile.h"
+#include "numfmt.h"
 #include "szarc.h"
 #include "ziparc.h"
 #include "rararc.h"
 #include "rar5arc.h"
 #include "diskarc.h"
+#include "volio.h"
 
 #define FMT_7Z    1
 #define FMT_ZIP   2
@@ -82,6 +84,12 @@ static UInt32 g_memBudget = 0;      /* 0 = not measured yet          */
 static UInt32 g_memSysFree = 0;
 static UInt32 g_memProbed  = 0;
 
+/* The requirement that was last REFUSED, in KB, so ArcNoRamHint can name both
+ * numbers instead of saying "not enough".  Zero means no archive-specific
+ * refusal has happened, and the hint falls back to general wording. */
+static UInt32 g_needKB = 0;
+static UInt32 g_haveKB = 0;
+
 /* What the system claims is available, in bytes, or 0 when it will not say.
  * Only ever used as the upper bound of the heap probe, never as the answer. */
 static UInt32 ArcMemSystemFree( void )
@@ -135,16 +143,36 @@ static UInt32 ArcMemSystemFree( void )
 #endif
 }
 
-/* Largest block malloc will actually produce, at 1 MB resolution, searched
- * between 0 and 'hi'.  Each failed try costs nothing and each successful one
- * is freed immediately, so this is about a dozen allocations. */
+/* Largest block malloc will actually produce, searched between 0 and 'hi'.
+ * Each failed try costs nothing and each successful one is freed immediately.
+ *
+ * THE RESOLUTION HAS TO SCALE.  This was a flat 1 MB, which is sensible at
+ * the top of the range and catastrophic at the bottom: a machine that could
+ * produce 350 KB measured as ZERO, because the search stopped as soon as the
+ * bracket was under a megabyte and lo had never moved off 0.  Nothing
+ * downstream could recover from that - the budget was zero, the floor lifted
+ * it to 4 MB, and the program went back to believing it had memory it did
+ * not.  Finding the honest floor is what exposed it; on a roomy machine the
+ * old resolution hid it completely.
+ *
+ * So the bracket closes to a sixty-fourth of what has been proved so far, and
+ * never coarser than 4 KB.  That is 4 KB resolution at the bottom, where the
+ * difference between 300 KB and 0 decides whether the program works at all,
+ * and about 1.5% higher up, where nothing cares.  The cost is a handful more
+ * allocations than before - about 19 rather than 11, each a malloc and an
+ * immediate free.
+ *-------------------------------------------------------------------------- */
 static UInt32 ArcMemProbeHeap( UInt32 hi )
 {
-    UInt32 lo = 0, mid;
+    UInt32 lo = 0, mid, res;
     void  *p;
 
-    while ( hi - lo > 1024UL * 1024 )
+    for ( ;; )
     {
+        res = lo / 64;
+        if ( res < 4096UL ) res = 4096UL;
+        if ( hi - lo <= res ) break;
+
         mid = lo + ( hi - lo ) / 2;
         p   = malloc( mid );
         if ( p ) { free( p ); lo = mid; }
@@ -201,7 +229,27 @@ static UInt32 ArcMemBudget( void )
 
     got -= got / 4;                          /* leave a quarter for the rest */
 
-    if ( got < ARC_MEM_FLOOR )   got = ARC_MEM_FLOOR;
+    /*---- THE FLOOR MAY NOT INVENT MEMORY --------------------------------- *
+     * The floor exists so that a pessimistic probe does not make us refuse a
+     * 4 MB dictionary on a machine that could have managed it.  That is a
+     * fair thing to want, but it was written as an unconditional lift, and on
+     * a genuinely small machine it did real harm: a probe that measured
+     * 300 KB was reported as 4 MB, so EVERY check in this program passed, and
+     * the shortage surfaced instead as a bare malloc failure in the middle of
+     * an extraction - the worst message of the several available, arriving at
+     * the worst moment.
+     *
+     * So the floor applies only when the heap has actually produced that
+     * much.  Below it there is nothing to be generous WITH, and the reserve
+     * taken off above - the quarter left for everything that is not the
+     * dictionary - is needed more on a small machine than anywhere else, so
+     * the floor must not eat it either.  On a machine with room the behaviour
+     * is exactly as before; on one without, the budget now tells the truth
+     * and the existing NORAM checks - correct all along - finally get a
+     * number they can act on.
+     *--------------------------------------------------------------------- */
+    if ( got < ARC_MEM_FLOOR && g_memProbed >= ARC_MEM_FLOOR )
+        got = ARC_MEM_FLOOR;
     if ( got > ARC_MEM_CEILING ) got = ARC_MEM_CEILING;
 
     g_memBudget = got;
@@ -225,6 +273,137 @@ void ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB )
     if ( sysFreeMB ) *sysFreeMB = g_memSysFree / ( 1024UL * 1024 );
     if ( largestMB ) *largestMB = g_memProbed / ( 1024UL * 1024 );
     if ( budgetMB )  *budgetMB  = budget / ( 1024UL * 1024 );
+}
+
+/* The same three figures in KB.  Not a convenience: on the machines this
+ * diagnostic exists FOR, every one of them rounds to 0 MB, and a screen
+ * whose whole job is telling "the machine is short" apart from "the program
+ * is broken" cannot do it in units that print zero for both.  A real machine
+ * with DOSBox memsize=2 reports 490 KB obtained and a 367 KB budget; in MB
+ * that reads 0 and 0.
+ *
+ * sysFree stays capable of being 0, which means "the system would not say"
+ * and not "there is none" - the caller has to distinguish those two, since
+ * DPMI 0500h declining to answer is routine on a small machine and is
+ * precisely why the heap probe exists. */
+void ArcMemReportKB( UInt32 *sysFreeKB, UInt32 *largestKB, UInt32 *budgetKB )
+{
+    UInt32 budget = ArcMemBudget();          /* measures on the first call */
+
+    if ( sysFreeKB ) *sysFreeKB = g_memSysFree / 1024;
+    if ( largestKB ) *largestKB = g_memProbed / 1024;
+    if ( budgetKB )  *budgetKB  = budget / 1024;
+}
+
+/*---- The MEASURED capacity, with no policy on top ------------------------- *
+ * ArcMemLimitMB is a BUDGET: three quarters of what was measured, lifted to
+ * the floor and clipped to the ceiling.  That is the right number to weigh an
+ * archive's appetite against, and it is the wrong number to answer "can this
+ * machine do it at all", because both clamps are deliberate departures from
+ * the measurement.  This is the measurement.
+ *-------------------------------------------------------------------------- */
+UInt32 ArcMemLargest( void )
+{
+    (void)ArcMemBudget();               /* measures on the first call */
+    return g_memProbed;
+}
+
+/*---- Can this machine extract ANYTHING? ----------------------------------- *
+ * Below a certain point the format stops mattering.  Zip is the cheapest
+ * thing here and it still needs its 32 KB window, its 8 KB output buffer and
+ * its trees; under that, no archive of any kind can be extracted and the only
+ * useful thing to do is say so plainly, once, rather than let the user pick a
+ * file and meet a malloc failure.
+ *
+ * This is a WARNING and not a refusal, and the distinction is the point:
+ * listing an archive costs a few KB per entry and works fine on a machine
+ * that cannot extract from it.  Being able to see what is in a file you
+ * cannot unpack is still worth something, so the program stays usable and
+ * says what it cannot do.
+ *-------------------------------------------------------------------------- */
+int ArcMemStartupOk( UInt32 *haveKB, UInt32 *needKB )
+{
+    UInt32 have = ArcMemLargest();
+    /* The cheapest extraction in the program, asked of the code that does
+     * it rather than written down here a second time.  ZipMemNeeded gives
+     * the same answer for every zip, which is why it can be asked with no
+     * archive in hand - and asking it is what stops this floor drifting
+     * away from the check that actually refuses things. */
+    UInt32 need = ZipMemNeeded( NULL ) + ARC_MEM_SLACK;
+
+    if ( haveKB ) *haveKB = have / 1024;
+    if ( needKB ) *needKB = ( need + 1023 ) / 1024;
+    return have >= need;
+}
+
+/*---- What THIS archive will cost ------------------------------------------ *
+ * The question "how much RAM does XArchive need" has no answer, and that is
+ * not evasion - it is the finding.  A zip needs 173 KB whether it holds two
+ * files or twenty thousand.  A .7z needs whatever its largest folder
+ * declares as a dictionary - 193 KB to 65,664 KB across the fixtures here,
+ * for archives that look identical in a listing.  A RAR needs its window
+ * plus, when it is not solid, one whole member in memory twice over.
+ *
+ * So the check cannot live at startup, where nothing is known, and it cannot
+ * live per format, because the spread WITHIN a format is far wider than the
+ * spread between them.  It lives here, on an OPEN archive, where the headers
+ * have been read and the figure is a fact rather than an estimate.  Each
+ * backend answers for itself from what its own decoder will really allocate.
+ *
+ * Returns 0 when nothing can be said (a disk image is already in memory and
+ * costs nothing further to read out of).
+ *-------------------------------------------------------------------------- */
+UInt32 ArcMemNeeded( ArcFile *a )
+{
+    UInt32 need;
+
+    if ( !a ) return 0;
+
+    if      ( a->fmt == FMT_7Z )   need = SzMemNeeded( a->sz );
+    else if ( a->fmt == FMT_ZIP )  need = ZipMemNeeded( a->zip );
+    else if ( a->fmt == FMT_RAR )  need = RarMemNeeded( a->rar );
+    else if ( a->fmt == FMT_RAR5 ) need = Rar5MemNeeded( a->rar5 );
+    else                           return 0;      /* FMT_DISK: already held */
+
+    if ( need == 0 ) return 0;
+
+    /* What gets allocated ALONGSIDE the big block - see ARC_MEM_SLACK in
+     * ARCDEFS.H, which records both the measurement it came from and why it
+     * is deliberately not more generous than that. */
+    if ( need > 0xFFFFFFFFUL - ARC_MEM_SLACK ) return 0xFFFFFFFFUL;
+    return need + ARC_MEM_SLACK;
+}
+
+/*---- The verdict ---------------------------------------------------------- *
+ * SZ_OK, or SZ_ERR_NORAM with both figures filled in so the message can name
+ * them.  "Not enough memory" on its own sends a user to look for a fault that
+ * is not there; "this archive needs 4.2 MB and 300 KB is free" tells them
+ * what to do about it, and tells us which of the two numbers is wrong if they
+ * come back and say it is nonsense.
+ *
+ * Weighed against the MEASUREMENT, not the budget: the budget's floor exists
+ * to keep us from refusing archives a roomy machine could manage, and letting
+ * it speak here would defeat the whole check on exactly the machines it was
+ * written for.
+ *-------------------------------------------------------------------------- */
+int ArcMemCheck( ArcFile *a, UInt32 *needKB, UInt32 *haveKB )
+{
+    UInt32 need = ArcMemNeeded( a );
+    UInt32 have = ArcMemLargest();
+
+    if ( needKB ) *needKB = ( need + 1023 ) / 1024;
+    if ( haveKB ) *haveKB = have / 1024;
+
+    if ( need == 0 ) return SZ_OK;          /* nothing to weigh */
+    if ( need <= have ) return SZ_OK;
+
+    /* Kept for the message, and ONLY on a refusal.  A figure recorded on the
+     * way past would still be sitting here when a later NORAM arrived from
+     * somewhere else entirely - the entry-count check, say - and the hint
+     * would confidently quote a requirement that had nothing to do with it. */
+    g_needKB = ( need + 1023 ) / 1024;
+    g_haveKB = have / 1024;
+    return SZ_ERR_NORAM;
 }
 
 /*---- How many entries will fit (see ARCDEFS.H) ---------------------------- *
@@ -314,10 +493,10 @@ static int TryMountImz( ZipArchive *zip, DiskArchive **outDisk )
     return 1;
 }
 
-int ArcOpen( const char *path, ArcFile **out )
+int ArcOpenPw( const char *path, const char *pw, ArcFile **out )
 {
     ArcFile      *a;
-    FILE         *fp;
+    VolFile      *fp;
     unsigned char sig[7];
     int           fmt  = FMT_ZIP;
     int           isMZ = 0;
@@ -329,9 +508,12 @@ int ArcOpen( const char *path, ArcFile **out )
      * (RAR's 7th byte is 0x00 for RAR4, 0x01 for RAR5).  Anything else may be a
      * plain zip, a self-extracting zip, or a self-extracting 7z - the last two
      * are .exe files starting with "MZ". */
-    fp = fopen( path, "rb" );
-    if ( !fp ) return SZ_ERR_OPEN;
-    if ( fread( sig, 1, 7, fp ) == 7 )
+    /* Sniff through VOLIO, not a bare fopen: when the user opens a LATER
+     * volume of a split set - .004 of six - that file has no signature of
+     * its own, and only the joined stream starts with the archive.  Reading
+     * the named file directly would call a perfectly good 7z a bad one. */
+    if ( VolOpen( path, &fp ) != SZ_OK ) return SZ_ERR_OPEN;
+    if ( VolRead( sig, 1, 7, fp ) == 7 )
     {
         if ( memcmp( sig, SIG_7Z, 6 ) == 0 )
             fmt = FMT_7Z;
@@ -340,14 +522,14 @@ int ArcOpen( const char *path, ArcFile **out )
         else if ( sig[0] == 'M' && sig[1] == 'Z' )
             isMZ = 1;
     }
-    fclose( fp );
+    VolClose( fp );
 
     a = (ArcFile *)calloc( 1, sizeof( ArcFile ) );
     if ( !a ) return SZ_ERR_MEMORY;
 
-    if ( fmt == FMT_7Z )        rc = SzOpen( path, &a->sz );
-    else if ( fmt == FMT_RAR )  rc = RarOpen( path, &a->rar );
-    else if ( fmt == FMT_RAR5 ) rc = Rar5Open( path, &a->rar5 );
+    if ( fmt == FMT_7Z )        rc = SzOpenPw( path, pw, &a->sz );
+    else if ( fmt == FMT_RAR )  rc = RarOpenPw( path, pw, &a->rar );
+    else if ( fmt == FMT_RAR5 ) rc = Rar5OpenPw( path, pw, &a->rar5 );
     else
     {
         /* A raw FAT12/16 floppy image (.img/.dsk): a jump-opcode boot sector
@@ -389,7 +571,7 @@ int ArcOpen( const char *path, ArcFile **out )
                 else
                     fmt = FMT_ZIP;
             }
-            else if ( isMZ && SzOpen( path, &a->sz ) == SZ_OK )
+            else if ( isMZ && SzOpenPw( path, pw, &a->sz ) == SZ_OK )
             {
                 fmt = FMT_7Z;
                 rc  = SZ_OK;
@@ -400,8 +582,43 @@ int ArcOpen( const char *path, ArcFile **out )
     a->fmt = fmt;
     if ( rc != SZ_OK ) { free( a ); return rc; }
 
+    /* 7z and both RARs took the password at open time, because any of the
+     * three can hide its directory behind it (7z's encoded header, RAR's -hp).
+     * Zip cannot - its central directory is always readable - so it is opened
+     * first and told afterwards.  Doing it here rather than making the caller
+     * do it means one password covers the archive whichever format it turned
+     * out to be, which matters because the format is decided by sniffing and
+     * the caller cannot know in advance which of these to call. */
+    if ( pw && pw[0] && fmt == FMT_ZIP )
+        ArcSetPassword( a, pw );
+
     *out = a;
     return SZ_OK;
+}
+
+int ArcOpen( const char *path, ArcFile **out )
+{
+    return ArcOpenPw( path, NULL, out );
+}
+
+void ArcSetPassword( ArcFile *a, const char *pw )
+{
+    if ( !a ) return;
+    if ( a->fmt == FMT_7Z )   SzSetPassword( a->sz, pw );
+    if ( a->fmt == FMT_ZIP )  ZipSetPassword( a->zip, pw );
+    if ( a->fmt == FMT_RAR5 ) Rar5SetPassword( a->rar5, pw );
+    if ( a->fmt == FMT_RAR )  RarSetPassword( a->rar, pw );
+    /* Disk images: nothing to set - a FAT image carries no encryption. */
+}
+
+int ArcNeedsPassword( ArcFile *a )
+{
+    if ( !a ) return 0;
+    if ( a->fmt == FMT_7Z )   return SzNeedsPassword( a->sz );
+    if ( a->fmt == FMT_ZIP )  return ZipNeedsPassword( a->zip );
+    if ( a->fmt == FMT_RAR5 ) return Rar5NeedsPassword( a->rar5 );
+    if ( a->fmt == FMT_RAR )  return RarNeedsPassword( a->rar );
+    return 0;
 }
 
 int ArcNumEntries( ArcFile *a )
@@ -705,48 +922,138 @@ int ArcWantWrite( const char *path )
     return ( ans == ARC_OW_YES );
 }
 
+/* Defined with the rest of the short-name registry, far below: declared here
+ * because the extract entry points are the only callers and they come first.
+ * Watcom accepted the use without this (C89 implicit declaration, then a
+ * clash it did not report at -w0); MSVC called it a redefinition, which is
+ * the right answer. */
+static void SnRelease( void );
+
 int ArcExtractAll( ArcFile *a, const char *destDir,
                    SzProgress prog, void *user )
 {
+    int rc;
+
     g_owAll   = -1;                        /* new operation: forget "all"   */
     g_names83 = NamesNeed83( destDir );    /* and re-read the destination   */
     ArcResetNames();                       /* and start the ~N count over   */
     if ( !a ) return SZ_ERR_FORMAT;
-    if ( a->fmt == FMT_7Z )   return SzExtractAll( a->sz, destDir, prog, user );
-    if ( a->fmt == FMT_RAR )  return RarExtractAll( a->rar, destDir, prog, user );
-    if ( a->fmt == FMT_RAR5 ) return Rar5ExtractAll( a->rar5, destDir, prog, user );
-    if ( a->fmt == FMT_DISK ) return DiskExtractAll( a->disk, destDir, prog, user );
-    return ZipExtractAll( a->zip, destDir, prog, user );
+
+    /* BEFORE anything is opened for writing.  See ArcMemCheck: refusing here
+     * costs the user a message, whereas discovering it half way through costs
+     * them a part-written output directory and a malloc failure to read. */
+    rc = ArcMemCheck( a, NULL, NULL );
+    if ( rc != SZ_OK ) return rc;
+
+    if ( a->fmt == FMT_7Z )        rc = SzExtractAll( a->sz, destDir, prog, user );
+    else if ( a->fmt == FMT_RAR )  rc = RarExtractAll( a->rar, destDir, prog, user );
+    else if ( a->fmt == FMT_RAR5 ) rc = Rar5ExtractAll( a->rar5, destDir, prog, user );
+    else if ( a->fmt == FMT_DISK ) rc = DiskExtractAll( a->disk, destDir, prog, user );
+    else                           rc = ZipExtractAll( a->zip, destDir, prog, user );
+
+    SnRelease();                           /* the names are decided: let go  */
+    return rc;
 }
 
 int ArcExtractItems( ArcFile *a, const int *indices, int count,
                      const char *destDir, SzProgress prog, void *user )
 {
+    int rc;
+
     g_owAll   = -1;                        /* new operation: forget "all"   */
     g_names83 = NamesNeed83( destDir );    /* and re-read the destination   */
     ArcResetNames();                       /* and start the ~N count over   */
     if ( !a ) return SZ_ERR_FORMAT;
+
+    rc = ArcMemCheck( a, NULL, NULL );
+    if ( rc != SZ_OK ) return rc;
+
     if ( a->fmt == FMT_7Z )
-        return SzExtractItems( a->sz, indices, count, destDir, prog, user );
-    if ( a->fmt == FMT_RAR )
-        return RarExtractItems( a->rar, indices, count, destDir, prog, user );
-    if ( a->fmt == FMT_RAR5 )
-        return Rar5ExtractItems( a->rar5, indices, count, destDir, prog, user );
-    if ( a->fmt == FMT_DISK )
-        return DiskExtractItems( a->disk, indices, count, destDir, prog, user );
-    return ZipExtractItems( a->zip, indices, count, destDir, prog, user );
+        rc = SzExtractItems( a->sz, indices, count, destDir, prog, user );
+    else if ( a->fmt == FMT_RAR )
+        rc = RarExtractItems( a->rar, indices, count, destDir, prog, user );
+    else if ( a->fmt == FMT_RAR5 )
+        rc = Rar5ExtractItems( a->rar5, indices, count, destDir, prog, user );
+    else if ( a->fmt == FMT_DISK )
+        rc = DiskExtractItems( a->disk, indices, count, destDir, prog, user );
+    else
+        rc = ZipExtractItems( a->zip, indices, count, destDir, prog, user );
+
+    SnRelease();                           /* the names are decided: let go  */
+    return rc;
 }
 
 /* Test integrity: run each backend's extractor with destDir == NULL, which the
  * backends treat as "decode + CRC-check, write nothing." */
 int ArcTestAll( ArcFile *a, SzProgress prog, void *user )
 {
+    int rc;
+
     if ( !a ) return SZ_ERR_FORMAT;
+
+    /* Testing decodes exactly what extracting decodes, so it costs exactly
+     * the same and is refused on exactly the same grounds.  Leaving Test out
+     * would have been the worse kind of helpful: it would report an archive
+     * as untestable-for-lack-of-memory only by failing inside the decoder. */
+    rc = ArcMemCheck( a, NULL, NULL );
+    if ( rc != SZ_OK ) return rc;
+
     if ( a->fmt == FMT_7Z )   return SzExtractAll( a->sz, NULL, prog, user );
     if ( a->fmt == FMT_RAR )  return RarExtractAll( a->rar, NULL, prog, user );
     if ( a->fmt == FMT_RAR5 ) return Rar5ExtractAll( a->rar5, NULL, prog, user );
     if ( a->fmt == FMT_DISK ) return DiskExtractAll( a->disk, NULL, prog, user );
     return ZipExtractAll( a->zip, NULL, prog, user );
+}
+
+/* The archive's own comment, or NULL when it has none.  Only zip and RAR4 have
+ * anywhere to keep one: 7z and RAR5 have no archive-comment field at all, and a
+ * disk image is a filesystem.  Those return NULL, which the front end reports
+ * as "no comment" rather than "not supported" - from where the user is standing
+ * they are the same thing. */
+const char *ArcComment( ArcFile *a )
+{
+    if ( !a ) return NULL;
+    if ( a->fmt == FMT_ZIP ) return ZipComment( a->zip );
+    if ( a->fmt == FMT_RAR ) return RarComment( a->rar );
+    return NULL;
+}
+
+/* The comment with CRLF line endings - see the header for why the GUI ports
+ * cannot use the raw bytes.  Lone CR, lone LF and CRLF all come out as CRLF;
+ * swallowing the LF of an existing pair is what stops a comment that was
+ * ALREADY correct from gaining a blank line between every line of it. */
+UInt32 ArcCommentText( ArcFile *a, char *buf, UInt32 bufLen )
+{
+    const char *src = ArcComment( a );
+    UInt32      need = 0, out = 0, i;
+
+    if ( !src )
+    {
+        if ( buf && bufLen ) buf[0] = '\0';
+        return 0;
+    }
+
+    for ( i = 0; src[i]; i++ )
+    {
+        char c = src[i];
+
+        if ( c == '\r' || c == '\n' )
+        {
+            if ( c == '\r' && src[i + 1] == '\n' ) i++;   /* one ending, not two */
+            need += 2;
+            if ( buf && out + 2 < bufLen )
+            { buf[out++] = '\r'; buf[out++] = '\n'; }
+        }
+        else
+        {
+            need += 1;
+            if ( buf && out + 1 < bufLen ) buf[out++] = c;
+        }
+    }
+
+    need += 1;                                    /* the terminator */
+    if ( buf && bufLen ) buf[out] = '\0';
+    return need;
 }
 
 void ArcClose( ArcFile *a )
@@ -779,28 +1086,112 @@ const char *ArcFormatName( ArcFile *a )
     }
 }
 
+int ArcVolumeCount( ArcFile *a )
+{
+    if ( !a ) return 1;
+    switch ( a->fmt )
+    {
+    case FMT_7Z:   return SzVolumeCount( a->sz );
+    case FMT_ZIP:  return ZipVolumeCount( a->zip );
+    case FMT_RAR:  return RarVolumeCount( a->rar );
+    case FMT_RAR5: return Rar5VolumeCount( a->rar5 );
+    default:       return 1;      /* a disk image is always one file */
+    }
+}
+
 const char *ArcNoRamHint( void )
 {
     static char text[448];
 
-    /* The limit is measured from the machine, so it has to be read out of
-     * ArcMemLimitMB rather than written into the sentence.
+    /* BOTH NUMBERS, whenever we have them.  "Not enough memory" on its own
+     * sends someone looking for a fault that is not there; "needs 4,371 KB,
+     * has 288 KB" tells them what to do about it, and tells us which of the
+     * two figures is wrong if they come back and say it is nonsense.
+     *
+     * KB and not MB.  The old wording quoted ArcMemLimitMB, which on the
+     * machines this message exists for reads "more than the 0 MB this machine
+     * can spare" - true, useless, and it looks like a bug in the program
+     * rather than a shortage on the machine.
      *
      * Worded for the shortage rather than for the dictionary: a big
      * dictionary is much the commonest way to get here, but a single huge
      * RAR entry or a mounted disk image can do it too, and telling someone
      * to shrink a dictionary that was never the problem wastes their time. */
+    if ( g_needKB )
+    {
+        char needBuf[ NUM_FMT_MAX ], haveBuf[ NUM_FMT_MAX ];
+
+        sprintf( text,
+                 "Not enough memory for this archive.\n"
+                 "It needs about %s KB in one block and this machine can "
+                 "spare %s KB.\n"
+                 "Close other programs, or unload what else is resident, and "
+                 "try again.\n"
+                 "Failing that, re-create the archive with a smaller "
+                 "dictionary (in 7-Zip, the Dictionary size setting, or "
+                 "simply a lower compression level; in WinRAR, -md).",
+                 NumFmt( g_needKB, needBuf ), NumFmt( g_haveKB, haveBuf ) );
+        return text;
+    }
+
+    /* No archive-specific figure: this NORAM came from somewhere that weighs
+     * the BUDGET rather than one archive - the entry-count check, or a
+     * backend refusing a declared size.  Quote the budget, and in KB when it
+     * is too small to have whole megabytes. */
+    {
+        UInt32 budget = ArcMemLimitMB();
+        char   b1[ NUM_FMT_MAX ], b2[ NUM_FMT_MAX ];
+
+        if ( budget )
+            sprintf( text,
+                     "Not enough memory for this archive.\n"
+                     "It needs more than the %s MB this machine can spare in "
+                     "one block, usually because it was compressed with a "
+                     "large dictionary.\n"
+                     "Close other programs, or unload what else is resident, "
+                     "and try again.\n"
+                     "Failing that, re-create the archive with a dictionary "
+                     "of %s MB or less (in 7-Zip, the Dictionary size "
+                     "setting, or simply a lower compression level).",
+                     NumFmt( budget, b1 ), NumFmt( budget, b2 ) );
+        else
+            sprintf( text,
+                     "Not enough memory for this archive.\n"
+                     "This machine can spare only %s KB in one block, which "
+                     "is not enough to extract anything.\n"
+                     "Close other programs, or unload what else is resident, "
+                     "and try again.",
+                     NumFmt( ArcMemLargest() / 1024, b1 ) );
+    }
+    return text;
+}
+
+/*---- "this machine cannot extract anything", in words --------------------- *
+ * Shared rather than written out in each of the three front ends, for the
+ * usual reason and one particular one: the two FIGURES in it have to be the
+ * ones ArcMemStartupOk actually compared, and three copies of a sentence with
+ * two numbers in it is three chances for one of them to be quoted from
+ * somewhere else.
+ *
+ * It deliberately stops short of telling the user which command to run - that
+ * differs per front end (the DOS build has XARC /MEM, the GUIs have Archive
+ * Info), so whichever one is showing this appends its own sentence.
+ *
+ * Same static-buffer caveat as the hints above: good until the next call.
+ *-------------------------------------------------------------------------- */
+const char *ArcMemWarnText( void )
+{
+    static char text[384];
+    UInt32      haveKB = 0, needKB = 0;
+    char        b1[ NUM_FMT_MAX ], b2[ NUM_FMT_MAX ];
+
+    ArcMemStartupOk( &haveKB, &needKB );
     sprintf( text,
-             "Not enough memory for this archive.\n"
-             "It needs more than the %lu MB this machine can spare in one "
-             "block, usually because it was compressed with a large "
-             "dictionary.\n"
-             "Close other programs, or unload what else is resident, and try "
-             "again.\n"
-             "Failing that, re-create the archive with a dictionary of %lu MB "
-             "or less (in 7-Zip, the Dictionary size setting, or simply a "
-             "lower compression level).",
-             (unsigned long)ArcMemLimitMB(), (unsigned long)ArcMemLimitMB() );
+             "This machine has only %s KB of memory free in one block, and "
+             "the smallest archive needs about %s KB.\n\n"
+             "Archives can still be listed and browsed, but nothing can be "
+             "extracted or tested until more memory is free.",
+             NumFmt( haveKB, b1 ), NumFmt( needKB, b2 ) );
     return text;
 }
 
@@ -832,28 +1223,36 @@ const char *ArcUnsupportedHint( ArcFile *a )
     int fmt = a ? a->fmt : 0;
     switch ( fmt )
     {
+    /* These list encryption among the things that DO work.  Saying otherwise
+     * here does real harm: this text is what the user is shown when something
+     * has already failed, so an out-of-date "not supported: encryption" reads
+     * as the explanation for the failure and stops them looking further. */
     case FMT_7Z:
         return "Some entries use a feature this extractor does not support, "
                "and were skipped.  Everything else was extracted.\n"
-               "Supported: LZMA, LZMA2, stored, the BCJ x86 filter, and BCJ2.\n"
+               "Supported: LZMA, LZMA2, stored, the BCJ x86 filter, BCJ2, and "
+               "AES-256 encryption (including encrypted headers).\n"
                "Not supported: other codecs (PPMd, BZip2, Deflate, ARM/other "
-               "filters) and encryption.";
+               "filters).";
     case FMT_RAR:
         return "This RAR entry uses a feature this extractor does not support.\n"
                "Supported: stored and \"Normal\" LZ compression for RAR2 and "
-               "RAR3, including solid archives.\n"
-               "Not supported: PPMd compression, compression filters, RAR2 "
-               "audio, encryption, and multi-volume archives.";
+               "RAR3, including solid archives, and AES-128 encryption "
+               "(including encrypted headers).\n"
+               "Not supported: PPMd compression, compression filters, and "
+               "RAR2 audio.";
     case FMT_RAR5:
         return "This is a RAR5 archive.\n"
-               "Only stored (uncompressed) entries can be extracted.\n"
-               "RAR5 compression, encryption, and multi-volume archives are "
-               "not supported.";
+               "Only stored (uncompressed) entries can be extracted, but those "
+               "may be AES-256 encrypted, encrypted headers included.\n"
+               "RAR5 compression is not supported.";
     case FMT_ZIP:
         return "This zip entry uses a method this extractor does not support.\n"
-               "Supported: stored, Deflate, and Implode (PKZIP 1.x method 6).\n"
-               "Not supported: encryption, Deflate64, BZip2/LZMA/PPMd, Zip64, "
-               "and split archives.";
+               "Supported: stored, Deflate, Implode (PKZIP 1.x method 6), "
+               "ZipCrypto, and WinZip AES.\n"
+               "Not supported: Deflate64, BZip2/LZMA/PPMd, Zip64, and true "
+               "SPANNED zips (.z01/.z02/.zip, which number their disks).  A "
+               "zip SPLIT by bytes into .zip.001/.002/... is supported.";
     case FMT_DISK:
         return "This disk image uses a feature this extractor does not support.\n"
                "Supported: raw FAT12 and FAT16 floppy/disk images with 8.3 and "
@@ -1308,6 +1707,23 @@ void ArcResetNames( void )
     g_snAbort     = 0;
 }
 
+/* Give the registry's memory back the moment the extraction that needed it has
+ * FINISHED.  It has to live for the whole of one extraction - it is what makes
+ * the ~N count agree across every entry of a folder - so this is the earliest
+ * it can go.  ArcResetNames at the start of the NEXT extraction used to be the
+ * only thing freeing it, which left a four-hundred-file extraction's worth of
+ * nodes on the heap until the user happened to extract something else: the
+ * "it does not give the memory back after loading an archive" report.
+ *
+ * The VERDICT FLAGS are deliberately left alone.  Callers read them after the
+ * extraction returns, and clearing the abort here would throw away the one
+ * fact they are asking for. */
+static void SnRelease( void )
+{
+    SnClear( g_snMap );
+    SnClear( g_snUsed );
+}
+
 /* The 8.3 name one stored component gets inside one destination folder.
  *   parent - the already-shortened path of the folders above it, "" at the
  *            top of the destination;
@@ -1463,6 +1879,14 @@ void ArcFsName( char *dst, int dstSize, const char *name, int isDir )
     if ( dstSize <= 0 ) return;
     g_nameVerdict = ARC_NAME_OK;
     if ( g_snAbort ) { dst[0] = '\0'; return; }
+
+    /* WITH PATHS OFF, A DIRECTORY ENTRY HAS NOTHING TO CONTRIBUTE.  Its whole
+     * purpose is to create a folder, and "extract without pathnames" means no
+     * folders are created - so it is skipped here rather than renamed.  It used
+     * to fall through and be treated like any other name, which asked the user
+     * to name a folder that was then never created. */
+    if ( g_flatten && isDir )
+    { dst[0] = '\0'; g_nameVerdict = ARC_NAME_SKIP; return; }
     if ( g_names83 < 0 )
         g_names83 = NamesNeed83( NULL );
     e83 = g_names83;
@@ -1493,8 +1917,19 @@ void ArcFsName( char *dst, int dstSize, const char *name, int isDir )
          * parent.  Done here rather than to the finished path, because the
          * numbering below has to see the folder the file is REALLY going
          * into: two "readme.txt" from two archive folders collide once they
-         * are flattened, and have to be numbered apart. */
-        if ( g_flatten ) di = 0;
+         * are flattened, and have to be numbered apart.
+         *
+         * A FOLDER COMPONENT IS DROPPED BEFORE IT CAN BE NAMED.  It is not
+         * going to exist, so shortening it is pointless and PROMPTING for it
+         * is worse than pointless: the user was asked to name a folder that
+         * was never created, and answering Skip or Cancel took the file - or
+         * the whole extraction - with it.  Only the last component of the name
+         * survives flattening, so only the last one is worth a question. */
+        if ( g_flatten )
+        {
+            if ( compIsDir ) continue;
+            di = 0;
+        }
 
         if ( orig[0] == '.' && orig[1] == '\0' )
             continue;                           /* "." drops out entirely */

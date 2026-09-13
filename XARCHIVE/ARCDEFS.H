@@ -46,6 +46,38 @@ typedef int            Int32;
                                * memory, and both must be reported that way
                                * - never as SZ_ERR_TOOBIG, which would send
                                * them off to shrink an archive instead.   */
+#define SZ_ERR_PASSWORD   13  /* the entry is encrypted and no password has
+                               * been set.  A front end should react by
+                               * PROMPTING, not by reporting a failure: this
+                               * is a request for input, not a dead end.   */
+#define SZ_ERR_BADPASS    14  /* a password was set and it is wrong.  Kept
+                               * separate from SZ_ERR_PASSWORD so the front
+                               * end can say "that password is wrong" and
+                               * re-prompt, and separate from SZ_ERR_CRC so a
+                               * bad password is never reported as a corrupt
+                               * archive.  Note the asymmetry between formats:
+                               * zip AES and RAR5 carry a password CHECK value
+                               * and can say so before decoding a single byte,
+                               * while 7z and RAR3 cannot - there a wrong
+                               * password yields garbage that fails its CRC,
+                               * and the backend infers BADPASS from "it did
+                               * not verify AND a password was in use".  That
+                               * inference can mislabel a genuinely corrupt
+                               * encrypted archive, which is the right way
+                               * round: re-prompting costs the user a moment,
+                               * crying corruption over a typo costs them the
+                               * archive.                                  */
+#define SZ_ERR_VOLUME     15  /* a volume of a MULTI-VOLUME archive is not
+                               * there.  Kept apart from SZ_ERR_READ because
+                               * the two send the user to different places:
+                               * a truncated archive is damaged and probably
+                               * beyond help, while a missing volume is an
+                               * INTACT archive whose other files simply have
+                               * not been copied yet - and saying "corrupt"
+                               * about that would have them delete a set that
+                               * is fine.  The backends only reach for this
+                               * when the format itself says how much should
+                               * be there and the volumes on disk fall short. */
 
 /*---- Configurable limits (keep memory manageable on era hardware) -------- *
  * The extractor refuses archives that would exceed these, with a clear
@@ -131,6 +163,48 @@ int    ArcCheckEntryCount( UInt32 n );
 #define ARC_MEM_FLOOR       (4UL * 1024 * 1024)
 #define ARC_MEM_CEILING     (1536UL * 1024 * 1024)
 
+/*---- The floor is a policy, not a promise --------------------------------- *
+ * ARC_MEM_FLOOR says "let us at least TRY for this much", so that a
+ * pessimistic probe does not make us turn away a 4 MB dictionary on a machine
+ * that would have managed it.  It used to be applied unconditionally, which
+ * meant a machine measuring 300 KB was reported as having 4 MB - so every
+ * check in the program passed and the shortage arrived instead as a bare
+ * malloc failure part way through an extraction.  ArcMemBudget now refuses to
+ * lift the budget past what the heap actually produced.
+ *
+ * ARC_MEM_SLACK is what ArcMemNeeded adds to a backend figure to cover what
+ * gets allocated ALONGSIDE the big block - read buffers, the BCJ filter
+ * window, output file buffering, the decoders own structures.  It is measured
+ * rather than chosen: across 33 fixtures the tracking allocator puts the gap
+ * between a backend figure and the real peak at between -3 KB (zip, which
+ * over-counts slightly) and 64 KB (TESTBCJ.7Z, where the x86 filter window is
+ * the difference).  128 KB is twice the worst of those.
+ *
+ * Twice, and not ten times, because this number is not free: it is added to
+ * every estimate, and on a 300 KB machine an over-generous slack refuses zips
+ * that would have extracted perfectly well.  Erring high is still the safe
+ * direction - refusing an archive that might just have fitted beats accepting
+ * one that does not and dying part way through - but only just, and a margin
+ * this size wants re-measuring rather than inflating if a new coder lands.
+ *
+ * The other end - below which nothing can be extracted at all, whatever the
+ * format - is not a constant here on purpose.  It is ASKED FOR at run time,
+ * from the cheapest path in the program: ArcMemStartupOk calls ZipMemNeeded,
+ * which answers the same figure for every zip that ever existed.  Writing it
+ * down as a second constant would have let the two disagree, and they did in
+ * testing: a floor of 176 KB against a real zip cost of 173 KB made the
+ * startup warning say nothing could be extracted on a machine that then
+ * extracted a zip perfectly well.  Three kilobytes, and it made the program
+ * contradict itself in front of the user.
+ *-------------------------------------------------------------------------- */
+#define ARC_MEM_SLACK       (128UL * 1024)
+
+/* The measurement with no policy on it: the largest block malloc really
+ * produced.  This, and not ArcMemLimitMB, is what an "is there enough?"
+ * question must be weighed against - the budget has a floor and a ceiling on
+ * it and both are deliberate departures from what was measured. */
+UInt32 ArcMemLargest( void );
+
 UInt32 ArcMaxDictSize( void );      /* LZMA sliding dictionary               */
 UInt32 ArcMaxBufferSize( void );    /* biggest whole-file buffer: a RAR entry,
                                        a mounted disk image, the 7z header   */
@@ -151,6 +225,12 @@ UInt32 ArcMemLimitMB( void );       /* the budget in whole MB, for messages  */
  *               clamped to the floor and ceiling above.
  * Any pointer may be NULL.  Forces the measurement if it has not run. */
 void   ArcMemReport( UInt32 *sysFreeMB, UInt32 *largestMB, UInt32 *budgetMB );
+
+/* The same three in KB.  Required, not convenient: on a machine small enough
+ * to need this screen all three round to 0 MB, and a diagnostic that prints
+ * zero whether the machine is short or the program is broken tells the user
+ * nothing.  sysFreeKB == 0 still means "the system would not say". */
+void   ArcMemReportKB( UInt32 *sysFreeKB, UInt32 *largestKB, UInt32 *budgetKB );
 
 #define SZ_MAX_DICT_SIZE    ArcMaxDictSize()
 #define SZ_MAX_BUFFER_SIZE  ArcMaxBufferSize()

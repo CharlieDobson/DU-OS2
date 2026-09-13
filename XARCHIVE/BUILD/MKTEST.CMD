@@ -42,8 +42,12 @@ del OS2T.EXE >nul 2>&1
 
 rem  -i=%WATCOM%\H\OS2 is needed because the shim includes <os2def.h> for its
 rem  base typedefs; the headers alone compile fine for an NT target.
+rem  ARCCRYP/AES/SHA joined the list when SZARC.C learned to decrypt: OS2T.C
+rem  #includes SZARC.C, so it now pulls in the AES-CBC and key-derivation
+rem  references and will not link without them.  VOLIO joined for the same
+rem  reason when SZARC.C started reading through the volume layer.
 wcl386 -bt=nt -l=nt -zq -w0 -i=.. -i=%WATCOM%\H\OS2 ^
-  OS2T.C ..\LZMADEC.C ..\CRC32.C -fe=OS2T.EXE
+  OS2T.C ..\LZMADEC.C ..\CRC32.C ..\ARCCRYP.C ..\AES.C ..\SHA.C ..\VOLIO.C -fe=OS2T.EXE
 
 del *.obj >nul 2>&1
 

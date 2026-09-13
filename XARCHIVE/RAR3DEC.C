@@ -52,6 +52,36 @@
 #define RAR_WIN_SIZE (1UL << RAR_WIN_BITS)
 #define RAR_WIN_MASK (RAR_WIN_SIZE - 1)
 
+/* ...but 4 MB is the LARGEST window RAR can have asked for, not the one this
+ * archive did ask for, and allocating the maximum every time was costing four
+ * megabytes to unpack a file compressed with -md64.  It is the single reason
+ * a RAR - any RAR, of any size, with any dictionary - would not open on a
+ * small machine while a 7z with a 64 KB dictionary would.
+ *
+ * RAR records the dictionary in the file header, in the same three flag bits
+ * it uses to mark a directory (all three set), as 64 KB << n.  RARARC.C reads
+ * those bits and passes the answer here; Rar3Create keeps the old behaviour
+ * for callers that have no header to ask.
+ *
+ * UnRAR's modern Unpack::Init raises anything smaller than 1 MB to 1 MB.
+ * That is a convenience on a machine where a megabyte is nothing, and it is
+ * deliberately NOT copied here, because on the machines this build exists for
+ * the difference between 64 KB and 1 MB is the difference between working and
+ * not.  Nothing is risked by the smaller window: the decoder already refuses
+ * any match whose distance exceeds wmask + 1, so a window smaller than the
+ * stream really needs fails loudly as SZ_ERR_DATA rather than quietly
+ * producing wrong bytes. */
+#define RAR_WIN_MIN  (1UL << 16)                 /* 64 KB, RAR's smallest    */
+
+UInt32 RarWindowFor( UInt32 want )
+{
+    UInt32 w = RAR_WIN_MIN;
+
+    if ( want == 0 ) return RAR_WIN_SIZE;        /* "don't know" = the max   */
+    while ( w < want && w < RAR_WIN_SIZE ) w <<= 1;
+    return w;
+}
+
 /*---- decode tables (values from UnRAR) ----------------------------------- */
 /* Length bases/bits are shared by v2 and v3 (UnRAR LDecode/LBits). */
 static const unsigned char LDecode[28] =
@@ -235,13 +265,16 @@ struct Rar2Ctx {
     UInt32        pos;
 };
 
-Rar2Ctx *Rar2Create( void )
+Rar2Ctx *Rar2CreateSized( UInt32 winSize )
 {
-    Rar2Ctx *c = (Rar2Ctx *)malloc( sizeof( Rar2Ctx ) );
+    Rar2Ctx *c;
+    UInt32   w = RarWindowFor( winSize );
+
+    c = (Rar2Ctx *)malloc( sizeof( Rar2Ctx ) );
     if ( !c ) return NULL;
-    c->win = (Byte *)malloc( RAR_WIN_SIZE );
+    c->win = (Byte *)malloc( w );
     if ( !c->win ) { free( c ); return NULL; }
-    c->wmask = RAR_WIN_MASK;
+    c->wmask = w - 1;
     c->pos   = 0;
     memset( c->lengthtable, 0, sizeof( c->lengthtable ) );
     c->oldoffset[0] = c->oldoffset[1] = c->oldoffset[2] = c->oldoffset[3] = 0;
@@ -252,6 +285,8 @@ Rar2Ctx *Rar2Create( void )
     c->b.bytePos = 0; c->b.bitPos = 0; c->b.overrun = 0;
     return c;
 }
+
+Rar2Ctx *Rar2Create( void ) { return Rar2CreateSized( RAR_WIN_SIZE ); }
 
 void Rar2Free( Rar2Ctx *c ) { if ( c ) { free( c->win ); free( c ); } }
 
@@ -444,7 +479,13 @@ int Rar2Feed( Rar2Ctx *c, Rar2Emit emit, void *user, const Byte *data, UInt32 le
 /* Non-solid wrapper: decode a whole v2 stream into a caller-provided buffer. */
 int Rar2Decode( const Byte *src, UInt32 srcLen, Byte *dst, UInt32 dstLen )
 {
-    Rar2Ctx   *c = Rar2Create();
+    return Rar2DecodeSized( src, srcLen, dst, dstLen, RAR_WIN_SIZE );
+}
+
+int Rar2DecodeSized( const Byte *src, UInt32 srcLen, Byte *dst, UInt32 dstLen,
+                     UInt32 winSize )
+{
+    Rar2Ctx   *c = Rar2CreateSized( winSize );
     RarBufSink s;
     int        rc;
 
@@ -473,32 +514,41 @@ struct Rar3Ctx {
     Byte         *win;
     UInt32        wmask;
     UInt32        pos;
+    int           tablesRead;            /* see Rar3EndOfFile below         */
+    int           sawFileEnd;           /* trailer already consumed        */
 };
 
-Rar3Ctx *Rar3Create( void )
+Rar3Ctx *Rar3CreateSized( UInt32 winSize )
 {
     Rar3Ctx *c;
+    UInt32   w = RarWindowFor( winSize );
+
     InitV3DistTables();
     c = (Rar3Ctx *)malloc( sizeof( Rar3Ctx ) );
     if ( !c ) return NULL;
-    c->win = (Byte *)malloc( RAR_WIN_SIZE );
+    c->win = (Byte *)malloc( w );
     if ( !c->win ) { free( c ); return NULL; }
-    c->wmask = RAR_WIN_MASK;
+    c->wmask = w - 1;
     c->pos   = 0;
     memset( c->lengthtable, 0, sizeof( c->lengthtable ) );
     c->oldoffset[0] = c->oldoffset[1] = c->oldoffset[2] = c->oldoffset[3] = 0;
     c->lastlength = 0;
     c->prevLowDist = 0;
     c->lowDistRepCount = 0;
+    c->tablesRead = 0;
+    c->sawFileEnd = 0;
     c->b.buf = NULL; c->b.size = 0;
     c->b.bytePos = 0; c->b.bitPos = 0; c->b.overrun = 0;
     return c;
 }
 
+Rar3Ctx *Rar3Create( void ) { return Rar3CreateSized( RAR_WIN_SIZE ); }
+
 void Rar3Free( Rar3Ctx *c ) { if ( c ) { free( c->win ); free( c ); } }
 
 void Rar3SetInput( Rar3Ctx *c, const Byte *src, UInt32 srcLen )
 {
+    c->sawFileEnd = 0;                   /* a new member, a new trailer */
     c->b.buf = src; c->b.size = srcLen;
     c->b.bytePos = 0; c->b.bitPos = 0; c->b.overrun = 0;
 }
@@ -574,6 +624,7 @@ int Rar3ReadTables( Rar3Ctx *c )
     MakeDecodeTables( &table[NC30 + DC30],          &c->LDD, LDC30 );
     MakeDecodeTables( &table[NC30 + DC30 + LDC30],  &c->RD,  RC30 );
     memcpy( c->lengthtable, table, LT30_SIZE );
+    c->tablesRead = 1;
     return SZ_OK;
 }
 
@@ -620,7 +671,13 @@ static int Rar3ReadEndOfBlock( Rar3Ctx *c )
     if ( bitField & 0x8000 ) { newTable = 1; BitAdd( b, 1 ); }
     else { newFile = 1; newTable = ( bitField & 0x4000 ) != 0; BitAdd( b, 2 ); }
 
-    if ( newFile ) return RAR3_STOP;         /* end of this file's data */
+    /* This bit is the ONLY statement anywhere in the stream about whether
+     * the next block - which, at a file boundary, is the start of the next
+     * solid member - begins with a fresh set of tables.  UnRAR records it
+     * in both branches, and so must we: see Rar3EndOfFile. */
+    c->tablesRead = !newTable;
+
+    if ( newFile ) { c->sawFileEnd = 1; return RAR3_STOP; }  /* file ends here */
     if ( !newTable ) return SZ_OK;
     return Rar3ReadTables( c );
 }
@@ -737,6 +794,42 @@ int Rar3Decode2( Rar3Ctx *c, Rar2Emit emit, void *user, UInt32 endPos )
     return rc;
 }
 
+/* Consume the end-of-block trailer that closes a solid member's packed data,
+ * and report whether the NEXT member starts with fresh tables.
+ *
+ * WHY THIS IS NEEDED.  A solid chain is one continuous LZ stream, but each
+ * member is a separate byte range with its own bit stream, and the encoder
+ * closes every member at a block boundary.  That closing block carries two
+ * bits: "a new file starts here" and "the next block has new tables".  The
+ * second one is what the next member needs, and Rar3Decode2 never sees it,
+ * because it stops the instant the member's byte count is reached - one
+ * symbol BEFORE the trailer.  UnRAR does see it, because its loop runs until
+ * the member's packed INPUT is exhausted rather than until its output count
+ * is met, so the trailer is decoded on the way out.
+ *
+ * Reading it here is the same thing done explicitly.  Getting it wrong is
+ * silent: the next member decodes with the previous member's Huffman tables,
+ * which is not a detectable error - it just produces the wrong bytes, and
+ * fails later as a CRC mismatch or as a bogus symbol 257 reported as
+ * SZ_ERR_UNSUPPORTED.
+ *
+ * Only unpack v3 works this way.  RAR2 has no such trailer: it signals new
+ * tables inline with symbol 269, which Rar2Decode2 already handles, so the
+ * v2 path needs nothing equivalent and must not be given one. */
+void Rar3EndOfFile( Rar3Ctx *c )
+{
+    int number;
+    if ( c->sawFileEnd ) return;             /* decode already ran into it */
+    if ( c->b.overrun ) return;              /* nothing left to read it from */
+    number = DecodeNumber( &c->b, &c->LD );
+    if ( c->b.overrun ) return;
+    if ( number == 256 ) (void)Rar3ReadEndOfBlock( c );
+}
+
+/* Does the next solid member begin with its own tables?  True before the
+ * first member of a chain, because nothing has been read yet. */
+int Rar3NeedTables( Rar3Ctx *c ) { return !c->tablesRead; }
+
 int Rar3Feed( Rar3Ctx *c, Rar2Emit emit, void *user, const Byte *data, UInt32 len )
 {
     int rc = SZ_OK;
@@ -753,7 +846,13 @@ int Rar3Feed( Rar3Ctx *c, Rar2Emit emit, void *user, const Byte *data, UInt32 le
 /* Non-solid wrapper: decode a whole v3 stream into a caller-provided buffer. */
 int Rar3Decode( const Byte *src, UInt32 srcLen, Byte *dst, UInt32 dstLen )
 {
-    Rar3Ctx   *c = Rar3Create();
+    return Rar3DecodeSized( src, srcLen, dst, dstLen, RAR_WIN_SIZE );
+}
+
+int Rar3DecodeSized( const Byte *src, UInt32 srcLen, Byte *dst, UInt32 dstLen,
+                     UInt32 winSize )
+{
+    Rar3Ctx   *c = Rar3CreateSized( winSize );
     RarBufSink s;
     int        rc;
 

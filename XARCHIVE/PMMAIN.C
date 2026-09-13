@@ -53,6 +53,8 @@
 #include "arcdefs.h"
 #include "arcfile.h"
 #include "arcpref.h"
+#include "arccryp.h"   /* AC_MAX_PW - the password buffer size */
+#include "numfmt.h"    /* digit grouping in this machine's notation */
 #include "pmworker.h"
 #include "res/resource.h"
 
@@ -79,8 +81,8 @@ typedef struct _ARCREC {
     PSZ   pszAttr;
     PSZ   pszMethod;
     LONG  lIndex;                /* entry index, for the selection walk */
-    char  szSize[16];
-    char  szPacked[16];
+    char  szSize[NUM_FMT_U32_MAX];
+    char  szPacked[NUM_FMT_U32_MAX];
     char  szDate[24];
     char  szAttr[16];
     char  szMethod[32];
@@ -160,18 +162,39 @@ static int      g_workerReady = 0;
  * dialog is up. */
 static char g_owAskPath[SZ_MAX_NAME * 4];
 
+/* Wording for the password dialog, set just before it is opened.  A PM dialog
+ * proc gets no user parameter through WinDlgBox the way DialogBoxParam gives
+ * one on Windows, so the text is handed over the same way g_owAskPath is. */
+static const char *g_pwPrompt = "";
+
+/* The archive password, held for as long as the archive is open: every entry
+ * needs the same one, and 7z key derivation is slow enough that repeating it
+ * per entry would be felt.  Declared here rather than beside the password
+ * dialog because OpenArchiveFile clears it, far earlier in the file. */
+static char g_password[ AC_MAX_PW + 1 ] = "";
+
 static struct {
     int      kind;
     int     *sel;                       /* extract selection; worker frees  */
     int      selCount;
     char     dest[CCHMAXPATH];
     char     openPath[CCHMAXPATH];
+    char     openPw[ AC_MAX_PW + 1 ];   /* ARCJOB_OPEN: for an encrypted    */
+                                        /*   HEADER, which cannot even be   */
+                                        /*   listed without one             */
     ArcFile *openArc;                   /* ARCJOB_OPEN result               */
     int      rc;
 } g_job;
 
 /* Filled by DoInfo(), shown by the Info dialog. */
 static char g_infoText[1024];
+
+/* Filled by DoComment(), shown by the Comment dialog, freed as soon as it
+ * closes.  Heap rather than a fixed array because this text is not ours:
+ * a zip file comment may be 64 KB and a RAR comment longer still, and a
+ * box that silently shows the first 1024 bytes of somebody's notes is
+ * worse than one that admits it could not show them. */
+static char *g_commentText = NULL;
 
 /* Extract-dialog state: the chosen destination, a New-Folder name, and the
  * title that says what this run is about to take out of the archive. */
@@ -206,10 +229,15 @@ MRESULT EXPENTRY BarWndProc     ( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY AboutDlgProc   ( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY ProgressDlgProc( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY InfoDlgProc    ( HWND, ULONG, MPARAM, MPARAM );
+MRESULT EXPENTRY CommentDlgProc ( HWND, ULONG, MPARAM, MPARAM );
+static void      DoComment      ( HWND hwnd );
 MRESULT EXPENTRY ExtractDlgProc ( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY NewFolderDlgProc( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY FolderPickProc ( HWND, ULONG, MPARAM, MPARAM );
 MRESULT EXPENTRY OverwriteDlgProc( HWND, ULONG, MPARAM, MPARAM );
+MRESULT EXPENTRY PasswordDlgProc ( HWND, ULONG, MPARAM, MPARAM );
+static BOOL AskPassword    ( HWND owner, BOOL retry );
+static BOOL EnsurePassword ( HWND hwnd );
 
 static void OpenArchiveFile( HWND hwnd, const char *path );
 static void ProgressBegin  ( HWND owner, const char *caption,
@@ -569,14 +597,13 @@ static void PopulateList( void )
         if ( isDir )
             p->szSize[0] = '\0';
         else
-            sprintf( p->szSize, "%lu",
-                     (unsigned long)ArcEntrySize( g_arc, i ) );
+            NumFmt( ArcEntrySize( g_arc, i ), p->szSize );
 
         packed = ArcEntryPacked( g_arc, i );
         if ( isDir || packed == 0xFFFFFFFFUL )
             p->szPacked[0] = '\0';
         else
-            sprintf( p->szPacked, "%lu", (unsigned long)packed );
+            NumFmt( packed, p->szPacked );
 
         ArcEntryDate( g_arc, i, p->szDate, sizeof( p->szDate ) );
         ArcEntryAttr( g_arc, i, p->szAttr, sizeof( p->szAttr ) );
@@ -653,6 +680,12 @@ static void OpenArchiveFile( HWND hwnd, const char *path )
 {
     strncpy( g_job.openPath, path, sizeof( g_job.openPath ) - 1 );
     g_job.openPath[sizeof( g_job.openPath ) - 1] = '\0';
+
+    /* A different archive: forget the last password.  Carrying one over would
+     * mean a wrong password quietly following the user from one archive to the
+     * next, where the failure would present itself as corruption. */
+    g_password[0]   = '\0';
+    g_job.openPw[0] = '\0';
 
     g_job.sel = NULL;
 
@@ -924,6 +957,84 @@ MRESULT EXPENTRY OverwriteDlgProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 
     return WinDefDlgProc( hwnd, msg, mp1, mp2 );
 }
 
+/*===========================================================================
+ * Passwords
+ *
+ * The backend never asks anything: it returns SZ_ERR_PASSWORD ("encrypted,
+ * and you have given me nothing") or SZ_ERR_BADPASS ("you have, and it is
+ * wrong").  The other two front ends turn that into a retry LOOP around the
+ * failed call.  This one cannot, and the reason is worth stating.
+ *
+ * Here the archive work runs on a worker thread, which may make no PM calls at
+ * all, so the prompt can only happen on the UI thread after the job has
+ * finished - and by then the worker has already freed the selection array the
+ * job would need in order to run again.  Rather than complicate the ownership
+ * rules around that array, the password is asked for UP FRONT, before a job
+ * that needs one is started.  That is the better order anyway: being asked at
+ * the start of a long extraction beats being asked at the end of one.
+ *
+ * A wrong password is then reported when the job comes back, and the stored
+ * one is cleared, so the next attempt asks again rather than silently failing
+ * the same way twice.  (g_password itself lives with the other globals: it is
+ * cleared in OpenArchiveFile, well before this point in the file.)
+ *===========================================================================*/
+
+MRESULT EXPENTRY PasswordDlgProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
+{
+    switch ( msg )
+    {
+    case WM_INITDLG:
+        WinSetDlgItemText( hwnd, IDC_PW_PROMPT, (PCSZ)g_pwPrompt );
+        WinSendDlgItemMsg( hwnd, IDC_PW_EDIT, EM_SETTEXTLIMIT,
+                           MPFROMSHORT( AC_MAX_PW ), 0 );
+        WinSetFocus( HWND_DESKTOP, WinWindowFromID( hwnd, IDC_PW_EDIT ) );
+        return (MRESULT)TRUE;           /* focus set here, not by PM */
+
+    case WM_COMMAND:
+        switch ( SHORT1FROMMP( mp1 ) )
+        {
+        case DID_OK:
+            WinQueryDlgItemText( hwnd, IDC_PW_EDIT,
+                                 (LONG)sizeof( g_password ), (PSZ)g_password );
+            WinDismissDlg( hwnd, DID_OK );
+            return (MRESULT)FALSE;
+        case DID_CANCEL:
+            WinDismissDlg( hwnd, DID_CANCEL );
+            return (MRESULT)FALSE;
+        }
+        break;
+
+    case WM_CLOSE:
+        WinDismissDlg( hwnd, DID_CANCEL );
+        return (MRESULT)FALSE;
+    }
+    return WinDefDlgProc( hwnd, msg, mp1, mp2 );
+}
+
+/* Ask for a password.  retry changes the wording, because a second identical
+ * dialog looks like the program threw the first answer away. */
+static BOOL AskPassword( HWND owner, BOOL retry )
+{
+    g_pwPrompt = retry ? "That password was wrong.  Try again:"
+                       : "This archive is encrypted.  Password:";
+    return WinDlgBox( HWND_DESKTOP, owner, PasswordDlgProc, NULLHANDLE,
+                      IDD_PASSWORD, NULL ) == DID_OK;
+}
+
+/*
+ * Called before starting a job that will touch entry data.  TRUE to go ahead,
+ * FALSE if the archive needs a password and the user declined to give one.
+ */
+static BOOL EnsurePassword( HWND hwnd )
+{
+    if ( !g_arc || !ArcNeedsPassword( g_arc ) ) return TRUE;
+    if ( g_password[0] )                        return TRUE;   /* already have one */
+
+    if ( !AskPassword( hwnd, FALSE ) ) return FALSE;
+    ArcSetPassword( g_arc, g_password );
+    return TRUE;
+}
+
 /* A worker question arrived (UI THREAD, from WMU_WORKER_ASK or the progress
  * timer - PmWorkerPollAsk latches, so whichever runs first takes it and the
  * other finds nothing).  MUST end in PmWorkerAnswer: the worker is blocked
@@ -997,7 +1108,9 @@ static void ArcWorkerBody( void *arg )
     case ARCJOB_OPEN:
         /* Header parse only.  The container fill (PopulateList) is PM work
            and stays on the UI thread -- see ArcOnDone. */
-        g_job.rc = ArcOpen( g_job.openPath, &g_job.openArc );
+        g_job.rc = ArcOpenPw( g_job.openPath,
+                              g_job.openPw[0] ? g_job.openPw : NULL,
+                              &g_job.openArc );
         break;
     }
 
@@ -1058,6 +1171,15 @@ static BOOL ArcStartJob( HWND hwnd, int kind, const char *caption,
 static void RunExtraction( HWND hwnd, int *sel, int selCount,
                            const char *dest )
 {
+    /* Ask for the password BEFORE the job starts - see the Passwords block.
+     * Declining is a cancellation, not a failure, so the caller.s selection
+     * has to be freed here: nothing else will own it now. */
+    if ( !EnsurePassword( hwnd ) )
+    {
+        if ( sel ) free( sel );
+        return;
+    }
+
     g_job.sel      = sel;
     g_job.selCount = selCount;
 
@@ -1090,6 +1212,15 @@ static void ArcOnDone( HWND hwnd, BOOL cancelled )
         g_arc = g_job.openArc;
         g_job.openArc = NULL;
 
+        /* An encrypted header was unlocked to get here; that same password is
+         * what the entry data needs, so carry it on rather than asking twice. */
+        if ( g_job.openPw[0] )
+        {
+            strncpy( g_password, g_job.openPw, AC_MAX_PW );
+            g_password[ AC_MAX_PW ] = (char)0;
+            ArcSetPassword( g_arc, g_password );
+        }
+
         strncpy( g_arcPath, g_job.openPath, sizeof( g_arcPath ) - 1 );
         g_arcPath[sizeof( g_arcPath ) - 1] = '\0';
 
@@ -1099,6 +1230,46 @@ static void ArcOnDone( HWND hwnd, BOOL cancelled )
     ProgressEnd( hwnd );
 
     g_job.kind = 0;
+
+    /* A password problem is reported the same way whatever the job was, and
+     * the stored password is dropped so the next attempt asks again instead of
+     * failing identically.  This is where the threaded port differs from the
+     * other two front ends: they retry in a loop around the call, and here the
+     * call has already finished on a thread that could not have asked. */
+    if ( rc == SZ_ERR_PASSWORD || rc == SZ_ERR_BADPASS )
+    {
+        g_password[0] = '\0';
+        ArcSetPassword( g_arc, NULL );
+
+        if ( kind == ARCJOB_OPEN )
+        {
+            /* An encrypted HEADER: the names are inside the encrypted stream,
+             * so there is no archive yet to attach a password to and the only
+             * way forward is to open again from the top with one.  An open job
+             * allocates nothing, so restarting it is safe - unlike an extract,
+             * whose selection array the worker has already freed. */
+            if ( AskPassword( hwnd, rc == SZ_ERR_BADPASS ) )
+            {
+                strncpy( g_job.openPw, g_password, AC_MAX_PW );
+                g_job.openPw[ AC_MAX_PW ] = '\0';
+                ArcStartJob( hwnd, ARCJOB_OPEN, "Opening", "Reading:", FALSE );
+                return;
+            }
+            g_job.openPw[0] = '\0';
+            Say( hwnd, "This archive is encrypted and was not opened.",
+                 MB_OK | MB_INFORMATION );
+            UpdateTitle();
+            UpdateToolbarState();
+            return;
+        }
+
+        Say( hwnd, ( rc == SZ_ERR_BADPASS )
+                   ? "That password was wrong.\n\n"
+                     "Try the operation again to enter another one."
+                   : "This archive is encrypted and no password was given.",
+             MB_OK | MB_ICONEXCLAMATION );
+        return;
+    }
 
     switch ( kind )
     {
@@ -1582,7 +1753,12 @@ static void DoExtractTo( HWND hwnd )
 static void FormatSize( double bytes, char *buf )
 {
     if ( bytes < 1024.0 )
-        sprintf( buf, "%.0f bytes", bytes );
+    {
+        /* Only the exact byte count is grouped - see the Win32 copy
+         * of this function for why the KB/MB/GB forms are left be. */
+        char n[NUM_FMT_MAX];
+        sprintf( buf, "%s bytes", NumFmtD( bytes, n ) );
+    }
     else if ( bytes < 1024.0 * 1024.0 )
         sprintf( buf, "%.1f KB", bytes / 1024.0 );
     else if ( bytes < 1024.0 * 1024.0 * 1024.0 )
@@ -1641,6 +1817,103 @@ MRESULT EXPENTRY InfoDlgProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
     return WinDefDlgProc( hwnd, msg, mp1, mp2 );
 }
 
+/*---------------------------------------------------------------------------
+ * The archive comment
+ *
+ * Only zip and RAR4 have anywhere to keep one; 7z and RAR5 have no such
+ * field and a disk image is a filesystem.  The menu item is greyed when
+ * there is nothing to show, which in a GUI is the answer - the same way
+ * File/Close is greyed with nothing open.  DoComment checks again anyway:
+ * a greyed menu item is a courtesy, not a guarantee about how the command
+ * arrived.
+ *
+ * The MLE is filled the way the Info box fills its own - MLM_SETIMPORTEXPORT
+ * then MLM_IMPORT with refresh disabled across the pair - because a long
+ * comment imported with refresh on repaints once per line.
+ *-------------------------------------------------------------------------*/
+MRESULT EXPENTRY CommentDlgProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
+{
+    switch ( msg )
+    {
+    case WM_INITDLG:
+    {
+        HWND        hwndMle = WinWindowFromID( hwnd, IDC_COMMENT_TEXT );
+        const char *font    = "10.System Monospaced";
+        const char *text    = g_commentText ? g_commentText : "";
+        ULONG       len     = (ULONG)strlen( text );
+        IPT         ipt     = 0;
+        char        cap[CCHMAXPATH + 32];
+
+        /* Comments are routinely laid out in columns or as ASCII art, and
+         * PM default presentation font is proportional - which destroys
+         * that without the reader ever knowing it was there. */
+        WinSetPresParam( hwndMle, PP_FONTNAMESIZE,
+                         (ULONG)strlen( font ) + 1, (PVOID)font );
+
+        WinSendMsg( hwndMle, MLM_SETTEXTLIMIT, MPFROMLONG( len + 1 ), MPVOID );
+        WinSendMsg( hwndMle, MLM_DISABLEREFRESH, MPVOID, MPVOID );
+        WinSendMsg( hwndMle, MLM_SETIMPORTEXPORT,
+                    MPFROMP( text ), MPFROMSHORT( (SHORT)len ) );
+        WinSendMsg( hwndMle, MLM_IMPORT, MPFROMP( &ipt ), MPFROMLONG( len ) );
+        WinSendMsg( hwndMle, MLM_ENABLEREFRESH, MPVOID, MPVOID );
+
+        /* Name the archive in the title: this window can outlive the glance
+         * that opened it, and "Archive Comment" alone does not say whose. */
+        sprintf( cap, "Comment - %s", FileNamePart( g_arcPath ) );
+        WinSetWindowText( hwnd, (PCSZ)cap );
+        return (MRESULT)FALSE;
+    }
+
+    case WM_COMMAND:
+        if ( SHORT1FROMMP( mp1 ) == DID_OK || SHORT1FROMMP( mp1 ) == DID_CANCEL )
+        {
+            WinDismissDlg( hwnd, DID_OK );
+            return (MRESULT)FALSE;
+        }
+        break;
+    }
+    return WinDefDlgProc( hwnd, msg, mp1, mp2 );
+}
+
+/* Show the open archive comment. */
+static void DoComment( HWND hwnd )
+{
+    UInt32 need;
+
+    if ( !g_arc )
+    {
+        Say( hwnd, "Open an archive first.", MB_OK | MB_INFORMATION );
+        return;
+    }
+
+    /* Ask for the size, then for the text.  ArcCommentText rewrites the line
+     * endings as CRLF on the way out - the MLE runs a lone LF straight on and
+     * would show a twenty-line comment as one very long line. */
+    need = ArcCommentText( g_arc, NULL, 0 );
+    if ( need == 0 )
+    {
+        /* "has none" and "this format cannot have one" lead the user to the
+         * same next action, which is none, so they get the same words. */
+        Say( hwnd, "This archive has no comment.", MB_OK | MB_INFORMATION );
+        return;
+    }
+
+    g_commentText = (char *)malloc( need );
+    if ( !g_commentText )
+    {
+        Say( hwnd, "There was not enough memory to show it.",
+             MB_OK | MB_ICONEXCLAMATION );
+        return;
+    }
+    ArcCommentText( g_arc, g_commentText, need );
+
+    WinDlgBox( HWND_DESKTOP, hwnd, CommentDlgProc, NULLHANDLE,
+               IDD_COMMENT, NULL );
+
+    free( g_commentText );
+    g_commentText = NULL;
+}
+
 /* Summarise the open archive and show it in the Info dialog. */
 static void DoInfo( HWND hwnd )
 {
@@ -1648,6 +1921,8 @@ static void DoInfo( HWND hwnd )
     double totalSize = 0.0, totalPacked = 0.0;
     char   methods[128];
     char   szSize[32], szPacked[32], ratioBuf[32], savedBuf[16];
+    char   memLine[96];
+    UInt32 needKB = 0, haveKB = 0;
 
     if ( !g_arc )
     {
@@ -1688,6 +1963,21 @@ static void DoInfo( HWND hwnd )
     }
     if ( !methods[0] ) strcpy( methods, "(none)" );
 
+    /* WHAT THIS ONE COSTS.  The figure varies by more WITHIN a format than it
+     * does between formats - two .7z files that list identically can want
+     * 64 KB and 64 MB - so it cannot be shown anywhere but here, against a
+     * particular archive.  The free figure only appears when it is the bad
+     * news: on a machine with room, "and 1,757,217 KB free" is a number
+     * nobody needs. */
+    {
+        char nb[NUM_FMT_MAX], hb[NUM_FMT_MAX];
+        if ( ArcMemCheck( g_arc, &needKB, &haveKB ) == SZ_OK )
+            sprintf( memLine, "Memory needed: %s KB", NumFmt( needKB, nb ) );
+        else
+            sprintf( memLine, "Memory needed: %s KB - only %s KB free",
+                     NumFmt( needKB, nb ), NumFmt( haveKB, hb ) );
+    }
+
     sprintf( g_infoText,
         "Archive:       %s\r\n"
         "Format:        %s\r\n"
@@ -1698,9 +1988,11 @@ static void DoInfo( HWND hwnd )
         "Compression:   %s\r\n"
         "\r\n"
         "Ratio:         %s\r\n"
-        "Space saved:   %s\r\n",
+        "Space saved:   %s\r\n"
+        "\r\n"
+        "%s\r\n",
         FileNamePart( g_arcPath ), ArcFormatName( g_arc ),
-        fileCount, szSize, szPacked, methods, ratioBuf, savedBuf );
+        fileCount, szSize, szPacked, methods, ratioBuf, savedBuf, memLine );
 
     WinDlgBox( HWND_DESKTOP, hwnd, InfoDlgProc, NULLHANDLE, IDD_INFO, NULL );
 }
@@ -1719,6 +2011,8 @@ static void DoTest( HWND hwnd )
         Say( hwnd, "Open an archive first.", MB_OK | MB_INFORMATION );
         return;
     }
+
+    if ( !EnsurePassword( hwnd ) ) return;
 
     g_job.sel = NULL;
     ArcStartJob( hwnd, ARCJOB_TEST, "Testing", "Testing:", TRUE );
@@ -1971,6 +2265,10 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
             MenuEnable( hwndMenu, IDM_ARCHIVE_EXTRACT, have );
             MenuEnable( hwndMenu, IDM_ARCHIVE_TEST,    have );
             MenuEnable( hwndMenu, IDM_ARCHIVE_INFO,    have );
+            /* Greyed unless there is actually something to show: only
+             * zip and RAR4 can carry a comment, and most have none. */
+            MenuEnable( hwndMenu, IDM_ARCHIVE_COMMENT,
+                        (BOOL)( have && ArcComment( g_arc ) != NULL ) );
             /* Ticked = folder names KEPT, so the tick is the inverse of the
              * backend's flatten flag.  Pushed here every time the pulldown
              * opens, which also supplies the initial state. */
@@ -1999,6 +2297,9 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
             break;
         case IDM_ARCHIVE_TEST:
             DoTest( hwnd );
+            break;
+        case IDM_ARCHIVE_COMMENT:
+            DoComment( hwnd );
             break;
         case IDM_ARCHIVE_PATHS:
             /* Session only; WM_INITMENU redraws the tick next time the
@@ -2229,6 +2530,10 @@ int main( int argc, char *argv[] )
     ULONG flFrameFlags;
     char  szDiag[256];
 
+    /* XARCSEP, if set, beats the machine's country setting.  Before the
+     * window exists, so the first listing drawn is already right. */
+    NumFmtInitFromEnv();
+
     g_hab = WinInitialize( 0 );
     if ( g_hab == NULLHANDLE )
         return 1;
@@ -2272,6 +2577,22 @@ int main( int argc, char *argv[] )
 
     WinShowWindow( g_hwndFrame, TRUE );
     UpdateTitle();
+
+    /*---- Too little memory to extract ANYTHING, said once ----------------- *
+     * The real check is per archive and lives in the backend, because the
+     * requirement is per archive: this machine may manage a zip and not a 7z
+     * with a 64 MB dictionary.  This one is the case where the format stops
+     * mattering, and it is worth saying before the user picks a file rather
+     * than after.  A warning and not a refusal - listing still works.
+     *---------------------------------------------------------------------- */
+    if ( !ArcMemStartupOk( NULL, NULL ) )
+    {
+        char warn[448];
+        sprintf( warn, "%s\n\nClose other programs and restart XArchive.  "
+                       "Archive Info shows what a particular archive needs.",
+                 ArcMemWarnText() );
+        Say( g_hwndClient, warn, MB_OK | MB_INFORMATION );
+    }
 
     /* Extraction asks before writing over an existing file (ArcWantWrite in
      * the shared backend); the hook runs on the worker and blocks until the

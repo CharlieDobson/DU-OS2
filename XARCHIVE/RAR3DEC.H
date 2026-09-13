@@ -42,6 +42,7 @@ typedef int (*Rar2Emit)( void *user, Byte b );
 
 typedef struct Rar2Ctx Rar2Ctx;
 Rar2Ctx *Rar2Create( void );
+Rar2Ctx *Rar2CreateSized( UInt32 winSize );
 void     Rar2Free( Rar2Ctx *c );
 void     Rar2SetInput( Rar2Ctx *c, const Byte *src, UInt32 srcLen );
 void     Rar2Align( Rar2Ctx *c );
@@ -62,10 +63,47 @@ int      Rar2Feed( Rar2Ctx *c, Rar2Emit emit, void *user, const Byte *data, UInt
  */
 typedef struct Rar3Ctx Rar3Ctx;
 Rar3Ctx *Rar3Create( void );
+Rar3Ctx *Rar3CreateSized( UInt32 winSize );
 void     Rar3Free( Rar3Ctx *c );
 void     Rar3SetInput( Rar3Ctx *c, const Byte *src, UInt32 srcLen );
 int      Rar3ReadTables( Rar3Ctx *c );
 int      Rar3Decode2( Rar3Ctx *c, Rar2Emit emit, void *user, UInt32 endPos );
 int      Rar3Feed( Rar3Ctx *c, Rar2Emit emit, void *user, const Byte *data, UInt32 len );
+
+/* Solid chains only.  Call Rar3EndOfFile after decoding each member to
+ * consume the end-of-block trailer that closes it, then Rar3NeedTables to
+ * ask whether the next member starts with fresh tables.  Skipping this
+ * decodes the next member with stale tables - see RAR3DEC.C for why that is
+ * silent rather than an error.  There is deliberately no RAR2 equivalent. */
+void     Rar3EndOfFile( Rar3Ctx *c );
+int      Rar3NeedTables( Rar3Ctx *c );
+
+/*---- THE WINDOW IS THE ARCHIVE'S, NOT THE FORMAT'S ------------------------ *
+ * Rar2Create / Rar3Create / Rar2Decode / Rar3Decode allocate RAR's LARGEST
+ * possible window - 4 MB - because that is all a caller with no header in
+ * hand can safely assume.  Every one of them costs four megabytes to unpack a
+ * file that was compressed with -md64, and that single allocation was the
+ * only reason a RAR of any size failed to open on a small machine while a 7z
+ * with a 64 KB dictionary opened fine.
+ *
+ * A caller that HAS the file header knows better: RAR stores the dictionary
+ * in bits 5-7 of the header flags as 64 KB << n (see RarWinSize in RARARC.C).
+ * The ...Sized forms take that figure, round it up to a power of two and
+ * clamp it to [64 KB, 4 MB].  Passing 0 means "no idea", which gives the 4 MB
+ * maximum and the old behaviour.
+ *
+ * An UNDERSIZED window is safe to get wrong: the decoders reject any match
+ * whose distance exceeds wmask + 1, so a window smaller than the stream needs
+ * fails as SZ_ERR_DATA rather than quietly emitting wrong bytes.
+ *-------------------------------------------------------------------------- */
+/* What ...Sized will really allocate for a given request: the rounded,
+ * clamped figure.  Exported so a memory estimate (RarMemNeeded) reports the
+ * allocation rather than a second guess at it. */
+UInt32   RarWindowFor( UInt32 want );
+
+int      Rar2DecodeSized( const Byte *src, UInt32 srcLen, Byte *dst,
+                          UInt32 dstLen, UInt32 winSize );
+int      Rar3DecodeSized( const Byte *src, UInt32 srcLen, Byte *dst,
+                          UInt32 dstLen, UInt32 winSize );
 
 #endif /* RAR3DEC_H */
