@@ -659,6 +659,11 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg,
             WinDlgBox( HWND_DESKTOP, hwnd, AboutDlgProc,
                        NULLHANDLE, IDD_ABOUT, NULL );
             return (MRESULT)FALSE;
+
+        case IDM_HELP_SUPPORT:      // OK-only, so About's procedure serves
+            WinDlgBox( HWND_DESKTOP, hwnd, AboutDlgProc,
+                       NULLHANDLE, IDD_SUPPORT, NULL );
+            return (MRESULT)FALSE;
         }
         break;
     }

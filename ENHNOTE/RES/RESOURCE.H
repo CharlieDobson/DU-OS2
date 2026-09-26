@@ -45,10 +45,12 @@
 
 /* Help */
 #define IDM_HELP_ABOUT                  501
+#define IDM_HELP_SUPPORT                502
 
 /* dialogs */
 #define IDD_FIND                        600
 #define IDD_ABOUT                       601
+#define IDD_SUPPORT                     603
 
 /* dialog controls */
 #define IDC_FINDTEXT                    1000

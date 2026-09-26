@@ -25,6 +25,7 @@
 
 static FILEITEM aFiles[MAX_FILES];
 static int      nFileCount = 0;
+static ULONG    ulListGen  = 0;     /* bumped whenever the list is rebuilt */
 
 /* Everything the file system will show us; the hidden/system filter is
    applied per entry below so the View menu can toggle it. */
@@ -104,6 +105,7 @@ int EnumDirectory(const char *pszPath, BOOL bShowHiddenFiles)
 
     FreeFileIcons();
     nFileCount = 0;
+    ulListGen++;
 
     /* Build the search pattern: path + "*" */
     strcpy(szPat, pszPath);
@@ -184,6 +186,15 @@ int EnumDirectory(const char *pszPath, BOOL bShowHiddenFiles)
 int GetFileCount(void)
 {
     return nFileCount;
+}
+
+/*------------------------------------------------------------------
+  GetDirListGen - changes every time the list is rebuilt, so a caller
+  can cache something it measured from the names
+------------------------------------------------------------------*/
+ULONG GetDirListGen(void)
+{
+    return ulListGen;
 }
 
 /*------------------------------------------------------------------

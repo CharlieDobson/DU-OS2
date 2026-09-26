@@ -23,6 +23,7 @@ typedef struct _FILEITEM {
 
 int       EnumDirectory(const char *pszPath, BOOL bShowHiddenFiles);
 int       GetFileCount(void);
+ULONG     GetDirListGen(void);
 FILEITEM *GetFileItem(int i);
 void      FreeFileIcons(void);
 

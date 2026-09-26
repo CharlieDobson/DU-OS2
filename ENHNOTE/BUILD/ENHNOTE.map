@@ -1,6 +1,6 @@
 Open Watcom Linker Version 1.9
 Portions Copyright (c) 1985-2002 Sybase, Inc. All Rights Reserved.
-Created on:       26/08/16 13:57:48
+Created on:       26/09/19 17:02:24
 Executable Image: ENHNOTE.EXE
 creating an OS/2 32-bit Presentation Manager executable
 
@@ -24,7 +24,7 @@ Segment                Class          Group          Address         Size
 =======                =====          =====          =======         ====
 
 BEGTEXT                CODE           AUTO           0001:00000000   00000007
-_TEXT                  CODE           AUTO           0001:00000010   000070c6
+_TEXT                  CODE           AUTO           0001:00000010   000070e6
 _NULL                  BEGDATA        DGROUP         0002:00000000   00000004
 _AFTERNULL             BEGDATA        DGROUP         0002:00000004   00000000
 CONST                  DATA           DGROUP         0002:00000004   0000021c
@@ -57,88 +57,88 @@ Address        Symbol
 Module: PMMAIN.obj(S:\CPP\DU-OS2\ENHNOTE\PMMAIN.C)
 0001:000001c0  main_
 0001:00000970+ ClientWndProc
-0001:00000d40+ FindDlgProc
-0001:00000e30+ AboutDlgProc
+0001:00000d60+ FindDlgProc
+0001:00000e50+ AboutDlgProc
 Module: EDITCTL.obj(S:\CPP\DU-OS2\ENHNOTE\EDITCTL.C)
-0001:000032e0+ EditWndProc
-0001:00003730  EditRegister_
-0001:00003760  EditLoad_
-0001:000037f0  EditSave_
-0001:00003820  EditNewFile_
-0001:00003890  EditIsModified_
-0001:000038b0* EditSetModified_
-0001:000038d0  EditSetWordWrap_
-0001:00003950  EditGetWordWrap_
-0001:00003970  EditCanUndo_
-0001:00003990  EditCanRedo_
-0001:000039b0  EditUndo_
-0001:00003a00  EditRedo_
-0001:00003a50  EditHasSel_
-0001:00003a80  EditCanPaste_
-0001:00003ab0  EditSelectAll_
-0001:00003b00  EditCopy_
-0001:00003c40  EditPaste_
-0001:00003d60  EditDeleteSel_
-0001:00003da0  EditCut_
-0001:00003dc0  EditFindNext_
+0001:00003300+ EditWndProc
+0001:00003750  EditRegister_
+0001:00003780  EditLoad_
+0001:00003810  EditSave_
+0001:00003840  EditNewFile_
+0001:000038b0  EditIsModified_
+0001:000038d0* EditSetModified_
+0001:000038f0  EditSetWordWrap_
+0001:00003970  EditGetWordWrap_
+0001:00003990  EditCanUndo_
+0001:000039b0  EditCanRedo_
+0001:000039d0  EditUndo_
+0001:00003a20  EditRedo_
+0001:00003a70  EditHasSel_
+0001:00003aa0  EditCanPaste_
+0001:00003ad0  EditSelectAll_
+0001:00003b20  EditCopy_
+0001:00003c60  EditPaste_
+0001:00003d80  EditDeleteSel_
+0001:00003dc0  EditCut_
+0001:00003de0  EditFindNext_
 Module: GAPBUF.obj(S:\CPP\DU-OS2\ENHNOTE\GAPBUF.C)
-0001:000043b0  TbInit_
-0001:00004490  TbFree_
-0001:000044d0  TbClear_
-0001:00004500  TbLength_
-0001:00004510* TbLineCount_
-0001:00004520  TbIsModified_
-0001:00004530  TbSetModified_
-0001:00004540  TbCharAt_
-0001:00004560  TbLineStart_
-0001:00004590  TbLineEnd_
-0001:000045b0* TbLineLength_
-0001:000045d0  TbLineFromPos_
-0001:00004630+ TbGetRange_
-0001:000046e0  TbBreakUndo_
-0001:000046f0  TbInsert_
-0001:00004830  TbDelete_
-0001:000048f0  TbCanUndo_
-0001:00004900  TbCanRedo_
-0001:00004930  TbUndo_
-0001:000049b0  TbRedo_
-0001:00004a40* TbReindex_
-0001:00004b00  TbLoadFile_
-0001:00004d70  TbSaveFile_
-0001:00004e70  TbFind_
+0001:000043d0  TbInit_
+0001:000044b0  TbFree_
+0001:000044f0  TbClear_
+0001:00004520  TbLength_
+0001:00004530* TbLineCount_
+0001:00004540  TbIsModified_
+0001:00004550  TbSetModified_
+0001:00004560  TbCharAt_
+0001:00004580  TbLineStart_
+0001:000045b0  TbLineEnd_
+0001:000045d0* TbLineLength_
+0001:000045f0  TbLineFromPos_
+0001:00004650+ TbGetRange_
+0001:00004700  TbBreakUndo_
+0001:00004710  TbInsert_
+0001:00004850  TbDelete_
+0001:00004910  TbCanUndo_
+0001:00004920  TbCanRedo_
+0001:00004950  TbUndo_
+0001:000049d0  TbRedo_
+0001:00004a60* TbReindex_
+0001:00004b20  TbLoadFile_
+0001:00004d90  TbSaveFile_
+0001:00004e90  TbFind_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(sprintf.c)
-0001:00004f60  sprintf_
+0001:00004f80  sprintf_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(memset.c)
-0001:00004f90  memset_
+0001:00004fb0  memset_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(cstart)
-0001:00004fa8  _cstart_
+0001:00004fc8  _cstart_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(argcv.c)
 0002:000004c8  __argc
 0002:000004cc  __argv
 0002:000004d0  ___argc
 0002:000004d4  ___argv
 Module: C:\WATCOM/lib386/os2\clib3r.lib(nmalloc.c)
-0001:00005010  _nmalloc_
-0001:00005010  malloc_
+0001:00005030  _nmalloc_
+0001:00005030  malloc_
 0002:00000278  ___nheapbeg
 0002:0000027c  ___MiniHeapRover
 0002:00000280  ___LargestSizeB4MiniHeapRover
 Module: C:\WATCOM/lib386/os2\clib3r.lib(nfree.c)
-0001:00005110  _nfree_
-0001:00005110  free_
+0001:00005130  _nfree_
+0001:00005130  free_
 0002:000004d8  ___MiniHeapFreeRover
 Module: C:\WATCOM/lib386/os2\clib3r.lib(nrealloc.c)
-0001:00005220* _nrealloc_
-0001:00005220  realloc_
+0001:00005240* _nrealloc_
+0001:00005240  realloc_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(memmove.c)
-0001:000052a0  memmove_
+0001:000052c0  memmove_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(vsprintf.c)
-0001:00005320  vsprintf_
+0001:00005340  vsprintf_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(__stos)
-0001:00005340  __STOSB
-0001:00005377* __STOSD
+0001:00005360  __STOSB
+0001:00005397* __STOSD
 Module: C:\WATCOM/lib386/os2\clib3r.lib(main2o32.c)
-0001:000053f0  __OS2Main
+0001:00005410  __OS2Main
 Module: C:\WATCOM/lib386/os2\clib3r.lib(segdefns)
 0001:00000003  ___begtext
 0002:00000000* __nullarea
@@ -147,9 +147,9 @@ Module: C:\WATCOM/lib386/os2\clib3r.lib(segdefns)
 0002:0000033e  __Start_YI
 0002:00000344  __End_YI
 Module: C:\WATCOM/lib386/os2\clib3r.lib(initargv.c)
-0001:00005460  __Init_Argv_
-0001:000054b0+ _getargv_
-0001:00005650  __Fini_Argv_
+0001:00005480  __Init_Argv_
+0001:000054d0+ _getargv_
+0001:00005670  __Fini_Argv_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(maino32.c)
 0002:00000284+ ___FirstThreadData
 0002:00000288+ ___GetThreadPtr
@@ -161,13 +161,13 @@ Module: C:\WATCOM/lib386/os2\clib3r.lib(maino32.c)
 0002:000002a0* __AccessFHeap
 0002:000002a4  __ReleaseNHeap
 0002:000002a8* __ReleaseFHeap
-0001:00005664  __threadstack_
-0001:0000566b* __threadid_
-0001:00005672  __OS2MainInit_
-0001:000056e1+ __OS2Init_
-0001:0000571f* __OS2Fini_
-0001:00005727* __shutdown_stack_checking_
-0001:0000573c  __exit_
+0001:00005684  __threadstack_
+0001:0000568b* __threadid_
+0001:00005692  __OS2MainInit_
+0001:00005701+ __OS2Init_
+0001:0000573f* __OS2Fini_
+0001:00005747* __shutdown_stack_checking_
+0001:0000575c  __exit_
 0002:000002ac* __AccessTDList
 0002:000002b0* __ReleaseTDList
 0002:000002b4+ ___sig_init_rtn
@@ -177,29 +177,29 @@ Module: C:\WATCOM/lib386/os2\clib3r.lib(maino32.c)
 0002:000004e0  ___Is_DLL
 0002:000004e4+ ___saved_CS
 Module: C:\WATCOM/lib386/os2\clib3r.lib(nmemneed.c)
-0001:00005780  __nmemneed_
+0001:000057a0  __nmemneed_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(mem.c)
-0001:00005790  __MemAllocator
-0001:00005840  __MemFree
+0001:000057b0  __MemAllocator
+0001:00005860  __MemFree
 Module: C:\WATCOM/lib386/os2\clib3r.lib(grownear.c)
-0001:00005ae0  __ExpandDGROUP_
+0001:00005b00  __ExpandDGROUP_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(nmsize.c)
-0001:00005b00  _nmsize_
-0001:00005b00* _msize_
+0001:00005b20  _nmsize_
+0001:00005b20* _msize_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(nexpand.c)
-0001:00005b10  _nexpand_
-0001:00005b10* _expand_
-0001:00005b50+ __HeapManager_expand_
+0001:00005b30  _nexpand_
+0001:00005b30* _expand_
+0001:00005b70+ __HeapManager_expand_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(prtf.c)
-0001:00005d10  __prtf_
+0001:00005d30  __prtf_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(initrtns.c)
-0001:000069f0  __InitRtns
-0001:00006a40  __FiniRtns
+0001:00006a10  __InitRtns
+0001:00006a60  __FiniRtns
 Module: C:\WATCOM/lib386/os2\clib3r.lib(mthrdini.c)
-0001:00006aa0  __InitThreadData_
+0001:00006ac0  __InitThreadData_
 0002:000002c4  ___ThreadDataSize
 Module: C:\WATCOM/lib386/os2\clib3r.lib(cmain386.c)
-0001:00006ac0  __CMain
+0001:00006ae0  __CMain
 Module: C:\WATCOM/lib386/os2\clib3r.lib(dosseg)
 0000:00001234  __DOSseg__
 Module: C:\WATCOM/lib386/os2\clib3r.lib(crwdata)
@@ -230,55 +230,55 @@ Module: C:\WATCOM/lib386/os2\clib3r.lib(___argc.c)
 0002:000005ec  ____Argc
 0002:000005f0  ____Argv
 Module: C:\WATCOM/lib386/os2\clib3r.lib(cinit.c)
-0001:00006b10  __CommonInit_
+0001:00006b30  __CommonInit_
 0002:000005f4  ___hmodule
 Module: C:\WATCOM/lib386/os2\clib3r.lib(amblksiz.c)
 0002:00000314  __amblksiz
 Module: C:\WATCOM/lib386/os2\clib3r.lib(heapen.c)
-0001:00006b20* _heapenable_
+0001:00006b40* _heapenable_
 0002:00000318  ___heap_enabled
 Module: C:\WATCOM/lib386/os2\clib3r.lib(nheapmin.c)
-0001:00006b50  _nheapshrink_
-0001:00006b50* _nheapmin_
-0001:00006b50* _heapmin_
-0001:00006b50* _heapshrink_
+0001:00006b70  _nheapshrink_
+0001:00006b70* _nheapmin_
+0001:00006b70* _heapmin_
+0001:00006b70* _heapshrink_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(wctomb.c)
-0001:00006c40  wctomb_
+0001:00006c60  wctomb_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(itoa.c)
-0001:00006c70+ utoa_
-0001:00006cc0  itoa_
+0001:00006c90+ utoa_
+0001:00006ce0  itoa_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(strupr.c)
-0001:00006cf0  strupr_
+0001:00006d10  strupr_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(noefgfmt.c)
 0002:0000031c  ___EFG_printf
 0002:00000320* ___EFG_scanf
 Module: C:\WATCOM/lib386/os2\clib3r.lib(lltoa.c)
-0001:00006d60  ulltoa_
-0001:00006dd0* lltoa_
+0001:00006d80  ulltoa_
+0001:00006df0* lltoa_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(ltoa.c)
-0001:00006e00  ultoa_
-0001:00006e50* ltoa_
+0001:00006e20  ultoa_
+0001:00006e70* ltoa_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(mbisdbcs.c)
 0002:000005f8  ___IsDBCS
 Module: C:\WATCOM/lib386/os2\clib3r.lib(mbislead.c)
-0001:00006e80* _ismbblead_
+0001:00006ea0* _ismbblead_
 0002:000005fc  ___MBCSIsTable
 Module: C:\WATCOM/lib386/os2\clib3r.lib(exit.c)
-0001:00006e97+ __null_int23_exit_
-0001:00006e98  exit_
-0001:00006ee8* _exit_
+0001:00006eb7+ __null_int23_exit_
+0001:00006eb8  exit_
+0001:00006f08* _exit_
 0002:00000324+ ___int23_exit
 0002:00000328+ ___FPE_handler_exit
 Module: C:\WATCOM/lib386/os2\clib3r.lib(alphabet.c)
 0002:000001f8  ___Alphabet
 Module: C:\WATCOM/lib386/os2\clib3r.lib(xmsgo32.c)
-0001:00006f00+ __exit_with_msg_
-0001:00006f50  __fatal_runtime_error_
+0001:00006f20+ __exit_with_msg_
+0001:00006f70  __fatal_runtime_error_
 Module: C:\WATCOM/lib386/os2\clib3r.lib(mbinit.c)
-0001:00006faa  __mbinit_
+0001:00006fca  __mbinit_
 0002:0000032c+ ___MBCodePage
 Module: C:\WATCOM/lib386/os2\clib3r.lib(enterdb.c)
-0001:000070b0  __EnterWVIDEO_
+0001:000070d0  __EnterWVIDEO_
 0002:00000330+ ___WD_Present
 
 
@@ -379,6 +379,6 @@ C:\WATCOM/lib386/os2\os2386.lib
                         +-----------------------+
 
 Stack size:  00040000 (262144.)
-Memory size:  000477d6 (292822.)
-Entry point address: 0001:00004fa8
-Link time: 00:00.47
+Memory size:  000477f6 (292854.)
+Entry point address: 0001:00004fc8
+Link time: 00:00.80

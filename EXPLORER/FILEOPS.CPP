@@ -611,6 +611,33 @@ static void CopyDirEAs(const char *pszSrc, const char *pszDst)
 }
 
 /*------------------------------------------------------------------
+  CopyDirInfo - give a copied directory the original's dates and
+    attributes
+
+    DosCopy carries these for a file, but DosCreateDir makes a directory
+    dated now with no attributes.  Done LAST, after the directory has been
+    filled: filling it can move its dates, and a read-only one had to be
+    writable while it was.  FILESTATUS3 carries all three dates; any a file
+    system does not keep come back as zero, and DosSetPathInfo leaves a
+    zero date alone.  FILE_DIRECTORY is not an attribute that can be SET,
+    so only R/H/S/A go across.  Failure is harmless: the copy stands, just
+    dated today.
+------------------------------------------------------------------*/
+static void CopyDirInfo(const char *pszSrc, const char *pszDst)
+{
+    FILESTATUS3 fs3;
+
+    if (DosQueryPathInfo((PCSZ)pszSrc, FIL_STANDARD,
+                         (PVOID)&fs3, sizeof(fs3)) != NO_ERROR)
+        return;
+
+    fs3.attrFile &= (FILE_READONLY | FILE_HIDDEN | FILE_SYSTEM |
+                     FILE_ARCHIVED);
+    DosSetPathInfo((PCSZ)pszDst, FIL_STANDARD,
+                   (PVOID)&fs3, sizeof(fs3), 0UL);
+}
+
+/*------------------------------------------------------------------
   CopyTree - copy the tree at pszSrc to pszDst
 ------------------------------------------------------------------*/
 static BOOL CopyTree(const char *pszSrc, const char *pszDst)
@@ -635,8 +662,10 @@ static BOOL CopyTree(const char *pszSrc, const char *pszDst)
 
     if (DosFindFirst((PCSZ)szPat, &hdir, FIND_ATTRS,
                      (PVOID)&ff, sizeof(ff), &cnt,
-                     FIL_STANDARD) != NO_ERROR)
-        return TRUE;                    /* empty directory: still a success */
+                     FIL_STANDARD) != NO_ERROR) {
+        CopyDirInfo(pszSrc, pszDst);    /* empty directory: still a success */
+        return TRUE;
+    }
 
     do {
         if (IsDotEntry(ff.achName))
@@ -674,6 +703,9 @@ static BOOL CopyTree(const char *pszSrc, const char *pszDst)
     } while (DosFindNext(hdir, (PVOID)&ff, sizeof(ff), &cnt) == NO_ERROR);
 
     DosFindClose(hdir);
+
+    if (bOK)
+        CopyDirInfo(pszSrc, pszDst);
     return bOK;
 }
 

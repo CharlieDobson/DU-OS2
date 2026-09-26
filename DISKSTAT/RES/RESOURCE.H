@@ -14,6 +14,7 @@
 /* dialogs */
 #define IDD_ABOUT                       103
 #define IDD_SCANNING                    104
+#define IDD_SUPPORT                     105
 
 /* dialog controls */
 #define IDC_SCANTEXT                    1003
@@ -28,5 +29,6 @@
 #define IDM_FILE_REFRESH                40001
 #define IDM_FILE_EXIT                   40002
 #define IDM_HELP_ABOUT                  40200
+#define IDM_HELP_SUPPORT                40201
 
 #endif /* DISKSTAT_RESOURCE_H */

@@ -39,9 +39,79 @@
 #define DTL_DATE_W  100
 #define DTL_SIZE_W   80
 #define DTL_ATTR_W   70
+#define DTL_NAME_PAD 12     /* gap between the widest name and the Date column */
 
 /* The content area is inset by these before any cell is placed */
 #define CONTENT_PAD  4
+
+/* Character widths of the font being painted with, from GpiQueryWidthTable.
+   Labels and the Details Name column are measured from this rather than
+   with a GpiQueryTextBox per character. */
+static LONG alCharW[256];
+
+static void LoadCharWidths(HPS hps, LONG *alW)
+{
+    int i;
+
+    if (!GpiQueryWidthTable(hps, 0L, 256L, alW)) {
+        for (i = 0; i < 256; i++)
+            alW[i] = 7;                 /* a guess beats a zero width */
+    }
+}
+
+static LONG TextWidth(const LONG *alW, const char *s, int n)
+{
+    LONG w = 0;
+
+    while (n-- > 0)
+        w += alW[(unsigned char)*s++];
+    return w;
+}
+
+/*------------------------------------------------------------------
+  DetailWidestName - pixel width of the longest name in the list,
+    measured once each time the directory is re-read
+
+    Measured on a desktop PS: it carries the same system default font as the
+    memory PS PaintContent draws into, and it is available outside a paint,
+    which CalcContentSize needs.
+------------------------------------------------------------------*/
+static BOOL  bDtlMeasured = FALSE;
+static ULONG ulDtlGen     = 0;
+static LONG  lDtlWidest   = 0;
+
+static LONG DetailWidestName(void)
+{
+    LONG alW[256];
+    HPS  hps;
+    int  i, n;
+
+    if (bDtlMeasured && ulDtlGen == GetDirListGen())
+        return lDtlWidest;
+
+    hps = WinGetPS(HWND_DESKTOP);
+    if (hps == NULLHANDLE)
+        return 0;
+    LoadCharWidths(hps, alW);
+    WinReleasePS(hps);
+
+    lDtlWidest = 0;
+    n = GetFileCount();
+    for (i = 0; i < n; i++) {
+        FILEITEM *pFile = GetFileItem(i);
+        LONG      w;
+
+        if (pFile == NULL)
+            continue;
+        w = TextWidth(alW, pFile->szName, (int)strlen(pFile->szName));
+        if (w > lDtlWidest)
+            lDtlWidest = w;
+    }
+
+    ulDtlGen     = GetDirListGen();
+    bDtlMeasured = TRUE;
+    return lDtlWidest;
+}
 
 HWND hwndVScroll = NULLHANDLE;
 HWND hwndHScroll = NULLHANDLE;
@@ -146,6 +216,7 @@ typedef struct _VIEWGEOM {
     LONG cellW, cellH;  /* icon-grid cell                               */
     LONG rowH;          /* details row height                           */
     LONG hdrH;          /* details header height (0 in the drives view) */
+    LONG nameW;         /* details Name column width (files view)       */
     int  cols;          /* columns in the icon grid, 1 in details       */
     int  count;         /* number of items to lay out                   */
 } VIEWGEOM;
@@ -178,6 +249,19 @@ static BOOL ViewGeom(LONG cxVisible, VIEWGEOM *pg)
         pg->cellW = cxVisible;
         pg->cellH = pg->rowH;
         pg->cols  = 1;
+
+        /* The Name column is wide enough for the longest name, but grows
+           only into room the pane already has, so a long name never pushes
+           the other columns off the side; never narrower than DTL_NAME_W.
+           A name that still does not fit ends in "..." when drawn. */
+        if (!bDrives) {
+            LONG lRoom = cxVisible - (CONTENT_PAD + pg->bmW + 4 + DTL_DATE_W
+                                      + DTL_SIZE_W + DTL_ATTR_W + CONTENT_PAD);
+
+            pg->nameW = DetailWidestName() + DTL_NAME_PAD;
+            if (pg->nameW > lRoom)      pg->nameW = lRoom;
+            if (pg->nameW < DTL_NAME_W) pg->nameW = DTL_NAME_W;
+        }
     }
     else {
         pg->cellW = pg->bmW + 34;
@@ -289,7 +373,7 @@ void CalcContentSize(LONG cxVisible, LONG *pcx, LONG *pcy)
         *pcy = g.hdrH + (LONG)g.count * g.rowH + 8;
 
         if (szCurrentPath[0] != '\0') {
-            *pcx = CONTENT_PAD + g.bmW + 4 + DTL_NAME_W + DTL_DATE_W
+            *pcx = CONTENT_PAD + g.bmW + 4 + g.nameW + DTL_DATE_W
                  + DTL_SIZE_W + DTL_ATTR_W + CONTENT_PAD;
         }
     }
@@ -458,47 +542,187 @@ static void DrawFocusFrame(HPS hps, const RECTL *prcl)
 }
 
 /*------------------------------------------------------------------
-  DrawLabel - centred, word-broken item caption of at most nMaxLines
+  Icon labels.
 
-    WinDrawText draws ONE line: DT_WORDBREAK makes it stop on a word
-    boundary and return how many characters it consumed, so multi-line text
-    is a loop.  This is the substantive difference from Windows' DrawText,
-    which did the wrapping itself.
+    A long HPFS name will not fit the two text lines under an icon, and
+    WinDrawText's DT_WORDBREAK only ever breaks at spaces, so labels are
+    laid out here: broken at a space where there is one and mid-word where
+    there is not, as many lines as fit, the last ending in "..." when there
+    is more.  The focused item shows its WHOLE name, drawn over the row
+    beneath after everything else is painted - PaintContent redraws the
+    whole pane into a memory bitmap every time, so nothing is left behind
+    when the focus moves on.
+
+    Widths come from alCharW, loaded once per paint.
 ------------------------------------------------------------------*/
-static void DrawLabel(HPS hps, const RECTL *prcl, const char *psz,
-                      LONG clrFore, int nMaxLines)
+#define LBL_MAX_LINES   128
+#define LBL_DOTS        "..."
+#define LBL_MARGIN      4       /* label width is the cell less this */
+
+typedef struct _LBLLINE {
+    int nStart;
+    int nLen;
+} LBLLINE;
+
+static LONG LabelLineHeight(HPS hps)
 {
     FONTMETRICS fm;
-    RECTL       rcl = *prcl;
-    LONG        lineH, nDrawn;
-    const char *p   = psz;
-    LONG        nLeft = (LONG)strlen(psz);
-    int         line;
+    LONG        lineH;
 
     memset(&fm, 0, sizeof(fm));
     GpiQueryFontMetrics(hps, sizeof(fm), &fm);
 
     lineH = fm.lMaxBaselineExt + fm.lExternalLeading;
-    if (lineH < 1) lineH = 12;
+    return (lineH < 1) ? 12 : lineH;
+}
 
-    for (line = 0; line < nMaxLines && nLeft > 0; line++) {
+/* LayoutLabel - break psz into at most nMaxLines lines no wider than
+   cxMax.  Returns the line count; *pbMore says whether text was left. */
+static int LayoutLabel(const char *psz, LONG cxMax, int nMaxLines,
+                       LBLLINE *aLines, BOOL *pbMore)
+{
+    int nLen   = (int)strlen(psz);
+    int p      = 0;
+    int nLines = 0;
 
-        if (rcl.yTop - lineH < prcl->yBottom)
+    while (p < nLen && nLines < nMaxLines) {
+        int  j;
+        LONG w      = 0;
+        int  nSpace = -1;
+
+        /* A wrapped line does not start with the space it wrapped at */
+        while (nLines > 0 && p < nLen && psz[p] == ' ')
+            p++;
+        if (p >= nLen)
             break;
 
-        rcl.yBottom = rcl.yTop - lineH;
+        for (j = p; j < nLen; j++) {
+            LONG cw = alCharW[(unsigned char)psz[j]];
 
-        nDrawn = WinDrawText(hps, nLeft, (PCH)p, &rcl,
-                             clrFore, 0L,
-                             DT_CENTER | DT_TOP | DT_WORDBREAK);
+            if (w + cw > cxMax && j > p)
+                break;
+            if (psz[j] == ' ')
+                nSpace = j;
+            w += cw;
+        }
 
-        if (nDrawn <= 0)
-            break;
-
-        p     += nDrawn;
-        nLeft -= nDrawn;
-        rcl.yTop = rcl.yBottom;
+        aLines[nLines].nStart = p;
+        if (j < nLen && nSpace > p) {
+            aLines[nLines].nLen = nSpace - p;      /* break at the space */
+            p = nSpace + 1;
+        }
+        else {
+            aLines[nLines].nLen = j - p;           /* all of it, or mid-word */
+            p = j;
+        }
+        nLines++;
     }
+
+    while (p < nLen && psz[p] == ' ')
+        p++;
+    *pbMore = (BOOL)(p < nLen);
+    return nLines;
+}
+
+/* EllipsizeLast - refill the last line from the rest of the name, as much
+   as fits with "..." after it */
+static void EllipsizeLast(const char *psz, LBLLINE *pLine, LONG cxMax)
+{
+    LONG wDots  = TextWidth(alCharW, LBL_DOTS, 3);
+    int  nAvail = (int)strlen(psz) - pLine->nStart;
+    int  n      = 0;
+    LONG w      = 0;
+
+    while (n < nAvail &&
+           w + alCharW[(unsigned char)psz[pLine->nStart + n]] + wDots <= cxMax) {
+        w += alCharW[(unsigned char)psz[pLine->nStart + n]];
+        n++;
+    }
+    while (n > 0 && psz[pLine->nStart + n - 1] == ' ')
+        n--;
+    pLine->nLen = n;
+}
+
+/* DrawLabelLines - each line centred in the box's width, from yTop down,
+   the last with "..." if bDots */
+static void DrawLabelLines(HPS hps, const RECTL *prcl, const char *psz,
+                           const LBLLINE *aLines, int nLines, BOOL bDots,
+                           LONG lineH, LONG clrFore)
+{
+    char  szLine[CCHMAXPATHCOMP + sizeof(LBL_DOTS)];
+    RECTL rcl = *prcl;
+    int   k, n;
+
+    for (k = 0; k < nLines; k++) {
+        n = aLines[k].nLen;
+        if (n > CCHMAXPATHCOMP - 1)
+            n = CCHMAXPATHCOMP - 1;
+        memcpy(szLine, psz + aLines[k].nStart, n);
+        szLine[n] = '\0';
+        if (bDots && k == nLines - 1) {
+            strcat(szLine, LBL_DOTS);
+            n += 3;
+        }
+
+        rcl.yTop    = prcl->yTop - (LONG)k * lineH;
+        rcl.yBottom = rcl.yTop - lineH;
+        WinDrawText(hps, (LONG)n, (PCH)szLine, &rcl, clrFore, 0L,
+                    DT_CENTER | DT_TOP);
+    }
+}
+
+/*------------------------------------------------------------------
+  DrawLabel - centred item caption: as many lines as fit the box, up to
+    nMaxLines, the last ending in "..." if the name goes on
+------------------------------------------------------------------*/
+static void DrawLabel(HPS hps, const RECTL *prcl, const char *psz,
+                      LONG clrFore, int nMaxLines)
+{
+    LBLLINE aLines[LBL_MAX_LINES];
+    LONG    lineH = LabelLineHeight(hps);
+    LONG    cxMax = (prcl->xRight - prcl->xLeft) - LBL_MARGIN;
+    int     nFit  = (int)((prcl->yTop - prcl->yBottom) / lineH);
+    int     nLines;
+    BOOL    bMore;
+
+    if (nFit > nMaxLines) nFit = nMaxLines;
+    if (nFit < 1)         nFit = 1;
+    if (cxMax < 1)        cxMax = 1;
+
+    nLines = LayoutLabel(psz, cxMax, nFit, aLines, &bMore);
+    if (bMore && nLines > 0)
+        EllipsizeLast(psz, &aLines[nLines - 1], cxMax);
+
+    DrawLabelLines(hps, prcl, psz, aLines, nLines, bMore, lineH, clrFore);
+}
+
+/*------------------------------------------------------------------
+  DrawFullLabel - the focused item's whole name, starting at the top of
+    its label box and running down past the cell as far as it needs, on
+    a highlight band; returns the band so a focus frame can take it in
+------------------------------------------------------------------*/
+static void DrawFullLabel(HPS hps, const RECTL *prcl, const char *psz,
+                          LONG clrFore, LONG clrBack, PRECTL prclBand)
+{
+    LBLLINE aLines[LBL_MAX_LINES];
+    LONG    lineH = LabelLineHeight(hps);
+    LONG    cxMax = (prcl->xRight - prcl->xLeft) - LBL_MARGIN;
+    int     nLines;
+    BOOL    bMore;
+
+    if (cxMax < 1)
+        cxMax = 1;
+
+    nLines = LayoutLabel(psz, cxMax, LBL_MAX_LINES, aLines, &bMore);
+    if (bMore && nLines > 0)
+        EllipsizeLast(psz, &aLines[nLines - 1], cxMax);
+
+    *prclBand = *prcl;
+    if (prclBand->yTop - (LONG)nLines * lineH - 2 < prclBand->yBottom)
+        prclBand->yBottom = prclBand->yTop - (LONG)nLines * lineH - 2;
+
+    WinFillRect(hps, prclBand, clrBack);
+    DrawLabelLines(hps, prcl, psz, aLines, nLines, bMore, lineH, clrFore);
 }
 
 /*------------------------------------------------------------------
@@ -667,6 +891,8 @@ void DrawDrives(HPS hps, const RECTL *pcont)
     if (!ViewGeom(cxVisible, &g) || g.count == 0)
         return;
 
+    LoadCharWidths(hps, alCharW);
+
     col = 0;
 
     if (nCurrentView == IDM_VIEW_DETAILS) {
@@ -753,13 +979,17 @@ static void DrawFileDetails(HPS hps, const RECTL *pcont, VIEWGEOM *pg)
     char      szDate[32];
     char      szSize[32];
     char      szAttr[8];
+    char      szName[CCHMAXPATHCOMP + sizeof(LBL_DOTS)];
     LONG      xIcon, xName, xDate, xSize, xAttr, ly, clrText, xOrigin;
-    int       i;
+    LONG      cxName, wDots;
+    int       i, nName;
     BOOL      bSel;
+
+    wDots = TextWidth(alCharW, LBL_DOTS, 3);
 
     xIcon = CONTENT_PAD;
     xName = xIcon + pg->bmW + 4;
-    xDate = xName + DTL_NAME_W;
+    xDate = xName + pg->nameW;
     xSize = xDate + DTL_DATE_W;
     xAttr = xSize + DTL_SIZE_W;
 
@@ -832,11 +1062,27 @@ static void DrawFileDetails(HPS hps, const RECTL *pcont, VIEWGEOM *pg)
                    rcRow.yTop - (pg->rowH - pg->bmH) / 2,
                    pg->bmW, pg->bmH);
 
-        /* name */
+        /* name, ending in "..." if it is wider than its column */
+        strcpy(szName, pFile->szName);
+        nName  = (int)strlen(szName);
+        cxName = pg->nameW - DTL_NAME_PAD / 2;
+        if (TextWidth(alCharW, szName, nName) > cxName) {
+            LONG w = wDots;
+
+            nName = 0;
+            while (szName[nName] != '\0' &&
+                   w + alCharW[(unsigned char)szName[nName]] <= cxName) {
+                w += alCharW[(unsigned char)szName[nName]];
+                nName++;
+            }
+            while (nName > 0 && szName[nName - 1] == ' ')
+                nName--;
+            strcpy(szName + nName, LBL_DOTS);
+        }
         rcCell = rcRow;
         rcCell.xLeft  = xOrigin + xName;
         rcCell.xRight = xOrigin + xDate - 2;
-        DrawCellText(hps, &rcCell, pFile->szName, clrText);
+        DrawCellText(hps, &rcCell, szName, clrText);
 
         /* date */
         if (pFile->fdate.year != 0 || pFile->fdate.month != 0) {
@@ -888,6 +1134,8 @@ void DrawFiles(HPS hps, const RECTL *pcont)
     LONG      cxVisible, lx, ly, firstRow, iconH, cxIcon, cyIcon, clrText;
     int       i, col;
     BOOL      bSel;
+    int       nFocus = -1;          /* the focused item, drawn last */
+    RECTL     rcFocusCell, rcFocusLabel;
 
     cxVisible = pcont->xRight - pcont->xLeft;
 
@@ -895,6 +1143,8 @@ void DrawFiles(HPS hps, const RECTL *pcont)
 
     if (!ViewGeom(cxVisible, &g) || g.count == 0)
         return;
+
+    LoadCharWidths(hps, alCharW);
 
     if (nCurrentView == IDM_VIEW_DETAILS) {
         DrawFileDetails(hps, pcont, &g);
@@ -948,16 +1198,26 @@ void DrawFiles(HPS hps, const RECTL *pcont)
         rcLabel      = rcCell;
         rcLabel.yTop = rcCell.yTop - iconH - 2;
 
-        if (bSel)
-            WinFillRect(hps, &rcLabel, SYSCLR(SYSCLR_HILITEBACKGROUND));
+        if (bSel && i == nSelectedFile) {
+            /* Its label and frame come after the loop, over the row below.
+               The frames are inverted lines, so drawing one here as well
+               would rub out the one drawn then where the two coincide. */
+            nFocus       = i;
+            rcFocusCell  = rcCell;
+            rcFocusLabel = rcLabel;
+        }
+        else {
+            if (bSel)
+                WinFillRect(hps, &rcLabel, SYSCLR(SYSCLR_HILITEBACKGROUND));
 
-        DrawLabel(hps, &rcLabel, pFile->szName, clrText, 2);
+            DrawLabel(hps, &rcLabel, pFile->szName, clrText, 2);
 
-        if (bSel)
-            DrawFocusFrame(hps, &rcCell);
+            if (bSel)
+                DrawFocusFrame(hps, &rcCell);
 
-        if (i == nDragHoverIdx)
-            DrawFocusFrame(hps, &rcCell);
+            if (i == nDragHoverIdx)
+                DrawFocusFrame(hps, &rcCell);
+        }
 
         col++;
         if (col >= g.cols) {
@@ -967,6 +1227,24 @@ void DrawFiles(HPS hps, const RECTL *pcont)
         }
         else {
             lx += g.cellW;
+        }
+    }
+
+    /* The focused item's whole name, over whatever lies beneath it, and one
+       frame round the cell and the name together */
+    if (nFocus >= 0) {
+        RECTL rcBand, rcFrame;
+
+        pFile = GetFileItem(nFocus);
+        if (pFile != NULL) {
+            DrawFullLabel(hps, &rcFocusLabel, pFile->szName,
+                          SYSCLR(SYSCLR_HILITEFOREGROUND),
+                          SYSCLR(SYSCLR_HILITEBACKGROUND), &rcBand);
+
+            rcFrame = rcFocusCell;
+            if (rcBand.yBottom < rcFrame.yBottom)
+                rcFrame.yBottom = rcBand.yBottom;
+            DrawFocusFrame(hps, &rcFrame);
         }
     }
 }

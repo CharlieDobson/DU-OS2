@@ -57,6 +57,7 @@
 
 /* Help menu */
 #define IDM_HELP_ABOUT                  901
+#define IDM_HELP_SUPPORT                902
 
 /* Context (button 2) menus and their commands */
 #define IDM_CTXMENU_DRIVE               1150
@@ -112,6 +113,7 @@
 #define IDD_CONNECTNETDRIVE             2004
 #define IDD_DISCONNECTNETDRIVE          2005
 #define IDD_OVERWRITE                   2007
+#define IDD_SUPPORT                     2008
 
 /*---------------------------------------------------------------------------
  * Child window and dialog control ids

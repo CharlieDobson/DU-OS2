@@ -96,6 +96,11 @@ static int nContextFile  = -1;
 /* The popup menu currently up, so the next one can dispose of it */
 static HWND hwndCtxMenu = NULLHANDLE;
 
+/* Watches the drive combo's list after it drops down, to hand the keyboard
+   back to the file pane once it closes (FILEOPS uses 2, SEARCH 3) */
+#define TID_COMBOFOCUS      4
+#define COMBOFOCUS_MS       150
+
 /*==================================================================
  * Small shared helpers
  *==================================================================*/
@@ -988,6 +993,11 @@ static void OnCommand(HWND hwnd, USHORT idCmd)
         WinDlgBox(HWND_DESKTOP, hwnd, AboutDlgProc,
                   NULLHANDLE, IDD_ABOUT, NULL);
         break;
+
+    case IDM_HELP_SUPPORT:      /* OK-only, so About's procedure serves */
+        WinDlgBox(HWND_DESKTOP, hwnd, AboutDlgProc,
+                  NULLHANDLE, IDD_SUPPORT, NULL);
+        break;
     }
 }
 
@@ -1123,6 +1133,18 @@ MRESULT EXPENTRY ClientWndProc(HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2)
 
     /* ---- the drive combo, owned by us so its notification lands here ---- */
     case WM_CONTROL:
+        /* The list has dropped down.  PM sends nothing when it closes again
+           - there is no CBN_CLOSEUP - so a timer watches for that, and then
+           gives the keyboard back to the file pane, whether a drive was
+           picked or the list was dismissed.  Stepping through drives with
+           the arrow keys in the CLOSED combo never shows the list, so that
+           keeps the focus in the combo as it should. */
+        if (SHORT1FROMMP(mp1) == IDC_TB_PATHCOMBO &&
+            SHORT2FROMMP(mp1) == CBN_SHOWLIST) {
+            WinStartTimer(hab, hwnd, TID_COMBOFOCUS, COMBOFOCUS_MS);
+            return (MRESULT)FALSE;
+        }
+
         if (SHORT1FROMMP(mp1) == IDC_TB_PATHCOMBO &&
             SHORT2FROMMP(mp1) == CBN_LBSELECT) {
 
@@ -1449,6 +1471,9 @@ MRESULT EXPENTRY ClientWndProc(HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2)
         LONG y = (LONG)(SHORT)SHORT2FROMMP(mp1);
         int  nHit;
 
+        /* As button 1 does: a click in the pane gives it the keyboard */
+        WinSetFocus(HWND_DESKTOP, hwnd);
+
         nContextDrive = -1;
         nContextFile  = -1;
 
@@ -1598,6 +1623,25 @@ MRESULT EXPENTRY ClientWndProc(HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2)
     case WM_TIMER:
         if (SHORT1FROMMP(mp1) == TID_FILEPROGRESS) {
             FileOpsOnTimer(hwnd);
+            return (MRESULT)FALSE;
+        }
+
+        /* See CBN_SHOWLIST under WM_CONTROL.  Only while the combo still has
+           the focus and we are still the active window: a "drive not ready"
+           box, or anything else that took the focus meanwhile, keeps it. */
+        if (SHORT1FROMMP(mp1) == TID_COMBOFOCUS) {
+            HWND hwndFocus;
+
+            if (WinSendMsg(hwndPathCombo, CBM_ISLISTSHOWING, MPVOID, MPVOID))
+                return (MRESULT)FALSE;          /* still open: keep watching */
+
+            WinStopTimer(hab, hwnd, TID_COMBOFOCUS);
+
+            hwndFocus = WinQueryFocus(HWND_DESKTOP);
+            if (WinQueryActiveWindow(HWND_DESKTOP) == hwndFrame &&
+                (hwndFocus == hwndPathCombo ||
+                 WinIsChild(hwndFocus, hwndPathCombo)))
+                WinSetFocus(HWND_DESKTOP, hwnd);
             return (MRESULT)FALSE;
         }
         break;

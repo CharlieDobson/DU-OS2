@@ -33,6 +33,8 @@ BEGIN
 
     SUBMENU "~Help", IDM_HELP
     BEGIN
+        MENUITEM "~Support...", IDM_HELP_SUPPORT
+        MENUITEM SEPARATOR
         MENUITEM "~About...",  IDM_HELP_ABOUT
     END
 END
@@ -67,6 +69,33 @@ BEGIN
         LTEXT   "All Rights Reserved.",
                                         IDC_STATIC,  12, 22, 190,  8
         DEFPUSHBUTTON "OK",             DID_OK,     166,  4,  40, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Support box.  One control per line rather than one word-wrapped control,
+ * so the breaks are the same here as in the Windows builds.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_SUPPORT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Support", IDD_SUPPORT, 24, 24, 248, 104,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "Thank you for using this application.  If you enjoy",
+                                        IDC_STATIC,  12, 86, 224,  8
+        LTEXT   "my work, I would be grateful if you would",
+                                        IDC_STATIC,  12, 77, 224,  8
+        LTEXT   "Buy Me A Coffee at",
+                                        IDC_STATIC,  12, 68, 224,  8
+        CTEXT   "https://buymeacoffee.com/charliedobson",
+                                        IDC_STATIC,  12, 54, 224,  8
+        LTEXT   "Payment is not required and the software will remain",
+                                        IDC_STATIC,  12, 40, 224,  8
+        LTEXT   "free for use.  I thank you for your support.",
+                                        IDC_STATIC,  12, 31, 224,  8
+        DEFPUSHBUTTON "OK",             DID_OK,     196,  4,  40, 14
     END
 END
 
