@@ -1,0 +1,145 @@
+/*===========================================================================
+ * REVEAL.RC  -  Reveal (OS/2 PM) resource script
+ * Compile with:  wrc -bt=os2 -r ...
+ *
+ * OS/2 resource grammar: POPUP is SUBMENU and needs an ID, a dialog is a
+ * DLGTEMPLATE wrapping a DIALOG, accelerators live in their own ACCELTABLE,
+ * and "&" mnemonics are "~".  Dialog coordinates are in dialog units measured
+ * from the BOTTOM-left.  There is no VERSIONINFO equivalent.
+ *===========================================================================*/
+#include <os2.h>
+#include "resource.h"
+
+/*---------------------------------------------------------------------------
+ * Icon.  Must be an OS/2-format icon, not a Windows .ICO -- BUILD\MKOS2.CMD
+ * converts ..\RES\REVEAL.ICO into REVEAL.PTR next to itself before this
+ * script is compiled.
+ *-------------------------------------------------------------------------*/
+
+ICON ID_REVEAL "REVEAL.PTR"
+
+/*---------------------------------------------------------------------------
+ * Menu bar.  The ID must match the frame's window ID for FCF_MENU to find it.
+ * The page commands are IDM_VIEW_FIRST (40100) + the category, in the order
+ * of reveal_category_t in REVEAL.H.
+ *-------------------------------------------------------------------------*/
+
+MENU ID_REVEAL
+BEGIN
+    SUBMENU "~File", IDM_FILE
+    BEGIN
+        MENUITEM "~System",             40100
+        MENUITEM "~Processor",          40101
+        MENUITEM "~Memory",             40102
+        MENUITEM "~First Megabyte",     40103
+        MENUITEM "~Display",            40104
+        MENUITEM "Dri~ves",             40105
+        MENUITEM "~Network",            40106
+        MENUITEM "P~orts",              40107
+        MENUITEM "OS/~2",               40108
+        MENUITEM "~Environment",        40109
+        MENUITEM "~Benchmark",          40110
+        MENUITEM SEPARATOR
+        MENUITEM "E~xit\tF3",           IDM_FILE_EXIT
+    END
+
+    SUBMENU "~View", IDM_VIEW
+    BEGIN
+        MENUITEM "~Refresh\tF5",        IDM_VIEW_REFRESH
+        MENUITEM "Run ~Benchmark\tF9",  IDM_VIEW_BENCHMARK
+    END
+
+    SUBMENU "~Help", IDM_HELP
+    BEGIN
+        MENUITEM "~Support...",         IDM_HELP_SUPPORT
+        MENUITEM SEPARATOR
+        MENUITEM "~About...",           IDM_HELP_ABOUT
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Accelerators (FCF_ACCELTABLE).  F5 re-reads the page, F9 runs the
+ * benchmark, and F3 is the OS/2 convention for File / Exit.
+ *-------------------------------------------------------------------------*/
+
+ACCELTABLE ID_REVEAL
+BEGIN
+    VK_F5,  IDM_VIEW_REFRESH,   VIRTUALKEY
+    VK_F9,  IDM_VIEW_BENCHMARK, VIRTUALKEY
+    VK_F3,  IDM_FILE_EXIT,      VIRTUALKEY
+END
+
+/*---------------------------------------------------------------------------
+ * About box - the same layout and wording as the rest of the OS/2 suite
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_ABOUT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "About Reveal", IDD_ABOUT, 24, 24, 216, 76,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "Reveal v1.0 - Dobson Utilities",
+                                        IDC_STATIC,  12, 58, 190,  8
+        LTEXT   "System information viewer for OS/2.",
+                                        IDC_STATIC,  12, 46, 190,  8
+        LTEXT   "Copyright (C) Charlie Dobson 1992 - 2026",
+                                        IDC_STATIC,  12, 34, 190,  8
+        LTEXT   "All Rights Reserved.",
+                                        IDC_STATIC,  12, 22, 190,  8
+        DEFPUSHBUTTON "OK",             DID_OK,     166,  4,  40, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Support box.  One control per line rather than one word-wrapped control,
+ * so the breaks are the same here as in the Windows builds.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_SUPPORT LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Support", IDD_SUPPORT, 24, 24, 248, 104,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT   "Thank you for using this application.  If you enjoy",
+                                        IDC_STATIC,  12, 86, 224,  8
+        LTEXT   "my work, I would be grateful if you would",
+                                        IDC_STATIC,  12, 77, 224,  8
+        LTEXT   "Buy Me A Coffee at",
+                                        IDC_STATIC,  12, 68, 224,  8
+        CTEXT   "https://buymeacoffee.com/charliedobson",
+                                        IDC_STATIC,  12, 54, 224,  8
+        LTEXT   "Payment is not required and the software will remain",
+                                        IDC_STATIC,  12, 40, 224,  8
+        LTEXT   "free for use.  I thank you for your support.",
+                                        IDC_STATIC,  12, 31, 224,  8
+        DEFPUSHBUTTON "OK",             DID_OK,     196,  4,  40, 14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Page illustrations.  Windows 3.x DIBs with a 40-byte BITMAPINFOHEADER are
+ * valid OS/2 2.0 bitmaps as they stand, so these are the Windows builds'
+ * files, unconverted.
+ *-------------------------------------------------------------------------*/
+
+BITMAP IDB_SYSTEM       "COMPUTER.BMP"
+BITMAP IDB_CPU          "CPU.BMP"
+BITMAP IDB_386          "386.BMP"
+BITMAP IDB_486          "486.BMP"
+BITMAP IDB_I486         "I486.BMP"
+BITMAP IDB_AM486DX      "AM486DX.BMP"
+BITMAP IDB_CX486        "CX486.BMP"
+BITMAP IDB_TI486        "TI486.BMP"
+BITMAP IDB_PENTIUM      "PENTIUM.BMP"
+BITMAP IDB_PPRO         "PPRO.BMP"
+BITMAP IDB_AMDK6        "AMDK6.BMP"
+BITMAP IDB_CX6X86       "CX6X86.BMP"
+BITMAP IDB_NX586        "NX586.BMP"
+BITMAP IDB_MEMORY       "RAM.BMP"
+BITMAP IDB_FIRSTMEG     "1STMEG.BMP"
+BITMAP IDB_DRIVES       "HDD.BMP"
+BITMAP IDB_NETWORK      "NETDRIVE.BMP"
+BITMAP IDB_PORTS        "IO.BMP"
+BITMAP IDB_BENCHMARK    "BENCHMRK.BMP"
