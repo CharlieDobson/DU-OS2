@@ -161,6 +161,15 @@ static UInt32 ArcMemSystemFree( void )
  * and about 1.5% higher up, where nothing cares.  The cost is a handful more
  * allocations than before - about 19 rather than 11, each a malloc and an
  * immediate free.
+ *
+ * UNDER WIN32 THE PROBE MAY NOT GO THROUGH MALLOC.  MSVC 2.x's heap meets a
+ * big request by reserving a whole new region with VirtualAlloc, and free()
+ * does not hand the region back - so nineteen probes of a few hundred MB each
+ * left nineteen reserved regions behind, in the one address space every
+ * Win32s program shares, and the CRT heap died of it with R6018 "unexpected
+ * heap error" before the main window ever appeared.  VirtualAlloc asks the
+ * same question the CRT's own heap growth will ask later, and VirtualFree
+ * gives every byte of it back.
  *-------------------------------------------------------------------------- */
 static UInt32 ArcMemProbeHeap( UInt32 hi )
 {
@@ -174,8 +183,14 @@ static UInt32 ArcMemProbeHeap( UInt32 hi )
         if ( hi - lo <= res ) break;
 
         mid = lo + ( hi - lo ) / 2;
+#if defined(_WIN32)
+        p   = VirtualAlloc( NULL, mid, MEM_RESERVE | MEM_COMMIT,
+                            PAGE_READWRITE );
+        if ( p ) { VirtualFree( p, 0, MEM_RELEASE ); lo = mid; }
+#else
         p   = malloc( mid );
         if ( p ) { free( p ); lo = mid; }
+#endif
         else       hi = mid;
     }
     return lo;

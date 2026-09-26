@@ -40,9 +40,9 @@
 
 #include "numfmt.h"
 
-/* g_haveSep is separate from g_sep[0] because "" is a real answer - it is how
- * the caller switches grouping off - and must not be mistaken for "not asked
- * yet", which would re-query the system on every row of a listing. */
+/* g_haveSep is separate from g_sep[0] because "" is a real answer: a system
+ * that reports no thousands separator wants none, and that must not be
+ * mistaken for "not asked yet", which would re-query on every row. */
 static char g_sep[NUM_SEP_MAX] = "";
 static int  g_haveSep          = 0;
 
@@ -168,62 +168,6 @@ const char *NumGroupSep( void )
         g_haveSep = 1;
     }
     return g_sep;
-}
-
-void NumSetGroupSep( const char *sep )
-{
-    if ( !sep )                               /* back to whatever DOS says */
-    {
-        g_haveSep = 0;
-        g_sep[0]  = '\0';
-        return;
-    }
-    if ( strlen( sep ) >= NUM_SEP_MAX ) return;   /* refuse, do not truncate */
-    strcpy( g_sep, sep );
-    g_haveSep = 1;
-}
-
-/* Case-insensitive compare, written out because the three compilers this
- * builds under spell the library one differently (stricmp / strcmpi). */
-static int NumSameWord( const char *a, const char *b )
-{
-    int i;
-    for ( i = 0; a[i] && b[i]; i++ )
-    {
-        char ca = a[i], cb = b[i];
-        if ( ca >= 'A' && ca <= 'Z' ) ca = (char)( ca - 'A' + 'a' );
-        if ( cb >= 'A' && cb <= 'Z' ) cb = (char)( cb - 'A' + 'a' );
-        if ( ca != cb ) return 0;
-    }
-    return a[i] == b[i];
-}
-
-void NumSetSepSpelling( const char *spelling )
-{
-    if ( !spelling ) return;
-
-    /* "none" and "off" switch grouping off.  Spelling them out matters: an
-     * empty XARCSEP= is ambiguous between "no separator" and "unset" on some
-     * shells, so the words are what actually turn it off - and an empty value
-     * is treated the same way rather than being left to the shell to decide. */
-    if ( !spelling[0] ||
-         NumSameWord( spelling, "none" ) || NumSameWord( spelling, "off" ) )
-    { NumSetGroupSep( "" ); return; }
-
-    /* "space" spelt out, because a trailing space does not survive being
-     * typed on a command line or set in an environment variable. */
-    if ( NumSameWord( spelling, "space" ) )
-    { NumSetGroupSep( " " ); return; }
-
-    NumSetGroupSep( spelling );               /* refused if it is too long */
-}
-
-void NumFmtInitFromEnv( void )
-{
-    const char *e = getenv( "XARCSEP" );
-
-    if ( !e ) return;                         /* nothing said: ask the system */
-    NumSetSepSpelling( e );
 }
 
 /*---------------------------------------------------------------------------

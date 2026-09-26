@@ -2314,6 +2314,10 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
             WinDlgBox( HWND_DESKTOP, hwnd, AboutDlgProc, NULLHANDLE,
                        IDD_ABOUT, NULL );
             break;
+        case IDM_HELP_SUPPORT:      /* OK-only, so About's procedure serves */
+            WinDlgBox( HWND_DESKTOP, hwnd, AboutDlgProc, NULLHANDLE,
+                       IDD_SUPPORT, NULL );
+            break;
         }
         return (MRESULT)FALSE;
 
@@ -2530,9 +2534,6 @@ int main( int argc, char *argv[] )
     ULONG flFrameFlags;
     char  szDiag[256];
 
-    /* XARCSEP, if set, beats the machine's country setting.  Before the
-     * window exists, so the first listing drawn is already right. */
-    NumFmtInitFromEnv();
 
     g_hab = WinInitialize( 0 );
     if ( g_hab == NULLHANDLE )

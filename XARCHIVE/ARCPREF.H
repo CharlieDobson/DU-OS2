@@ -15,6 +15,7 @@
  *     ExtractFolders=1
  *     FolderView=1
  *     AskShortNames=0
+ *     GraphicsMode=0
  *
  * FolderView is a DISPLAY setting: 1 browses the archive a folder at a time,
  * 0 lists every entry at once with its full stored path.  It is kept here
@@ -64,6 +65,21 @@ void ArcPrefSetFolderView( int on );
  * ArcSetShortNamePrompt in ARCDEFS.H. */
 int  ArcPrefAskShortNames( void );
 void ArcPrefSetAskShortNames( int on );
+
+/* Whether the DOS front end puts its screen up in a GRAPHICS mode (VGA
+ * 640x480, the card's own font, icons in the list) instead of text.  Default
+ * 0: text is what every machine can do, and a graphics screen costs sixty
+ * times as many writes per character, so it is asked for rather than
+ * assumed.  /G on the command line turns it on for one run without changing
+ * this; the Options menu changes this.
+ *
+ * Kept here with the other two front-end settings so the file has one home,
+ * even though only one of the three front ends can act on it - the Win32s
+ * and PM builds have a window manager and no use for the idea.  A front end
+ * that cannot do it simply never reads it, exactly as a front end with no
+ * folder browsing ignores FolderView. */
+int  ArcPrefGraphics( void );
+void ArcPrefSetGraphics( int on );
 
 /* Read the INI and apply every setting it holds.  A missing or unreadable
  * file is not an error - the built-in defaults simply stand. */

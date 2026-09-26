@@ -22,9 +22,30 @@ THE BACKEND IS A VERBATIM COPY, AND IS MEANT TO STAY ONE
     by editing a copy.  If one of them has to change for OS/2, change it in
     the DU32 tree behind an __OS2__ guard and copy the whole file back.
 
-    Last synced 2026-09-06, six files: LZMADEC.C for the SpecPos index below,
-    and ARCFILE.C, ARCPREF.C, ARCDEFS.H, ARCFILE.H, ARCPREF.H for the
-    removal of the MemoryLimitMB preference.  Before that, 2026-09-01.
+    Last synced 2026-09-24, two files: NUMFMT.C and NUMFMT.H, for the removal
+    of the group-separator OVERRIDE.  NumSetGroupSep, NumSetSepSpelling and
+    NumFmtInitFromEnv are gone and NumGroupSep is the whole interface: the
+    separator comes from the system and from nowhere else.  PMMAIN.C changed
+    with them - it called NumFmtInitFromEnv at the top of main, as XARCHIVE.C
+    and the DOS front end did, and all three lost that line.  The DOS /sep=
+    switch went too.  One fewer way for a listing on one system to disagree
+    with a listing on another.  Before that,
+    2026-09-23, two files: ARCPREF.C and ARCPREF.H, for the
+    GraphicsMode key the DOS front end's new /G screen writes.  Before that,
+    2026-09-06, six files: LZMADEC.C for the SpecPos index below, and
+    ARCFILE.C, ARCPREF.C, ARCDEFS.H, ARCFILE.H, ARCPREF.H for the removal of
+    the MemoryLimitMB preference.  Before that, 2026-09-01.
+
+      GraphicsMode  a new key, 0 by default, read and written by ArcPrefGraphics
+        / ArcPrefSetGraphics.  ONLY THE DOS FRONT END ACTS ON IT - it chooses
+        between a text screen and a VGA 640x480 one - and PM has a window
+        manager, so nothing here calls either function.  It is in the shared
+        file rather than in the DOS tree for the same reason FolderView is:
+        the INI has one owner, and a key that one front end does not
+        understand would otherwise be stripped as foreign the next time that
+        front end saved.  Naming it in IsKnownKey is what stops the PM build
+        deleting the DOS build's setting.  Nothing else here changed and
+        MKOS2.CMD builds clean.
 
       MemoryLimitMB  gone from XARCHIVE.INI, along with ArcMemSetLimit and
         ArcMemReport's 'forced' out-parameter (the PM front end never called

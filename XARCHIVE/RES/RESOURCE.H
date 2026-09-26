@@ -37,6 +37,7 @@
 #define IDD_OVERWRITE                   109
 #define IDD_PASSWORD                    110
 #define IDD_COMMENT                     111
+#define IDD_SUPPORT                     112
 
 /* commands (menu items and the toolbar buttons alike) */
 #define IDM_FILE_OPEN                   201
@@ -48,6 +49,7 @@
 #define IDM_ARCHIVE_PATHS               209   /* checkable: keep folder names */
 #define IDM_ARCHIVE_COMMENT             210
 #define IDM_HELP_ABOUT                  301
+#define IDM_HELP_SUPPORT                302
 
 /* controls */
 #define IDC_LIST                        1000

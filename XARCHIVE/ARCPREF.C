@@ -103,6 +103,7 @@ static int IsKnownKey( const char *line )
     return KeyIs( line, "ExtractFolders" ) ||
            KeyIs( line, "FolderView" )     ||
            KeyIs( line, "AskShortNames" )  ||
+           KeyIs( line, "GraphicsMode" )   ||
            KeyIs( line, "MemoryLimitMB" );      /* retired 2026-09-06 */
 }
 
@@ -120,6 +121,14 @@ static int g_askShortNames = 0;
 
 int  ArcPrefAskShortNames( void )      { return g_askShortNames; }
 void ArcPrefSetAskShortNames( int on ) { g_askShortNames = on ? 1 : 0; }
+
+/* The DOS front end's graphics screen (see ARCPREF.H).  Off by default, and
+ * like AskShortNames it therefore reads the other way round on load: only an
+ * explicit 1 turns it on. */
+static int g_graphics = 0;
+
+int  ArcPrefGraphics( void )      { return g_graphics; }
+void ArcPrefSetGraphics( int on ) { g_graphics = on ? 1 : 0; }
 
 /*---- Load -----------------------------------------------------------------*/
 
@@ -156,6 +165,12 @@ void ArcPrefLoad( void )
              * other way round: only an explicit 1 turns it on. */
             const char *v = ValueOf( p );
             g_askShortNames = ( *v == '1' ) ? 1 : 0;
+        }
+        else if ( KeyIs( p, "GraphicsMode" ) )
+        {
+            /* Off by default, so only an explicit 1 turns it on. */
+            const char *v = ValueOf( p );
+            g_graphics = ( *v == '1' ) ? 1 : 0;
         }
         /* MemoryLimitMB is deliberately not read: see IsKnownKey. */
     }
@@ -197,6 +212,8 @@ int ArcPrefSave( void )
     fprintf( f, "FolderView=%d\n", g_folderView );
     fprintf( f, "; AskShortNames: 1 asks you to name each long file on an 8.3 drive\n" );
     fprintf( f, "AskShortNames=%d\n", g_askShortNames );
+    fprintf( f, "; GraphicsMode: 1 puts the DOS screen up in VGA graphics\n" );
+    fprintf( f, "GraphicsMode=%d\n", g_graphics );
     {
         int i;
         for ( i = 0; i < nkeep; i++ )
