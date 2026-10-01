@@ -1,6 +1,6 @@
 Open Watcom Linker Version 1.9
 Portions Copyright (c) 1985-2002 Sybase, Inc. All Rights Reserved.
-Created on:       26/09/24 17:29:31
+Created on:       26/09/29 17:50:00
 Executable Image: XARCHIVE.EXE
 creating an OS/2 32-bit Presentation Manager executable
 
@@ -886,4 +886,4 @@ C:\WATCOM/lib386/os2\os2386.lib
 Stack size:  00040000 (262144.)
 Memory size:  000a93a3 (693155.)
 Entry point address: 0002:0001b3b8
-Link time: 00:00.10
+Link time: 00:02.83
