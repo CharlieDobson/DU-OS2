@@ -68,8 +68,11 @@ static LONG     sb_unit        = 1;
 #define PANE_BUTTON_H   24
 
 /* Column positions for RK_COLHDR / RK_COLROW, in characters of the fixed
-   pitch font.  Chosen so the widest table still ends inside the pane. */
+   pitch font.  Chosen so the widest table still ends inside the pane.
+   TABLE_END is the stop after the last: where a right-justified cell in
+   the last column ends. */
 #define TABLE_STOPS     4
+#define TABLE_END       50
 static const int TableStops[ TABLE_STOPS ] = { 9, 20, 30, 40 };
 
 /*---------------------------------------------------------------------------
@@ -677,10 +680,13 @@ static void PaintMemMap( HPS hps, LONG width, LONG y )
  * PaintColumns - a tab-separated row, each cell at its column stop
  *
  * Windows' TabbedTextOut did this; GPI has no tab expansion, so the cells are
- * split out and drawn one by one at the same stops.
+ * split out and drawn one by one at the same stops.  A column named in
+ * 'align' (report_row_t.align, RIGHT_COL bits) is right-justified instead,
+ * ending a character short of the next stop.
  *-------------------------------------------------------------------------*/
 
-static void PaintColumns( HPS hps, int font, LONG y, const char* text, LONG right )
+static void PaintColumns( HPS hps, int font, LONG y, const char* text, int align,
+                          LONG right )
 {
     char cell[ RPT_VALUE_MAX ];
     int  column = 0;
@@ -702,7 +708,15 @@ static void PaintColumns( HPS hps, int font, LONG y, const char* text, LONG righ
         next = ( tab != NULL && column < TABLE_STOPS )
                ? PANE_MARGIN + fixed_width * TableStops[ column ] - 4 : right;
 
-        TextClipTD( hps, font, x, y, next, cell, clr.text );
+        if ( align & RIGHT_COL( column ) ) {
+            LONG stop = ( column < TABLE_STOPS ) ? TableStops[ column ] : TABLE_END;
+            LONG end  = PANE_MARGIN + fixed_width * ( stop - 1 );
+
+            TextTD( hps, font, end - TextWidth( hps, font, cell ), y, cell, clr.text );
+        }
+        else {
+            TextClipTD( hps, font, x, y, next, cell, clr.text );
+        }
 
         if ( tab == NULL ) break;
         text = tab + 1;
@@ -736,12 +750,12 @@ static void PaintRow( HPS hps, LONG width, LONG y, const report_row_t* row )
         }
 
         case RK_COLHDR:
-            PaintColumns( hps, FONT_BOLD, y, row->value, width );
+            PaintColumns( hps, FONT_BOLD, y, row->value, row->align, width );
             EtchedLine( hps, PANE_MARGIN, width - PANE_MARGIN, y + line_height - 2 );
             break;
 
         case RK_COLROW:
-            PaintColumns( hps, FONT_FIXED, y, row->value, width );
+            PaintColumns( hps, FONT_FIXED, y, row->value, row->align, width );
             break;
 
         case RK_NOTE:

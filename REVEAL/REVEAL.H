@@ -88,9 +88,14 @@ enum report_kind_t {
 typedef struct report_row_t {
     int  kind;
     int  pct;                       /* RK_GAUGE only, 0..100               */
+    int  align;                     /* RK_COLHDR / RK_COLROW only: bit n   */
+                                    /* set, column n is right-justified    */
     char label[RPT_LABEL_MAX];
     char value[RPT_VALUE_MAX];
 } report_row_t;
+
+/* a bit of report_row_t.align: column 'n' (0 = the first) right-justified */
+#define RIGHT_COL( n )  ( 1 << ( n ) )
 
 /*---------------------------------------------------------------------------
  * First-megabyte map: 256 blocks of 4 KB.

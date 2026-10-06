@@ -324,8 +324,9 @@ static void RAdd( int kind, const char* label, const char* value )
     }
 
     row = &r_rows[ r_count++ ];
-    row->kind = kind;
-    row->pct  = 0;
+    row->kind  = kind;
+    row->pct   = 0;
+    row->align = 0;
     CopyStr( row->label, label, RPT_LABEL_MAX );
     CopyStr( row->value, value, RPT_VALUE_MAX );
 }
@@ -351,6 +352,16 @@ static void RGauge( const char* label, const char* value, int pct )
     if ( pct < 0 )   pct = 0;
     if ( pct > 100 ) pct = 100;
     r_rows[ r_count - 1 ].pct = pct;
+}
+
+/* a table row (RK_COLHDR / RK_COLROW) whose columns named in 'align' -
+   RIGHT_COL bits - are right-justified against the next column stop */
+static void RColumns( int kind, int align, const char* value )
+{
+    if ( r_rows == NULL || r_count >= r_max - 1 ) return;
+
+    RAdd( kind, "", value );
+    r_rows[ r_count - 1 ].align = align;
 }
 
 static void RHeading( const char* text )  { RAdd( RK_HEADING, text, "" ); }
@@ -1612,8 +1623,12 @@ static void BuildDrives( void )
     int     cdroms  = 0;
     int     unit;
 
+    /* Total and Free are sizes: right-justified, so the figures line up
+       under their headings with the units in one column */
+    const int size_cols = RIGHT_COL( 3 ) | RIGHT_COL( 4 );
+
     RHeading( "Drive letters" );
-    RAdd( RK_COLHDR, "", "Drive\tType\tFile system\tTotal\tFree" );
+    RColumns( RK_COLHDR, size_cols, "Drive\tType\tFile system\tTotal\tFree" );
 
     if ( DosQueryCurrentDisk( &current, &map ) != NO_ERROR ) map = 0;
 
@@ -1647,7 +1662,7 @@ static void BuildDrives( void )
             sprintf( line, "%c:\t%s\t%s\t-\t-", (char)( 'A' + drive ), type_name,
                      fsd[ 0 ] ? fsd : "-" );
         }
-        RAdd( RK_COLROW, "", line );
+        RColumns( RK_COLROW, size_cols, line );
     }
 
     if ( found == 0 ) RNote( "No drives reported." );
