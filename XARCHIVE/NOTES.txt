@@ -11,18 +11,35 @@ THE BACKEND IS A VERBATIM COPY, AND IS MEANT TO STAY ONE
     To check, from anywhere:
 
         for %F in (ARCFILE.C SZARC.C ZIPARC.C RARARC.C RAR3DEC.C RAR5ARC.C ^
-                   DISKARC.C LZMADEC.C CRC32.C ARCPREF.C ^
+                   DISKARC.C CABARC.C MSLZARC.C MSZIPDEC.C LZXDEC.C ^
+                   QTMDEC.C LZMADEC.C CRC32.C ARCPREF.C ARCCRYP.C AES.C ^
+                   SHA.C VOLIO.C NUMFMT.C ^
                    ARCDEFS.H ARCFILE.H ARCPREF.H SZARC.H ZIPARC.H RARARC.H ^
-                   RAR3DEC.H RAR5ARC.H DISKARC.H LZMADEC.H CRC32.H ^
-                   PLATFORM.H) do ^
+                   RAR3DEC.H RAR5ARC.H DISKARC.H CABARC.H MSLZARC.H ^
+                   MSZIPDEC.H LZXDEC.H QTMDEC.H LZMADEC.H CRC32.H ^
+                   ARCCRYP.H AES.H SHA.H VOLIO.H NUMFMT.H PLATFORM.H) do ^
           fc /b %F S:\CPP\DU32\XARCHIVE\%F
+
+    (42 files.  The list used to stop at the ones the first port had, and
+    the crypto, volume and number-format files were checked by hand.)
 
     Any difference is drift, not a port: the platform is dealt with by
     #if defined(__OS2__) inside those files and by the windows.h shim, never
     by editing a copy.  If one of them has to change for OS/2, change it in
     the DU32 tree behind an __OS2__ guard and copy the whole file back.
 
-    Last synced 2026-09-24, two files: NUMFMT.C and NUMFMT.H, for the removal
+    Last synced 2026-10-02, thirteen files: CABARC, MSLZARC, MSZIPDEC,
+    LZXDEC and QTMDEC (.C and .H), all new, plus ARCFILE.C, ARCFILE.H and
+    SZARC.C, for Microsoft cabinets (.CAB, cabinet sets, Quantum and LZX
+    included) and COMPRESS.EXE's SZDD and KWAJ files.  MKOS2.CMD compiles
+    and links the five new sources.  PMMAIN.C: the Open dialog's title names
+    .cab and .??_, and a passing integrity test shows ArcIntegrityNote's
+    words for the formats that have no CRC to have matched.  RES\XARCHIVE.RC:
+    the About box grew a line for the new formats.  Built, bound, and the
+    EXE carries the new strings; MKTEST ALL PASS.  Not run on OS/2.  What the
+    formats were checked against is in S:\CPP\DU32\XARCHIVE\BUILD-NOTES.txt.
+    Before that,
+    2026-09-24, two files: NUMFMT.C and NUMFMT.H, for the removal
     of the group-separator OVERRIDE.  NumSetGroupSep, NumSetSepSpelling and
     NumFmtInitFromEnv are gone and NumGroupSep is the whole interface: the
     separator comes from the system and from nowhere else.  PMMAIN.C changed

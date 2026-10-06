@@ -2,10 +2,12 @@
  * ARCFILE.H  -  Format-agnostic archive front door
  * Target: MSVC 2.2  Win32s
  *
- * Sniffs an archive's signature and dispatches to the 7z (SZARC) or zip
- * (ZIPARC) backend, presenting one open/list/extract interface so the GUI
- * does not care which format it is looking at.  Result codes and the progress
- * callback are the shared SZ_ERR_* / SzProgress.
+ * Sniffs an archive's signature and dispatches to the backend for it - 7z
+ * (SZARC), zip (ZIPARC), RAR (RARARC, RAR5ARC), FAT images (DISKARC),
+ * cabinets (CABARC) and COMPRESS.EXE files (MSLZARC) - presenting one
+ * open/list/extract interface so the GUI does not care which format it is
+ * looking at.  Result codes and the progress callback are the shared
+ * SZ_ERR_* / SzProgress.
  *===========================================================================*/
 
 #ifndef ARCFILE_H
@@ -73,10 +75,21 @@ int  ArcExtractItems( ArcFile *a, const int *indices, int count,
  * SZ_ERR_CANCEL.  Uses the same progress callback as extraction. */
 int  ArcTestAll( ArcFile *a, SzProgress prog, void *user );
 
+/* What a PASSING test actually established, for the formats where "every CRC
+ * matched" would be untrue.  NULL for the ones that do check every entry
+ * against a CRC (7z, zip, RAR), where the front end's own wording stands.
+ * Otherwise a sentence or two, to show in its place:
+ *   a cabinet keeps no per-file checksum, only an optional one per data
+ *   block, and the words depend on whether the blocks just read had them;
+ *   a COMPRESS.EXE file has no checksum at all, only the length in its
+ *   header - and a KWAJ file made with -l has not even that.
+ * Call it after ArcTestAll returns SZ_OK, for the same archive. */
+const char *ArcIntegrityNote( ArcFile *a );
+
 /* The archive's own comment, or NULL when it has none.  Owned by the archive and
- * valid until ArcClose.  Only zip and RAR4 have a field for one; the rest always
- * answer NULL, which a front end should report as "no comment" and not as a
- * failure. */
+ * valid until ArcClose.  Only zip, RAR4 and KWAJ (COMPRESS -t text) have a
+ * field for one; the rest always answer NULL, which a front end should report
+ * as "no comment" and not as a failure. */
 const char *ArcComment( ArcFile *a );
 
 /* The same comment with every line ending written as CRLF.
@@ -168,8 +181,8 @@ const char *ArcMemWarnText( void );
  * Safe to call with a NULL archive (returns 1). */
 int ArcVolumeCount( ArcFile *a );
 
-/* Short display name of the archive's format, e.g. "7z", "Zip", "RAR", "RAR5".
- * Safe to call with a NULL archive (returns "?"). */
+/* Short display name of the archive's format, e.g. "7z", "Zip", "RAR", "RAR5",
+ * "Cabinet", "SZDD".  Safe to call with a NULL archive (returns "?"). */
 const char *ArcFormatName( ArcFile *a );
 
 #endif /* ARCFILE_H */

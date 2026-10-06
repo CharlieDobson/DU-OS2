@@ -3208,8 +3208,8 @@ const char *SzErrorText( int code )
     case SZ_ERR_OPEN:       return "Cannot open the archive file.";
     case SZ_ERR_READ:       return "Read error or truncated archive.";
     case SZ_ERR_SIG:        return "Not an archive this program recognises "
-                                   "(no 7z, zip, RAR or FAT image found in "
-                                   "it).";
+                                   "(no 7z, zip, RAR, cabinet, COMPRESS.EXE "
+                                   "file or FAT image found in it).";
     case SZ_ERR_CRC:        return "CRC mismatch (corrupt archive).";
     case SZ_ERR_FORMAT:     return "Malformed or unexpected archive header.";
     case SZ_ERR_UNSUPPORTED:return "Unsupported archive feature, compression "

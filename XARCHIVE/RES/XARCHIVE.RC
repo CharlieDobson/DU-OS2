@@ -96,13 +96,15 @@ END
 
 DLGTEMPLATE IDD_ABOUT LOADONCALL MOVEABLE DISCARDABLE
 BEGIN
-    DIALOG "About XArchive", IDD_ABOUT, 24, 24, 228, 72,
+    DIALOG "About XArchive", IDD_ABOUT, 24, 24, 228, 80,
            FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
            FCF_TITLEBAR | FCF_SYSMENU
     BEGIN
         LTEXT   "XArchive v1.0",
-                                    IDC_STATIC,  12, 54, 204,  8
-        LTEXT   "Extracts 7-Zip, Zip, RAR and FAT images.",
+                                    IDC_STATIC,  12, 62, 204,  8
+        LTEXT   "Extracts 7-Zip, Zip, RAR and CAB archives,",
+                                    IDC_STATIC,  12, 50, 204,  8
+        LTEXT   "COMPRESS.EXE files and FAT images.",
                                     IDC_STATIC,  12, 42, 204,  8
         LTEXT   "Copyright (C) Charlie Dobson 2026",
                                     IDC_STATIC,  12, 30, 204,  8

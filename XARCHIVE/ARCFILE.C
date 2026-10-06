@@ -15,6 +15,8 @@
 #include "rararc.h"
 #include "rar5arc.h"
 #include "diskarc.h"
+#include "cabarc.h"
+#include "mslzarc.h"
 #include "volio.h"
 
 #define FMT_7Z    1
@@ -22,6 +24,8 @@
 #define FMT_RAR   3      /* RAR 2.x/3.x (RAR4) */
 #define FMT_RAR5  4
 #define FMT_DISK  5      /* FAT12/16 floppy image (.img/.dsk) */
+#define FMT_CAB   6      /* Microsoft cabinet, or a set of them */
+#define FMT_MSLZ  7      /* one file packed by COMPRESS.EXE (SZDD / KWAJ) */
 
 struct ArcFile {
     int          fmt;
@@ -30,6 +34,8 @@ struct ArcFile {
     RarArchive  *rar;
     Rar5Archive *rar5;
     DiskArchive *disk;
+    CabArchive  *cab;
+    MslzArchive *mslz;
 };
 
 static const unsigned char SIG_7Z[6]  = { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C };
@@ -378,6 +384,8 @@ UInt32 ArcMemNeeded( ArcFile *a )
     else if ( a->fmt == FMT_ZIP )  need = ZipMemNeeded( a->zip );
     else if ( a->fmt == FMT_RAR )  need = RarMemNeeded( a->rar );
     else if ( a->fmt == FMT_RAR5 ) need = Rar5MemNeeded( a->rar5 );
+    else if ( a->fmt == FMT_CAB )  need = CabMemNeeded( a->cab );
+    else if ( a->fmt == FMT_MSLZ ) need = MslzMemNeeded( a->mslz );
     else                           return 0;      /* FMT_DISK: already held */
 
     if ( need == 0 ) return 0;
@@ -423,7 +431,7 @@ int ArcMemCheck( ArcFile *a, UInt32 *needKB, UInt32 *haveKB )
 
 /*---- How many entries will fit (see ARCDEFS.H) ---------------------------- *
  * What one listed entry costs while an archive is open: the backend's entry
- * record - whichever of the five is largest, all of them dominated by their
+ * record - whichever of the seven is largest, all of them dominated by their
  * fixed SZ_MAX_NAME name field - plus the parse-time scratch 7z keeps beside
  * it and the front end's per-row bookkeeping.  Measured from the structs
  * rather than guessed, so it stays right if one of them gains a field.
@@ -436,6 +444,8 @@ static UInt32 ArcEntryCost( void )
     if ( (UInt32)sizeof( RarEntry )  > big ) big = (UInt32)sizeof( RarEntry );
     if ( (UInt32)sizeof( Rar5Entry ) > big ) big = (UInt32)sizeof( Rar5Entry );
     if ( (UInt32)sizeof( DiskEntry ) > big ) big = (UInt32)sizeof( DiskEntry );
+    if ( (UInt32)sizeof( CabEntry )  > big ) big = (UInt32)sizeof( CabEntry );
+    if ( (UInt32)sizeof( MslzEntry ) > big ) big = (UInt32)sizeof( MslzEntry );
 
     /* Generous slack for 7z's ParseState scratch (a substream record plus
      * three bit arrays plus a CRC per entry, all live at once while the
@@ -512,7 +522,8 @@ int ArcOpenPw( const char *path, const char *pw, ArcFile **out )
 {
     ArcFile      *a;
     VolFile      *fp;
-    unsigned char sig[7];
+    unsigned char sig[8];
+    UInt32        got;
     int           fmt  = FMT_ZIP;
     int           isMZ = 0;
     int           rc;
@@ -520,20 +531,28 @@ int ArcOpenPw( const char *path, const char *pw, ArcFile **out )
     *out = NULL;
 
     /* Peek the signature to choose the backend.  7z and RAR have fixed magics
-     * (RAR's 7th byte is 0x00 for RAR4, 0x01 for RAR5).  Anything else may be a
-     * plain zip, a self-extracting zip, or a self-extracting 7z - the last two
-     * are .exe files starting with "MZ". */
+     * (RAR's 7th byte is 0x00 for RAR4, 0x01 for RAR5), and so do a cabinet
+     * ("MSCF" and four zero bytes) and COMPRESS.EXE's two formats ("SZDD",
+     * "KWAJ" and the QBasic-era "SZ ", each with four more fixed bytes).
+     * Anything else may be a plain zip, a self-extracting zip, or a
+     * self-extracting 7z or cabinet - the last three are .exe files starting
+     * with "MZ". */
     /* Sniff through VOLIO, not a bare fopen: when the user opens a LATER
      * volume of a split set - .004 of six - that file has no signature of
      * its own, and only the joined stream starts with the archive.  Reading
      * the named file directly would call a perfectly good 7z a bad one. */
     if ( VolOpen( path, &fp ) != SZ_OK ) return SZ_ERR_OPEN;
-    if ( VolRead( sig, 1, 7, fp ) == 7 )
+    got = VolRead( sig, 1, 8, fp );
+    if ( got >= 7 )
     {
         if ( memcmp( sig, SIG_7Z, 6 ) == 0 )
             fmt = FMT_7Z;
         else if ( memcmp( sig, SIG_RAR, 6 ) == 0 )
             fmt = ( sig[6] == 0x01 ) ? FMT_RAR5 : FMT_RAR;
+        else if ( CabProbe( sig, (int)got ) )
+            fmt = FMT_CAB;
+        else if ( MslzProbe( sig, (int)got ) )
+            fmt = FMT_MSLZ;
         else if ( sig[0] == 'M' && sig[1] == 'Z' )
             isMZ = 1;
     }
@@ -545,6 +564,8 @@ int ArcOpenPw( const char *path, const char *pw, ArcFile **out )
     if ( fmt == FMT_7Z )        rc = SzOpenPw( path, pw, &a->sz );
     else if ( fmt == FMT_RAR )  rc = RarOpenPw( path, pw, &a->rar );
     else if ( fmt == FMT_RAR5 ) rc = Rar5OpenPw( path, pw, &a->rar5 );
+    else if ( fmt == FMT_CAB )  rc = CabOpen( path, &a->cab );
+    else if ( fmt == FMT_MSLZ ) rc = MslzOpen( path, &a->mslz );
     else
     {
         /* A raw FAT12/16 floppy image (.img/.dsk): a jump-opcode boot sector
@@ -591,6 +612,14 @@ int ArcOpenPw( const char *path, const char *pw, ArcFile **out )
                 fmt = FMT_7Z;
                 rc  = SZ_OK;
             }
+            /* An IExpress package or a Microsoft update keeps a cabinet in
+             * its resources.  Last, because it scans the whole file, and an
+             * .exe that is none of these has already been read twice. */
+            else if ( isMZ && CabOpenScan( path, &a->cab ) == SZ_OK )
+            {
+                fmt = FMT_CAB;
+                rc  = SZ_OK;
+            }
         }
     }
 
@@ -623,7 +652,8 @@ void ArcSetPassword( ArcFile *a, const char *pw )
     if ( a->fmt == FMT_ZIP )  ZipSetPassword( a->zip, pw );
     if ( a->fmt == FMT_RAR5 ) Rar5SetPassword( a->rar5, pw );
     if ( a->fmt == FMT_RAR )  RarSetPassword( a->rar, pw );
-    /* Disk images: nothing to set - a FAT image carries no encryption. */
+    /* Disk images, cabinets and COMPRESS.EXE files: nothing to set - none of
+     * the three has any encryption. */
 }
 
 int ArcNeedsPassword( ArcFile *a )
@@ -643,6 +673,8 @@ int ArcNumEntries( ArcFile *a )
     if ( a->fmt == FMT_RAR )  return RarNumEntries( a->rar );
     if ( a->fmt == FMT_RAR5 ) return Rar5NumEntries( a->rar5 );
     if ( a->fmt == FMT_DISK ) return DiskNumEntries( a->disk );
+    if ( a->fmt == FMT_CAB )  return CabNumEntries( a->cab );
+    if ( a->fmt == FMT_MSLZ ) return MslzNumEntries( a->mslz );
     return ZipNumEntries( a->zip );
 }
 
@@ -667,6 +699,16 @@ const char *ArcEntryName( ArcFile *a, int index )
     if ( a->fmt == FMT_DISK )
     {
         const DiskEntry *e = DiskGetEntry( a->disk, index );
+        return e ? e->name : NULL;
+    }
+    if ( a->fmt == FMT_CAB )
+    {
+        const CabEntry *e = CabGetEntry( a->cab, index );
+        return e ? e->name : NULL;
+    }
+    if ( a->fmt == FMT_MSLZ )
+    {
+        const MslzEntry *e = MslzGetEntry( a->mslz, index );
         return e ? e->name : NULL;
     }
     {
@@ -698,6 +740,16 @@ UInt32 ArcEntrySize( ArcFile *a, int index )
         const DiskEntry *e = DiskGetEntry( a->disk, index );
         return e ? e->size : 0;
     }
+    if ( a->fmt == FMT_CAB )
+    {
+        const CabEntry *e = CabGetEntry( a->cab, index );
+        return e ? e->size : 0;
+    }
+    if ( a->fmt == FMT_MSLZ )
+    {
+        const MslzEntry *e = MslzGetEntry( a->mslz, index );
+        return e ? e->size : 0;
+    }
     {
         const ZipEntry *e = ZipGetEntry( a->zip, index );
         return e ? e->size : 0;
@@ -727,6 +779,8 @@ int ArcEntryIsDir( ArcFile *a, int index )
         const DiskEntry *e = DiskGetEntry( a->disk, index );
         return e ? e->isDir : 0;
     }
+    if ( a->fmt == FMT_CAB || a->fmt == FMT_MSLZ )
+        return 0;                   /* neither format stores directories */
     {
         const ZipEntry *e = ZipGetEntry( a->zip, index );
         return e ? e->isDir : 0;
@@ -751,6 +805,13 @@ UInt32 ArcEntryPacked( ArcFile *a, int index )
     if ( a->fmt == FMT_DISK )
     {
         const DiskEntry *e = DiskGetEntry( a->disk, index );
+        return e ? e->packed : 0xFFFFFFFFUL;
+    }
+    if ( a->fmt == FMT_CAB )
+        return CabEntryPacked( a->cab, index );
+    if ( a->fmt == FMT_MSLZ )
+    {
+        const MslzEntry *e = MslzGetEntry( a->mslz, index );
         return e ? e->packed : 0xFFFFFFFFUL;
     }
     {
@@ -778,6 +839,10 @@ const char *ArcEntryMethod( ArcFile *a, int index )
     }
     if ( a->fmt == FMT_DISK )
         return "None";
+    if ( a->fmt == FMT_CAB )
+        return CabEntryMethod( a->cab, index );
+    if ( a->fmt == FMT_MSLZ )
+        return MslzMethod( a->mslz );
     {
         const ZipEntry *e = ZipGetEntry( a->zip, index );
         if ( !e ) return "";
@@ -818,7 +883,7 @@ void ArcEntryDate( ArcFile *a, int index, char *buf, int buflen )
         wsprintf( buf, "%04d-%02d-%02d %02d:%02d",
                   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute );
     }
-    else      /* zip and RAR4 store MS-DOS packed date/time */
+    else      /* zip, RAR4 and cabinets store MS-DOS packed date/time */
     {
         unsigned d = 0, t = 0;
         if ( a->fmt == FMT_RAR )
@@ -830,6 +895,18 @@ void ArcEntryDate( ArcFile *a, int index, char *buf, int buflen )
         else if ( a->fmt == FMT_DISK )
         {
             const DiskEntry *e = DiskGetEntry( a->disk, index );
+            if ( !e ) return;
+            d = e->modDate; t = e->modTime;
+        }
+        else if ( a->fmt == FMT_CAB )
+        {
+            const CabEntry *e = CabGetEntry( a->cab, index );
+            if ( !e ) return;
+            d = e->modDate; t = e->modTime;
+        }
+        else if ( a->fmt == FMT_MSLZ )   /* the compressed file's own date */
+        {
+            const MslzEntry *e = MslzGetEntry( a->mslz, index );
             if ( !e ) return;
             d = e->modDate; t = e->modTime;
         }
@@ -890,6 +967,14 @@ void ArcEntryAttr( ArcFile *a, int index, char *buf, int buflen )
         if ( !e ) return;
         FormatDosAttr( e->attrib, buf );
     }
+    else if ( a->fmt == FMT_CAB )
+    {
+        const CabEntry *e = CabGetEntry( a->cab, index );
+        if ( !e ) return;
+        FormatDosAttr( e->attrib, buf );
+    }
+    else if ( a->fmt == FMT_MSLZ )
+        return;                     /* COMPRESS.EXE keeps no attributes */
     else
     {
         const ZipEntry *e = ZipGetEntry( a->zip, index );
@@ -964,6 +1049,8 @@ int ArcExtractAll( ArcFile *a, const char *destDir,
     else if ( a->fmt == FMT_RAR )  rc = RarExtractAll( a->rar, destDir, prog, user );
     else if ( a->fmt == FMT_RAR5 ) rc = Rar5ExtractAll( a->rar5, destDir, prog, user );
     else if ( a->fmt == FMT_DISK ) rc = DiskExtractAll( a->disk, destDir, prog, user );
+    else if ( a->fmt == FMT_CAB )  rc = CabExtractAll( a->cab, destDir, prog, user );
+    else if ( a->fmt == FMT_MSLZ ) rc = MslzExtractAll( a->mslz, destDir, prog, user );
     else                           rc = ZipExtractAll( a->zip, destDir, prog, user );
 
     SnRelease();                           /* the names are decided: let go  */
@@ -991,6 +1078,10 @@ int ArcExtractItems( ArcFile *a, const int *indices, int count,
         rc = Rar5ExtractItems( a->rar5, indices, count, destDir, prog, user );
     else if ( a->fmt == FMT_DISK )
         rc = DiskExtractItems( a->disk, indices, count, destDir, prog, user );
+    else if ( a->fmt == FMT_CAB )
+        rc = CabExtractItems( a->cab, indices, count, destDir, prog, user );
+    else if ( a->fmt == FMT_MSLZ )
+        rc = MslzExtractItems( a->mslz, indices, count, destDir, prog, user );
     else
         rc = ZipExtractItems( a->zip, indices, count, destDir, prog, user );
 
@@ -1017,19 +1108,57 @@ int ArcTestAll( ArcFile *a, SzProgress prog, void *user )
     if ( a->fmt == FMT_RAR )  return RarExtractAll( a->rar, NULL, prog, user );
     if ( a->fmt == FMT_RAR5 ) return Rar5ExtractAll( a->rar5, NULL, prog, user );
     if ( a->fmt == FMT_DISK ) return DiskExtractAll( a->disk, NULL, prog, user );
+    if ( a->fmt == FMT_CAB )  return CabExtractAll( a->cab, NULL, prog, user );
+    if ( a->fmt == FMT_MSLZ ) return MslzExtractAll( a->mslz, NULL, prog, user );
     return ZipExtractAll( a->zip, NULL, prog, user );
 }
 
-/* The archive's own comment, or NULL when it has none.  Only zip and RAR4 have
- * anywhere to keep one: 7z and RAR5 have no archive-comment field at all, and a
- * disk image is a filesystem.  Those return NULL, which the front end reports
- * as "no comment" rather than "not supported" - from where the user is standing
+/* See ARCFILE.H: only the formats WITHOUT a CRC per entry say anything. */
+const char *ArcIntegrityNote( ArcFile *a )
+{
+    if ( !a ) return NULL;
+
+    if ( a->fmt == FMT_CAB )
+    {
+        UInt32 checked, bare;
+
+        CabChecksumCount( a->cab, &checked, &bare );
+        if ( checked == 0 && bare == 0 )      /* nothing but empty files */
+            return "Every file decoded.";
+        if ( bare == 0 )
+            return "Every file decoded and every data block's checksum "
+                   "matched.  (A cabinet has no checksum per file, only "
+                   "per block.)";
+        if ( checked == 0 )
+            return "Every file decoded, but this cabinet carries no "
+                   "checksums, so damage that still decodes would not show.";
+        return "Every file decoded, and every data block that carries a "
+               "checksum matched it.  Some blocks carry none.";
+    }
+
+    if ( a->fmt == FMT_MSLZ )
+        return MslzHasLength( a->mslz )
+             ? "The file decoded to the length its header gives.  Files "
+               "made by COMPRESS.EXE carry no checksum, so that is all "
+               "that can be checked."
+             : "The file decoded without error.  It carries no checksum, "
+               "and its header gives no length to check against.";
+
+    return NULL;
+}
+
+/* The archive's own comment, or NULL when it has none.  Only zip, RAR4 and a
+ * KWAJ file (the free text COMPRESS -t puts in its header) have anywhere to
+ * keep one: 7z, RAR5 and cabinets have no comment field at all, and a disk
+ * image is a filesystem.  Those return NULL, which the front end reports as
+ * "no comment" rather than "not supported" - from where the user is standing
  * they are the same thing. */
 const char *ArcComment( ArcFile *a )
 {
     if ( !a ) return NULL;
-    if ( a->fmt == FMT_ZIP ) return ZipComment( a->zip );
-    if ( a->fmt == FMT_RAR ) return RarComment( a->rar );
+    if ( a->fmt == FMT_ZIP )  return ZipComment( a->zip );
+    if ( a->fmt == FMT_RAR )  return RarComment( a->rar );
+    if ( a->fmt == FMT_MSLZ ) return MslzComment( a->mslz );
     return NULL;
 }
 
@@ -1078,6 +1207,8 @@ void ArcClose( ArcFile *a )
     else if ( a->fmt == FMT_RAR )  RarClose( a->rar );
     else if ( a->fmt == FMT_RAR5 ) Rar5Close( a->rar5 );
     else if ( a->fmt == FMT_DISK ) DiskClose( a->disk );
+    else if ( a->fmt == FMT_CAB )  CabClose( a->cab );
+    else if ( a->fmt == FMT_MSLZ ) MslzClose( a->mslz );
     else                           ZipClose( a->zip );
     free( a );
 }
@@ -1097,6 +1228,8 @@ const char *ArcFormatName( ArcFile *a )
     case FMT_RAR:  return "RAR (2.x/3.x)";
     case FMT_RAR5: return "RAR5";
     case FMT_DISK: return DiskFsName( a->disk );   /* "FAT12" / "FAT16" */
+    case FMT_CAB:  return "Cabinet";
+    case FMT_MSLZ: return MslzFormatName( a->mslz );   /* "SZDD" / "KWAJ" */
     default:       return "?";
     }
 }
@@ -1110,7 +1243,9 @@ int ArcVolumeCount( ArcFile *a )
     case FMT_ZIP:  return ZipVolumeCount( a->zip );
     case FMT_RAR:  return RarVolumeCount( a->rar );
     case FMT_RAR5: return Rar5VolumeCount( a->rar5 );
-    default:       return 1;      /* a disk image is always one file */
+    case FMT_CAB:  return CabVolumeCount( a->cab );
+    default:       return 1;      /* a disk image is always one file, and so
+                                   * is a COMPRESS.EXE file */
     }
 }
 
@@ -1274,6 +1409,21 @@ const char *ArcUnsupportedHint( ArcFile *a )
                "long file names.\n"
                "Not supported: FAT32, NTFS, other filesystems, and disk-image "
                "container formats other than a raw sector dump.";
+    case FMT_CAB:
+        return "Some files in this cabinet use a compression type this "
+               "extractor does not support, and were skipped.  Everything "
+               "else was extracted.\n"
+               "Supported: stored, MSZIP, Quantum and LZX, cabinet sets "
+               "(files that carry on from one .cab into the next), and "
+               "cabinets inside self-extracting .exe files.\n"
+               "Not supported: any other compression type.";
+    case FMT_MSLZ:
+        return "This file was packed by COMPRESS.EXE with a method this "
+               "extractor does not support.\n"
+               "Supported: SZDD files (COMPRESS -r, as on the MS-DOS and "
+               "Windows 3.1 disks), and KWAJ files that are stored, XORed, "
+               "or packed with LZSS, LZSS + Huffman or MSZIP.\n"
+               "Not supported: any other KWAJ method.";
     default:
         return "This archive uses a feature, compression method, or encryption "
                "that this extractor does not support.";

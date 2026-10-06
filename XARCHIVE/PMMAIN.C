@@ -712,7 +712,7 @@ static void DoOpen( HWND hwnd )
     memset( &fd, 0, sizeof( fd ) );
     fd.cbSize   = sizeof( FILEDLG );
     fd.fl       = FDS_CENTER | FDS_OPEN_DIALOG;
-    fd.pszTitle = (PSZ)"Open Archive  (.7z .zip .rar .img .ima .imz .dsk)";
+    fd.pszTitle = (PSZ)"Open Archive  (.7z .zip .rar .cab .??_ .img .ima .imz .dsk)";
     strcpy( fd.szFullFile, "*" );
 
     if ( WinFileDlg( HWND_DESKTOP, hwnd, &fd ) == NULLHANDLE )
@@ -1306,7 +1306,15 @@ static void ArcOnDone( HWND hwnd, BOOL cancelled )
         break;
 
     case ARCJOB_TEST:
-        if ( rc == SZ_OK )
+        if ( rc == SZ_OK && ArcIntegrityNote( g_arc ) )
+        {
+            /* A cabinet or a COMPRESS.EXE file has no CRCs to have
+             * matched; the backend says what the test did check. */
+            sprintf( msg, "Integrity test passed.\n\n%.250s",
+                     ArcIntegrityNote( g_arc ) );
+            Say( hwnd, msg, MB_OK | MB_INFORMATION );
+        }
+        else if ( rc == SZ_OK )
             Say( hwnd, "Integrity test passed.\n\n"
                        "All files decoded and their CRCs matched.",
                  MB_OK | MB_INFORMATION );
