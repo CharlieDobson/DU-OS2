@@ -16,6 +16,8 @@
  *     FolderView=1
  *     AskShortNames=0
  *     GraphicsMode=0
+ *     CompressFormat=zip
+ *     CompressFolders=1
  *
  * FolderView is a DISPLAY setting: 1 browses the archive a folder at a time,
  * 0 lists every entry at once with its full stored path.  It is kept here
@@ -80,6 +82,15 @@ void ArcPrefSetAskShortNames( int on );
  * folder browsing ignores FolderView. */
 int  ArcPrefGraphics( void );
 void ArcPrefSetGraphics( int on );
+
+/* What the Compress dialog offers first, remembered from the last archive
+ * made: the format (1 = zip, 2 = 7z - ARC_CF_ZIP / ARC_CF_7Z in ARCCOMP.H)
+ * and whether folder names go in (1) or the archive is flat (0).  Stored as
+ * CompressFormat=zip|7z and CompressFolders=1|0. */
+int  ArcPrefCompressFormat( void );
+void ArcPrefSetCompressFormat( int fmt );
+int  ArcPrefCompressFolders( void );
+void ArcPrefSetCompressFolders( int on );
 
 /* Read the INI and apply every setting it holds.  A missing or unreadable
  * file is not an error - the built-in defaults simply stand. */

@@ -105,7 +105,9 @@ rem     selects the codepage-437 reading of a password's high bytes, which is
 rem     what an OS/2 text-mode user's keyboard produces.
 rem     CABARC/MSLZARC are the cabinet and COMPRESS.EXE (SZDD/KWAJ) backends,
 rem     MSZIPDEC/LZXDEC/QTMDEC the three cabinet decoders.  All shared.
-for %%F in (PMMAIN OS2PLAT COMPAT ARCFILE ARCPREF SZARC ZIPARC RARARC RAR3DEC RAR5ARC DISKARC LZMADEC CRC32 ARCCRYP AES SHA VOLIO NUMFMT CABARC MSLZARC MSZIPDEC LZXDEC QTMDEC) do (
+rem     ARCCOMP/ZIPWRITE/SZWRITE/DEFLENC/LZMAENC are the archive WRITER
+rem     (File > Compress), shared with the Win32s and DOS builds too.
+for %%F in (PMMAIN OS2PLAT COMPAT ARCFILE ARCPREF SZARC ZIPARC RARARC RAR3DEC RAR5ARC DISKARC LZMADEC CRC32 ARCCRYP AES SHA VOLIO NUMFMT CABARC MSLZARC MSZIPDEC LZXDEC QTMDEC ARCCOMP ZIPWRITE SZWRITE DEFLENC LZMAENC) do (
   wcc386 ..\%%F.C -bt=os2 -bm -otexan -zq -w4 -e25 -dAC_OEM_PASSWORDS -i=.. -i=..\RES -i=..\..\COMMON -i=%WATCOM%\H -i=%WATCOM%\H\OS2
   if errorlevel 1 goto failed
   if not exist %%F.obj goto failed
@@ -133,6 +135,7 @@ wlink sys os2v2_pm name XARCHIVE.EXE ^
        RARARC.obj,RAR3DEC.obj,RAR5ARC.obj,DISKARC.obj,LZMADEC.obj,CRC32.obj, ^
        ARCCRYP.obj,AES.obj,SHA.obj,VOLIO.obj,NUMFMT.obj, ^
        CABARC.obj,MSLZARC.obj,MSZIPDEC.obj,LZXDEC.obj,QTMDEC.obj, ^
+       ARCCOMP.obj,ZIPWRITE.obj,SZWRITE.obj,DEFLENC.obj,LZMAENC.obj, ^
        PMWORKER.obj
 if errorlevel 1 goto failed
 if not exist XARCHIVE.EXE goto failed

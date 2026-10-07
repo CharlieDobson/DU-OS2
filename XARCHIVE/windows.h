@@ -73,6 +73,13 @@ int  WideCharToMultiByte( unsigned cp, DWORD flags,
                           char *dst, int dstBytes,
                           const char *defChar, int *usedDef );
 
+/* The other way, for the names in a 7z the archive writer makes: each byte
+ * becomes the code point of the same value - the exact inverse of the
+ * Latin-1 mapping above, so a name goes out and comes back unchanged. */
+int  MultiByteToWideChar( unsigned cp, DWORD flags,
+                          const char *src, int srcLen,
+                          WCHAR *wdst, int wdstChars );
+
 BOOL SystemTimeToFileTime( const SYSTEMTIME *st, FILETIME *ft );
 BOOL FileTimeToSystemTime( const FILETIME *ft, SYSTEMTIME *st );
 BOOL FileTimeToLocalFileTime( const FILETIME *ft, FILETIME *lft );

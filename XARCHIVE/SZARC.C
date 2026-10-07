@@ -1357,8 +1357,20 @@ static UInt32 BcjX86Chunk( SzBcj *b, Byte *data, UInt32 size )
         {
             UInt32 d = p - pos;
             pos = p;
+            /* Ran off the end of what can be decided.  The history has to be
+             * aged by the bytes just skipped, exactly as it would have been
+             * had the scan gone on into the next call: the caller hands those
+             * last bytes back at the head of the next buffer, and the scan
+             * there measures its distance from THEM, not from the last E8/E9
+             * seen here.  Leaving the mask as it was decoded wrongly whenever
+             * an E8/E9 sat in the carried tail - rare at 32 KB a call, but
+             * measured: 3 to 36 wrong bytes per DLL at 517- and 4099-byte
+             * calls (2026-10-06, TOOLS\BCJTEST.C). */
             if ( p >= lim )
+            {
+                mask = ( d > 2 ) ? 0 : mask >> (unsigned)d;
                 break;
+            }
             if ( d > 2 )
                 mask = 0;
             else
@@ -2053,6 +2065,13 @@ static void ApplySzTime( const char *outPath, const SzEntry *e )
     SetFileMTime( outPath, &ft );
 }
 
+/* Then its attributes - after the time, which cannot be set on a file that
+ * is already read-only. */
+static void ApplySzAttr( const char *outPath, const SzEntry *e, int isDir )
+{
+    if ( e->hasAttrib ) SetFileDosAttr( outPath, e->attrib, isDir );
+}
+
 /* Create an empty file entry (no compressed data). */
 static int WriteEmptyEntry( const SzEntry *e, const char *destDir )
 {
@@ -2072,6 +2091,7 @@ static int WriteEmptyEntry( const SzEntry *e, const char *destDir )
     if ( !fout ) return SZ_ERR_WRITE;
     fclose( fout );
     ApplySzTime( outPath, e );
+    ApplySzAttr( outPath, e, 0 );
     return SZ_OK;
 }
 
@@ -2084,6 +2104,7 @@ static void WriteDirEntry( const SzEntry *e, const char *destDir )
     BuildPath( outPath, sizeof( outPath ), destDir, e->name, 1 );
     if ( ArcNameVerdict() != ARC_NAME_OK ) return;   /* "." makes no folder */
     MakeTree( outPath );
+    ApplySzAttr( outPath, e, 1 );
 }
 
 /*===========================================================================
@@ -2726,7 +2747,10 @@ static int SzSinkClose( SzSink *s )
     }
 
     if ( check && s->destDir )
+    {
         ApplySzTime( s->curPath, e );
+        ApplySzAttr( s->curPath, e, 0 );
+    }
 
     s->cur = -1;
     return 1;
@@ -3230,6 +3254,8 @@ const char *SzErrorText( int code )
     case SZ_ERR_VOLUME:     return "This archive is in several volumes and "
                                    "one of them is missing - copy the whole "
                                    "set to one place and open the first.";
+    case SZ_ERR_NOFILES:    return "No files to compress: nothing matched, or "
+                                   "everything that matched was excluded.";
     default:                return "Unknown error.";
     }
 }

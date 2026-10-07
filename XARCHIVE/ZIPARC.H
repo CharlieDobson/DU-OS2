@@ -24,6 +24,8 @@ typedef struct {
     int    methodCode;          /* 0 = stored, 8 = deflated                 */
     UInt16 modDate, modTime;    /* MS-DOS packed modification date/time     */
     UInt32 attrib;              /* external attributes (low byte = DOS bits) */
+    int    dosAttr;             /* 1 = made on DOS, OS/2 or Windows, so the
+                                   low byte of attrib means R/H/S/A         */
     int    isDir;               /* directory entry                          */
 } ZipEntry;
 

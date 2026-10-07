@@ -31,6 +31,8 @@ typedef struct {
     UInt32 mtimeLo, mtimeHi;    /* last-modified FILETIME (valid if hasMtime) */
     int    hasMtime;
     UInt32 attrib;              /* low byte = DOS attribute bits             */
+    int    dosAttr;             /* 1 = made on Windows; on Unix attrib is a
+                                   file mode instead                         */
     int    isDir;
 } Rar5Entry;
 

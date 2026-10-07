@@ -18,7 +18,9 @@
 #define INCL_DOSFILEMGR
 #define INCL_DOSERRORS
 #define INCL_DOSMISC          /* DosQuerySysInfo, for the memory budget */
+#define INCL_DOSDATETIME      /* DosGetDateTime, for the archive writer */
 #include <os2.h>
+#include <stdlib.h>
 
 #include "platform.h"    /* pulls in the local windows.h shim */
 
@@ -64,6 +66,48 @@ void SetFileMTime( const char *path, const FILETIME *ft )
     time = (WORD)( ( st.wHour << 11 ) |
                    ( st.wMinute << 5 ) | ( st.wSecond >> 1 ) );
     ApplyStamp( path, date, time );
+}
+
+/* Change only the attribute byte.  The dates and times go back as zero,
+ * which DosSetPathInfo reads as "leave this one as it is", and the directory
+ * bit never goes back at all: it is the file system's to set, not ours. */
+static void ApplyAttr( const char *path, ULONG attr, ULONG keep )
+{
+    FILESTATUS3 fs;
+
+    if ( DosQueryPathInfo( (PCSZ)path, FIL_STANDARD, &fs, sizeof( fs ) ) != 0 )
+        return;
+    memset( &fs.fdateCreation, 0, sizeof( FDATE ) );
+    memset( &fs.ftimeCreation, 0, sizeof( FTIME ) );
+    memset( &fs.fdateLastAccess, 0, sizeof( FDATE ) );
+    memset( &fs.ftimeLastAccess, 0, sizeof( FTIME ) );
+    memset( &fs.fdateLastWrite, 0, sizeof( FDATE ) );
+    memset( &fs.ftimeLastWrite, 0, sizeof( FTIME ) );
+    fs.attrFile = ( fs.attrFile & keep ) | attr;
+    DosSetPathInfo( (PCSZ)path, FIL_STANDARD, &fs, sizeof( fs ), 0 );
+}
+
+void SetFileDosAttr( const char *path, DWORD attr, int isDir )
+{
+    if ( isDir )
+    {
+        attr &= FILE_HIDDEN | FILE_SYSTEM;
+        if ( attr == 0 ) return;
+        ApplyAttr( path, attr, FILE_READONLY | FILE_ARCHIVED );
+    }
+    else
+        ApplyAttr( path, attr & ( FILE_READONLY | FILE_HIDDEN | FILE_SYSTEM |
+                                  FILE_ARCHIVED ), 0 );
+}
+
+void ClearFileAttr( const char *path )
+{
+    FILESTATUS3 fs;
+
+    if ( DosQueryPathInfo( (PCSZ)path, FIL_STANDARD, &fs, sizeof( fs ) ) != 0 )
+        return;
+    if ( !( fs.attrFile & ( FILE_READONLY | FILE_HIDDEN | FILE_SYSTEM ) ) ) return;
+    ApplyAttr( path, 0, FILE_ARCHIVED );
 }
 
 /*---- 8.3 filesystem probe (for ArcFsName's name mangling) -----------------
@@ -145,3 +189,107 @@ unsigned int Os2MemFree( void )
 int  IsModernShell( void )            { return 0; }
 void InitCtl3d( HINSTANCE hInst )     { (void)hInst; }
 void CleanupCtl3d( HINSTANCE hInst )  { (void)hInst; }
+
+/*---- Reading a folder (see PLATFORM.H) ------------------------------------ *
+ * OS/2 keeps local time in DOS-packed FDATE/FTIME, so the zip form drops
+ * straight out; the 7z form is that local time moved to UTC by the zone in
+ * DosGetDateTime (minutes WEST of UTC, 0xFFFF = not set, taken as UTC) -
+ * the inverse of COMPAT.C's FileTimeToLocalFileTime, which is what the
+ * extractor applies on the way back.
+ *--------------------------------------------------------------------------- */
+#define FIND_ALL ( FILE_READONLY | FILE_HIDDEN | FILE_SYSTEM | \
+                   FILE_DIRECTORY | FILE_ARCHIVED )
+
+typedef struct {
+    HDIR         hdir;
+    FILEFINDBUF3 fb;
+} PlatFindState;
+
+static void PlatFill( const FILEFINDBUF3 *fb, PlatFind *f )
+{
+    SYSTEMTIME st;
+    DATETIME   dt;
+    WORD       date, time;
+
+    strncpy( f->name, fb->achName, PLAT_NAME_MAX - 1 );
+    f->name[PLAT_NAME_MAX - 1] = '\0';
+    f->attr = (DWORD)( fb->attrFile & 0x3F );
+    f->size = ( fb->attrFile & FILE_DIRECTORY ) ? 0 : (DWORD)fb->cbFile;
+    f->tooBig = ( f->size >= 0x80000000UL );
+    memcpy( &date, &fb->fdateLastWrite, sizeof( WORD ) );
+    memcpy( &time, &fb->ftimeLastWrite, sizeof( WORD ) );
+    f->dosDate = date;
+    f->dosTime = time;
+
+    st.wYear   = (WORD)( ( ( date >> 9 ) & 0x7F ) + 1980 );
+    st.wMonth  = (WORD)( ( date >> 5 ) & 0x0F );
+    st.wDay    = (WORD)( date & 0x1F );
+    st.wHour   = (WORD)( ( time >> 11 ) & 0x1F );
+    st.wMinute = (WORD)( ( time >> 5 ) & 0x3F );
+    st.wSecond = (WORD)( ( time & 0x1F ) * 2 );
+    st.wMilliseconds = 0;
+    st.wDayOfWeek    = 0;
+    if ( st.wMonth < 1 ) st.wMonth = 1;
+    if ( st.wDay < 1 )   st.wDay = 1;
+    SystemTimeToFileTime( &st, &f->mtime );
+
+    if ( DosGetDateTime( &dt ) == NO_ERROR && (USHORT)dt.timezone != 0xFFFF )
+    {
+        unsigned long long t = ( (unsigned long long)f->mtime.dwHighDateTime << 32 )
+                             | f->mtime.dwLowDateTime;
+        t += (long long)(SHORT)dt.timezone * 60LL * 10000000LL;
+        f->mtime.dwLowDateTime  = (DWORD)( t & 0xFFFFFFFFULL );
+        f->mtime.dwHighDateTime = (DWORD)( t >> 32 );
+    }
+}
+
+void *PlatFindFirst( const char *pattern, PlatFind *f )
+{
+    PlatFindState *s = (PlatFindState *)malloc( sizeof( PlatFindState ) );
+    ULONG count = 1;
+
+    if ( !s ) return NULL;
+    s->hdir = HDIR_CREATE;
+    if ( DosFindFirst( (PCSZ)pattern, &s->hdir, FIND_ALL, &s->fb,
+                       sizeof( s->fb ), &count, FIL_STANDARD ) != NO_ERROR ||
+         count == 0 )
+    {
+        free( s );
+        return NULL;
+    }
+    PlatFill( &s->fb, f );
+    return s;
+}
+
+int PlatFindNext( void *h, PlatFind *f )
+{
+    PlatFindState *s = (PlatFindState *)h;
+    ULONG count = 1;
+
+    if ( DosFindNext( s->hdir, &s->fb, sizeof( s->fb ), &count ) != NO_ERROR ||
+         count == 0 )
+        return 0;
+    PlatFill( &s->fb, f );
+    return 1;
+}
+
+void PlatFindClose( void *h )
+{
+    PlatFindState *s = (PlatFindState *)h;
+    if ( !s ) return;
+    DosFindClose( s->hdir );
+    free( s );
+}
+
+/* Physical memory not locked down by the system: QSV_TOTPHYSMEM less
+ * QSV_TOTRESMEM.  Not "free" in the strict sense - OS/2 will page other
+ * programs out to make room - but it is the most that a compression job can
+ * touch without the swapper becoming part of every match it looks up. */
+DWORD PlatPhysFree( void )
+{
+    ULONG v[2];
+
+    if ( DosQuerySysInfo( QSV_TOTPHYSMEM, QSV_TOTRESMEM, v, sizeof( v ) ) != NO_ERROR )
+        return 0;
+    return ( v[0] > v[1] ) ? (DWORD)( v[0] - v[1] ) : 0;
+}

@@ -2,7 +2,9 @@
  * PMMAIN.C  -  XArchive for OS/2 2.x / Warp (32-bit Presentation Manager)
  *
  * Front end only: open an archive, list its contents, extract all of it or a
- * selection, test its integrity, summarise it.  Every format backend
+ * selection, test its integrity, summarise it - and, with nothing open, make
+ * a new .zip or .7z from files and folders (File > Compress; the work is
+ * ARCCOMP.H's, run on the worker like an extraction).  Every format backend
  * (ARCFILE / SZARC / ZIPARC / RARARC / RAR3DEC / RAR5ARC / DISKARC /
  * LZMADEC / CRC32) is the Win32s source BYTE-FOR-BYTE, reading its handful of
  * Win32 calls out of the local windows.h shim.  Those files must stay
@@ -52,6 +54,7 @@
 
 #include "arcdefs.h"
 #include "arcfile.h"
+#include "arccomp.h"   /* making archives: File > Compress */
 #include "arcpref.h"
 #include "arccryp.h"   /* AC_MAX_PW - the password buffer size */
 #include "numfmt.h"    /* digit grouping in this machine's notation */
@@ -99,13 +102,13 @@ static ArcFile *g_arc       = NULL;
 static char     g_arcPath[CCHMAXPATH] = { 0 };
 
 /* Toolbar: the button IDs are the menu command IDs, so WM_COMMAND is shared. */
-#define TB_COUNT 5
+#define TB_COUNT 6
 static const ULONG g_tbId[TB_COUNT] = {
-    IDM_FILE_OPEN, IDM_ARCHIVE_INFO, IDM_ARCHIVE_TEST,
+    IDM_FILE_OPEN, IDM_FILE_COMPRESS, IDM_ARCHIVE_INFO, IDM_ARCHIVE_TEST,
     IDM_ARCHIVE_EXTRACT, IDM_FILE_EXIT
 };
 static const char *g_tbText[TB_COUNT] = {
-    "~Open", "Info", "Test", "Extract", "Exit"
+    "~Open", "Compress", "Info", "Test", "Extract", "Exit"
 };
 static HWND g_hwndBtn[TB_COUNT];
 static LONG g_btnW = 72, g_btnH = 26, g_tbH = 34;
@@ -145,6 +148,7 @@ static char          g_progName[CCHMAXPATH + 1];
 #define ARCJOB_EXTRACT      1
 #define ARCJOB_TEST         2
 #define ARCJOB_OPEN         3
+#define ARCJOB_COMPRESS     4
 
 #define TID_ARCPROGRESS     1
 #define ARC_TIMER_MS        150
@@ -183,6 +187,10 @@ static struct {
                                         /*   HEADER, which cannot even be   */
                                         /*   listed without one             */
     ArcFile *openArc;                   /* ARCJOB_OPEN result               */
+    ArcCompJob *comp;                   /* ARCJOB_COMPRESS: the job, set up */
+                                        /*   on this thread, run on the     */
+                                        /*   worker, freed in ArcOnDone     */
+    char     compArchive[CCHMAXPATH];   /* ARCJOB_COMPRESS: where it goes   */
     int      rc;
 } g_job;
 
@@ -202,9 +210,11 @@ static char g_extractPath[CCHMAXPATH];
 static char g_newFolderName[CCHMAXPATH];
 static char g_extractTitle[64] = "Extract To";
 
-/* Folder picker: suggested dir in / chosen dir out, plus the CWD to restore. */
+/* Folder picker: suggested dir in / chosen dir out, plus the CWD to restore,
+ * and a caption for this use (NULL keeps the resource's). */
 static char g_folderPick[CCHMAXPATH];
 static char g_fpSaveCwd[CCHMAXPATH];
+static const char *g_fpTitle = NULL;
 
 /* A path handed over by a drop, opened once the drag transaction is done. */
 static char g_dropPath[CCHMAXPATH];
@@ -256,6 +266,11 @@ static BOOL NewFolderDlg   ( HWND owner, const char *parentPath,
 static BOOL CreateDirTree  ( const char *path );
 static void UpdateToolbarState( void );
 static void PopulateList   ( void );
+static int  CompressProgress( void *user, int i, int n, const char *name,
+                              UInt32 doneKB, UInt32 totalKB );
+static void CompressReport ( HWND hwnd, ArcCompJob *j, int rc );
+static void DoCompress     ( HWND hwnd );
+MRESULT EXPENTRY CompressDlgProc( HWND, ULONG, MPARAM, MPARAM );
 
 /*===========================================================================
  * Small helpers
@@ -914,6 +929,26 @@ static int ExtractProgress( void *user, int fileIndex, int fileCount,
     return PmWorkerCancelled( &g_worker ) ? 0 : 1;
 }
 
+/* Progress for a compression job.  WORKER THREAD, like ExtractProgress:
+ * while the files are still being found fileCount is -1 and there is no
+ * total yet, so the line says so and the bar waits; after that the bar is
+ * measured in kilobytes read, which is what takes the time. */
+static int CompressProgress( void *user, int i, int n, const char *name,
+                             UInt32 doneKB, UInt32 totalKB )
+{
+    (void)user;
+    if ( n < 0 )
+    {
+        char line[CCHMAXPATH + 32];
+        sprintf( line, "Scanning %d: %.200s", i + 1, name ? name : "" );
+        ProgressSet( 0, line );
+    }
+    else
+        ProgressSet( totalKB ? (LONG)( (double)doneKB * 100.0 / (double)totalKB ) : 0,
+                     name );
+    return PmWorkerCancelled( &g_worker ) ? 0 : 1;
+}
+
 /* Overwrite prompt hook (ArcOverwriteFn), registered once in main().
  * WORKER THREAD - no PM calls here.  Park the path where the UI thread's
  * dialog can read it, then block in PmWorkerAsk until ArcOnAsk answers.
@@ -1112,6 +1147,16 @@ static void ArcWorkerBody( void *arg )
                               g_job.openPw[0] ? g_job.openPw : NULL,
                               &g_job.openArc );
         break;
+
+    case ARCJOB_COMPRESS:
+        /* Finding the files and writing the archive are both disk work, so
+           both happen here; the dialog that set the job up ran before. */
+        g_job.rc = ArcCompScan( g_job.comp, g_job.compArchive,
+                                CompressProgress, NULL );
+        if ( g_job.rc == SZ_OK )
+            g_job.rc = ArcCompRun( g_job.comp, g_job.compArchive,
+                                   CompressProgress, NULL );
+        break;
     }
 
     if ( g_job.sel )
@@ -1273,6 +1318,17 @@ static void ArcOnDone( HWND hwnd, BOOL cancelled )
 
     switch ( kind )
     {
+    case ARCJOB_COMPRESS:
+        CompressReport( hwnd, g_job.comp, rc );
+        ArcCompFree( g_job.comp );
+        g_job.comp = NULL;
+        _heapmin();
+        /* Then open it: what was just made is what the user will look at
+         * next.  The worker is free again - this is the same restart the
+         * encrypted-header retry above makes. */
+        if ( rc == SZ_OK ) OpenArchiveFile( hwnd, g_job.compArchive );
+        break;
+
     case ARCJOB_OPEN:
         if ( rc != SZ_OK )
         {
@@ -1576,6 +1632,7 @@ MRESULT EXPENTRY FolderPickProc( HWND hDlg, ULONG msg, MPARAM mp1, MPARAM mp2 )
     switch ( msg )
     {
     case WM_INITDLG:
+        if ( g_fpTitle ) WinSetWindowText( hDlg, (PCSZ)g_fpTitle );
         GetCwd( g_fpSaveCwd, sizeof( g_fpSaveCwd ) );
         if ( g_folderPick[0] )
             SetCwd( g_folderPick );               /* start in the suggestion */
@@ -1751,6 +1808,450 @@ static void DoExtractTo( HWND hwnd )
        function now, so the selection cannot be freed on the way out. */
     if ( count > 0 ) RunExtraction( hwnd, sel, count, g_extractPath );
     else             RunExtraction( hwnd, NULL, 0, g_extractPath );
+}
+
+/*===========================================================================
+ * Compress: files and folders into a new .zip or .7z
+ *
+ * The same dialog as the Win32s build's, control for control: the list
+ * (Add Files - several at once - Add Folder, Remove), the archive's name and
+ * Browse for its folder, the format, folder names or flat, and what to leave
+ * out.  The job is set up here on the UI thread and handed to the worker as
+ * ARCJOB_COMPRESS; ArcOnDone reports it and frees it.  The format and the
+ * folder-names choice are remembered in XARCHIVE.INI.
+ *===========================================================================*/
+static char **g_compItems = NULL;
+static int    g_compCount = 0;
+static char   g_compArchive[CCHMAXPATH];
+static char   g_compExclude[CCHMAXPATH * 2];
+static int    g_compFmt   = ARC_CF_ZIP;
+static int    g_compPaths = 1;
+
+static void FreeCompItems( void )
+{
+    int i;
+    for ( i = 0; i < g_compCount; i++ ) free( g_compItems[i] );
+    free( g_compItems );
+    g_compItems = NULL;
+    g_compCount = 0;
+}
+
+static BOOL BrowseForFolderTitled( HWND owner, const char *title,
+                                   char *dir, int dirSize )
+{
+    BOOL ok;
+    g_fpTitle = title;
+    ok = BrowseForFolder( owner, dir, dirSize );
+    g_fpTitle = NULL;
+    return ok;
+}
+
+/* The format's extension on 'path' - unless it ends in some other extension,
+ * which the user typed on purpose. */
+static void CompMatchExtension( char *path, int size, int fmt )
+{
+    char *leaf = (char *)FileNamePart( path );
+    char *dot  = strrchr( leaf, '.' );
+    const char *want = ( fmt == ARC_CF_7Z ) ? ".7z" : ".zip";
+
+    if ( dot && stricmp( dot, ".7z" ) != 0 && stricmp( dot, ".zip" ) != 0 ) return;
+    if ( dot ) *dot = '\0';
+    if ( !leaf[0] ) return;
+    if ( (int)( strlen( path ) + strlen( want ) ) < size ) strcat( path, want );
+}
+
+static int CompFormatChecked( HWND hDlg )
+{
+    return WinQueryButtonCheckstate( hDlg, IDC_CP_7Z ) ? ARC_CF_7Z : ARC_CF_ZIP;
+}
+
+/* One item in the list (once), and an archive name suggested from the first
+ * item if the field is still empty. */
+static void CompAddItem( HWND hDlg, const char *path )
+{
+    HWND lb = WinWindowFromID( hDlg, IDC_CP_LIST );
+    LONG found = (LONG)WinSendMsg( lb, LM_SEARCHSTRING,
+                                   MPFROM2SHORT( 0, LIT_FIRST ), MPFROMP( path ) );
+
+    if ( found != LIT_NONE && found != LIT_ERROR ) return;
+    WinSendMsg( lb, LM_INSERTITEM, MPFROMSHORT( LIT_END ), MPFROMP( path ) );
+
+    if ( WinQueryDlgItemTextLength( hDlg, IDC_CP_ARCHIVE ) == 0 )
+    {
+        char  arc[CCHMAXPATH];
+        char *leaf, *dot;
+
+        strncpy( arc, path, sizeof( arc ) - 1 );
+        arc[sizeof( arc ) - 1] = '\0';
+        leaf = (char *)FileNamePart( arc );
+        if ( !IsDir( path ) )                 /* a file loses its extension */
+        {
+            dot = strrchr( leaf, '.' );
+            if ( dot && dot != leaf ) *dot = '\0';
+        }
+        if ( !leaf[0] ) strcat( arc, "Archive" );
+        CompMatchExtension( arc, sizeof( arc ), CompFormatChecked( hDlg ) );
+        WinSetDlgItemText( hDlg, IDC_CP_ARCHIVE, (PCSZ)arc );
+    }
+}
+
+/* Add Files: the standard file dialog with several allowed at once. */
+static void CompAddFiles( HWND hDlg )
+{
+    FILEDLG fd;
+    ULONG   i;
+
+    memset( &fd, 0, sizeof( fd ) );
+    fd.cbSize   = sizeof( fd );
+    fd.fl       = FDS_CENTER | FDS_OPEN_DIALOG | FDS_MULTIPLESEL;
+    fd.pszTitle = (PSZ)"Add Files";
+    strcpy( fd.szFullFile, "*" );
+
+    if ( WinFileDlg( HWND_DESKTOP, hDlg, &fd ) == NULLHANDLE ||
+         fd.lReturn != DID_OK )
+        return;
+
+    if ( fd.ulFQFCount >= 1 && fd.papszFQFilename )
+    {
+        for ( i = 0; i < fd.ulFQFCount; i++ )
+            CompAddItem( hDlg, (const char *)( *fd.papszFQFilename )[i] );
+    }
+    else if ( fd.szFullFile[0] )
+        CompAddItem( hDlg, fd.szFullFile );
+    if ( fd.papszFQFilename ) WinFreeFileDlgList( fd.papszFQFilename );
+}
+
+MRESULT EXPENTRY CompressDlgProc( HWND hDlg, ULONG msg, MPARAM mp1, MPARAM mp2 )
+{
+    switch ( msg )
+    {
+    case WM_INITDLG:
+        WinCheckButton( hDlg, ( g_compFmt == ARC_CF_7Z ) ? IDC_CP_7Z : IDC_CP_ZIP, 1 );
+        WinCheckButton( hDlg, IDC_CP_PATHS, g_compPaths ? 1 : 0 );
+        /* An ENTRYFIELD stops at 32 characters unless told otherwise. */
+        WinSendDlgItemMsg( hDlg, IDC_CP_ARCHIVE, EM_SETTEXTLIMIT,
+                           MPFROMSHORT( CCHMAXPATH - 8 ), 0 );
+        WinSendDlgItemMsg( hDlg, IDC_CP_EXCLUDE, EM_SETTEXTLIMIT,
+                           MPFROMSHORT( sizeof( g_compExclude ) - 1 ), 0 );
+        WinSetDlgItemText( hDlg, IDC_CP_EXCLUDE, (PCSZ)g_compExclude );
+        return (MRESULT)FALSE;
+
+    case WM_CONTROL:
+        /* The extension follows the format. */
+        if ( ( SHORT1FROMMP( mp1 ) == IDC_CP_ZIP || SHORT1FROMMP( mp1 ) == IDC_CP_7Z ) &&
+             SHORT2FROMMP( mp1 ) == BN_CLICKED )
+        {
+            char cur[CCHMAXPATH];
+            WinQueryDlgItemText( hDlg, IDC_CP_ARCHIVE, sizeof( cur ), (PSZ)cur );
+            if ( cur[0] )
+            {
+                CompMatchExtension( cur, sizeof( cur ),
+                    ( SHORT1FROMMP( mp1 ) == IDC_CP_7Z ) ? ARC_CF_7Z : ARC_CF_ZIP );
+                WinSetDlgItemText( hDlg, IDC_CP_ARCHIVE, (PCSZ)cur );
+            }
+            return (MRESULT)FALSE;
+        }
+        break;
+
+    case WM_COMMAND:
+        switch ( SHORT1FROMMP( mp1 ) )
+        {
+        case IDC_CP_ADDFILES:
+            CompAddFiles( hDlg );
+            return (MRESULT)FALSE;
+
+        case IDC_CP_ADDFOLDER:
+        {
+            char dir[CCHMAXPATH];
+            GetCwd( dir, sizeof( dir ) );
+            if ( BrowseForFolderTitled( hDlg, "Add a Folder", dir, sizeof( dir ) ) )
+                CompAddItem( hDlg, dir );
+            return (MRESULT)FALSE;
+        }
+
+        case IDC_CP_REMOVE:
+        {
+            /* Collect the selection first: deleting while walking it would
+             * move the items still to be found. */
+            HWND  lb = WinWindowFromID( hDlg, IDC_CP_LIST );
+            SHORT idx[256];
+            int   n = 0;
+            LONG  s = LIT_FIRST;
+            while ( n < 256 )
+            {
+                s = (LONG)WinSendMsg( lb, LM_QUERYSELECTION, MPFROMSHORT( (SHORT)s ), MPVOID );
+                if ( s == LIT_NONE ) break;
+                idx[n++] = (SHORT)s;
+            }
+            while ( n > 0 )
+                WinSendMsg( lb, LM_DELETEITEM, MPFROMSHORT( idx[--n] ), MPVOID );
+            return (MRESULT)FALSE;
+        }
+
+        case IDC_CP_BROWSE:
+        {
+            char cur[CCHMAXPATH], dir[CCHMAXPATH], *leaf;
+            WinQueryDlgItemText( hDlg, IDC_CP_ARCHIVE, sizeof( cur ), (PSZ)cur );
+            strcpy( dir, cur );
+            leaf = (char *)FileNamePart( dir );
+            *leaf = '\0';
+            if ( !dir[0] ) GetCwd( dir, sizeof( dir ) );
+            if ( BrowseForFolderTitled( hDlg, "Save the Archive In", dir, sizeof( dir ) ) )
+            {
+                const char *name = FileNamePart( cur );
+                size_t n = strlen( dir );
+                if ( n && dir[n - 1] != '\\' && n < sizeof( dir ) - 1 ) strcat( dir, "\\" );
+                if ( strlen( dir ) + strlen( name[0] ? name : "Archive" ) < sizeof( dir ) )
+                    strcat( dir, name[0] ? name : "Archive" );
+                CompMatchExtension( dir, sizeof( dir ), CompFormatChecked( hDlg ) );
+                WinSetDlgItemText( hDlg, IDC_CP_ARCHIVE, (PCSZ)dir );
+            }
+            return (MRESULT)FALSE;
+        }
+
+        case IDC_CP_EXCLFILE:
+        {
+            FILEDLG fd;
+            char    cur[CCHMAXPATH * 2];
+            memset( &fd, 0, sizeof( fd ) );
+            fd.cbSize   = sizeof( fd );
+            fd.fl       = FDS_CENTER | FDS_OPEN_DIALOG;
+            fd.pszTitle = (PSZ)"Exclusion List";
+            strcpy( fd.szFullFile, "*.txt" );
+            if ( WinFileDlg( HWND_DESKTOP, hDlg, &fd ) == NULLHANDLE ||
+                 fd.lReturn != DID_OK )
+                return (MRESULT)FALSE;
+            WinQueryDlgItemText( hDlg, IDC_CP_EXCLUDE, sizeof( cur ), (PSZ)cur );
+            if ( strlen( cur ) + strlen( fd.szFullFile ) + 2 < sizeof( cur ) )
+            {
+                if ( cur[0] ) strcat( cur, ";" );
+                strcat( cur, "@" );
+                strcat( cur, fd.szFullFile );
+                WinSetDlgItemText( hDlg, IDC_CP_EXCLUDE, (PCSZ)cur );
+            }
+            return (MRESULT)FALSE;
+        }
+
+        case DID_OK:
+        {
+            HWND lb = WinWindowFromID( hDlg, IDC_CP_LIST );
+            int  n = (int)(LONG)WinSendMsg( lb, LM_QUERYITEMCOUNT, MPVOID, MPVOID ), i;
+
+            WinQueryDlgItemText( hDlg, IDC_CP_ARCHIVE, sizeof( g_compArchive ),
+                                 (PSZ)g_compArchive );
+            if ( n <= 0 )
+            {
+                Say( hDlg, "Add the files and folders to compress first.",
+                     MB_OK | MB_INFORMATION );
+                return (MRESULT)FALSE;
+            }
+            if ( !g_compArchive[0] )
+            {
+                Say( hDlg, "Give the archive a name.", MB_OK | MB_INFORMATION );
+                return (MRESULT)FALSE;
+            }
+            g_compFmt   = CompFormatChecked( hDlg );
+            g_compPaths = WinQueryButtonCheckstate( hDlg, IDC_CP_PATHS ) ? 1 : 0;
+            {
+                /* A name saying .7z or .zip has the last word on the format;
+                 * one with no extension gets the format's. */
+                const char *dot = strrchr( FileNamePart( g_compArchive ), '.' );
+                if ( dot && !stricmp( dot, ".7z" ) )       g_compFmt = ARC_CF_7Z;
+                else if ( dot && !stricmp( dot, ".zip" ) ) g_compFmt = ARC_CF_ZIP;
+                else if ( !dot ) CompMatchExtension( g_compArchive,
+                                                     sizeof( g_compArchive ), g_compFmt );
+            }
+            WinQueryDlgItemText( hDlg, IDC_CP_EXCLUDE, sizeof( g_compExclude ),
+                                 (PSZ)g_compExclude );
+
+            FreeCompItems();
+            g_compItems = (char **)malloc( (size_t)n * sizeof( char * ) );
+            if ( !g_compItems ) { WinDismissDlg( hDlg, DID_CANCEL ); return (MRESULT)FALSE; }
+            for ( i = 0; i < n; i++ )
+            {
+                LONG  len = (LONG)WinSendMsg( lb, LM_QUERYITEMTEXTLENGTH,
+                                              MPFROMSHORT( (SHORT)i ), MPVOID );
+                char *s = (char *)malloc( (size_t)( len > 0 ? len : 0 ) + 1 );
+                if ( !s ) break;
+                WinSendMsg( lb, LM_QUERYITEMTEXT,
+                            MPFROM2SHORT( (SHORT)i, (SHORT)( len + 1 ) ), MPFROMP( s ) );
+                g_compItems[g_compCount++] = s;
+            }
+            WinDismissDlg( hDlg, DID_OK );
+            return (MRESULT)FALSE;
+        }
+
+        case DID_CANCEL:
+            WinDismissDlg( hDlg, DID_CANCEL );
+            return (MRESULT)FALSE;
+        }
+        break;
+    }
+    return WinDefDlgProc( hDlg, msg, mp1, mp2 );
+}
+
+/* What happened, in words - including anything left out: a file missing from
+ * a backup is a file the user believes they still have.  UI THREAD. */
+static void CompressReport( HWND hwnd, ArcCompJob *j, int rc )
+{
+    char msg[CCHMAXPATH * 2 + 768];
+    char b1[NUM_FMT_MAX], b2[NUM_FMT_MAX];
+
+    if ( !j ) return;
+    if ( rc == SZ_OK )
+    {
+        UInt32 in = ArcCompInBytes( j ), out = ArcCompOutBytes( j );
+        int    pct = in ? (int)( (double)out * 100.0 / (double)in ) : 100;
+        int    skipped = ArcCompSkipped( j );
+
+        sprintf( msg, "%s holds %d file%s.\n\n%s bytes uncompressed\n"
+                      "%s bytes compressed (%d%%).",
+                 FileNamePart( g_job.compArchive ), ArcCompFiles( j ),
+                 ( ArcCompFiles( j ) == 1 ) ? "" : "s",
+                 NumFmt( in, b1 ), NumFmt( out, b2 ), pct );
+        if ( ArcCompDictSize( j ) >= 1024UL * 1024 )
+            sprintf( msg + strlen( msg ),
+                     "\n\nExtracting it will need about %lu MB of memory.",
+                     (unsigned long)( ArcCompDictSize( j ) / ( 1024UL * 1024 ) ) );
+        if ( skipped )
+        {
+            sprintf( msg + strlen( msg ), "\n\n%d file%s left out:", skipped,
+                     ( skipped == 1 ) ? " was" : "s were" );
+            if ( ArcCompDuplicates( j ) )
+                sprintf( msg + strlen( msg ), "\n    %d with a name already in it",
+                         ArcCompDuplicates( j ) );
+            if ( ArcCompUnreadable( j ) )
+                sprintf( msg + strlen( msg ), "\n    %d that could not be read",
+                         ArcCompUnreadable( j ) );
+            if ( ArcCompTooLong( j ) )
+                sprintf( msg + strlen( msg ), "\n    %d with a name too long",
+                         ArcCompTooLong( j ) );
+            if ( ArcCompTooBig( j ) )
+                sprintf( msg + strlen( msg ), "\n    %d of 2 GB or more",
+                         ArcCompTooBig( j ) );
+            sprintf( msg + strlen( msg ), "\nThe first was:\n%.250s",
+                     ArcCompProblem( j ) );
+        }
+        Say( hwnd, msg, MB_OK | ( skipped ? MB_ICONEXCLAMATION : MB_INFORMATION ) );
+        return;
+    }
+
+    switch ( rc )
+    {
+    case SZ_ERR_CANCEL:
+        strcpy( msg, "Compression cancelled.  Nothing was written." );
+        break;
+    case SZ_ERR_NOFILES:
+        if ( ArcCompMissing( j ) )
+            sprintf( msg, "Nothing to compress:\n\n%.250s\n\nwas not found.",
+                     ArcCompProblem( j ) );
+        else
+            strcpy( msg, "Nothing to compress: everything was excluded." );
+        break;
+    case SZ_ERR_OPEN:
+        sprintf( msg, "Cannot read the exclusion list:\n\n%.250s",
+                 ArcCompProblem( j ) );
+        break;
+    case SZ_ERR_READ:
+        sprintf( msg, "A file could not be read part way through:\n\n%.250s\n\n"
+                      "Nothing was written.", ArcCompProblem( j ) );
+        break;
+    case SZ_ERR_WRITE:
+        sprintf( msg, "Cannot write\n\n%.250s\n\nThe disk may be full or "
+                      "write-protected.  Nothing was written.",
+                 g_job.compArchive );
+        break;
+    case SZ_ERR_TOOBIG:
+        strcpy( msg, "Too much for one archive.  A zip holds at most 65,535 "
+                     "entries, and XArchive writes archives of up to 2 GB." );
+        break;
+    case SZ_ERR_MEMORY:
+    case SZ_ERR_NORAM:
+        strcpy( msg, "Not enough memory to compress.  A zip needs about "
+                     "300 KB.  A 7-Zip archive needs at least 1.5 MB, and uses "
+                     "a bigger dictionary when there is more." );
+        break;
+    default:
+        sprintf( msg, "Compression failed:\n\n%s", ArcErrorText( rc ) );
+        break;
+    }
+    Say( hwnd, msg, MB_OK | MB_ICONEXCLAMATION );
+}
+
+static void DoCompress( HWND hwnd )
+{
+    ArcCompJob *j;
+    int         i, rc;
+    FILESTATUS3 fs;
+
+    if ( g_arc )
+    {
+        Say( hwnd, "Compress makes a new archive from files on the disk.  "
+                   "Close this archive first (File > Close).",
+             MB_OK | MB_INFORMATION );
+        return;
+    }
+    if ( ArcBusy() )
+    {
+        Say( hwnd, "Another operation is still running.", MB_OK | MB_INFORMATION );
+        return;
+    }
+
+    g_compFmt   = ArcPrefCompressFormat();
+    g_compPaths = ArcPrefCompressFolders();
+    FreeCompItems();
+    if ( WinDlgBox( HWND_DESKTOP, hwnd, CompressDlgProc, NULLHANDLE,
+                    IDD_COMPRESS, NULL ) != DID_OK || g_compCount == 0 )
+    {
+        FreeCompItems();
+        return;
+    }
+    ArcPrefSetCompressFormat( g_compFmt );
+    ArcPrefSetCompressFolders( g_compPaths );
+    ArcPrefSave();
+
+    /* Replacing an archive is the user's call.  Nothing is lost until the
+     * new one is complete - but then the old one is gone. */
+    if ( DosQueryPathInfo( (PCSZ)g_compArchive, FIL_STANDARD, &fs, sizeof( fs ) ) == 0 )
+    {
+        char q[CCHMAXPATH + 64];
+        sprintf( q, "%s already exists.\n\nReplace it?", g_compArchive );
+        if ( Say( hwnd, q, MB_YESNO | MB_QUERY ) != MBID_YES )
+        {
+            FreeCompItems();
+            return;
+        }
+    }
+
+    j = ArcCompCreate();
+    if ( !j )
+    {
+        Say( hwnd, "Out of memory.", MB_OK | MB_ICONEXCLAMATION );
+        FreeCompItems();
+        return;
+    }
+    ArcCompSetFormat( j, g_compFmt );
+    ArcCompSetPaths( j, g_compPaths );
+    rc = ArcCompExclude( j, g_compExclude );
+    for ( i = 0; i < g_compCount && rc == SZ_OK; i++ )
+        rc = ArcCompAdd( j, g_compItems[i] );
+    FreeCompItems();
+
+    strncpy( g_job.compArchive, g_compArchive, sizeof( g_job.compArchive ) - 1 );
+    g_job.compArchive[sizeof( g_job.compArchive ) - 1] = '\0';
+    if ( rc != SZ_OK )
+    {
+        CompressReport( hwnd, j, rc );
+        ArcCompFree( j );
+        return;
+    }
+
+    g_job.comp = j;
+    if ( !ArcStartJob( hwnd, ARCJOB_COMPRESS, "Compressing", "Compressing:", TRUE ) )
+    {
+        ArcCompFree( j );
+        g_job.comp = NULL;
+    }
 }
 
 /*===========================================================================
@@ -2077,6 +2578,9 @@ static void UpdateToolbarState( void )
              g_tbId[i] == IDM_ARCHIVE_TEST ||
              g_tbId[i] == IDM_ARCHIVE_EXTRACT )
             WinEnableWindow( g_hwndBtn[i], have );
+        /* the other side: an archive is made with none open */
+        else if ( g_tbId[i] == IDM_FILE_COMPRESS )
+            WinEnableWindow( g_hwndBtn[i], (BOOL)!have );
     }
 }
 
@@ -2267,7 +2771,10 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
         BOOL have     = ( g_arc != NULL );
 
         if ( SHORT1FROMMP( mp1 ) == IDM_FILE )
+        {
             MenuEnable( hwndMenu, IDM_FILE_CLOSE, have );
+            MenuEnable( hwndMenu, IDM_FILE_COMPRESS, (BOOL)!have );
+        }
         else if ( SHORT1FROMMP( mp1 ) == IDM_ARCHIVE )
         {
             MenuEnable( hwndMenu, IDM_ARCHIVE_EXTRACT, have );
@@ -2296,6 +2803,9 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
             CloseArchive();
             UpdateTitle();
             UpdateToolbarState();
+            break;
+        case IDM_FILE_COMPRESS:
+            DoCompress( hwnd );
             break;
         case IDM_ARCHIVE_EXTRACT:
             DoExtractTo( hwnd );

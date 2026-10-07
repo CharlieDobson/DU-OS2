@@ -77,6 +77,8 @@ UInt32 ArcMaxDictSize( void )             { return 32UL * 1024 * 1024; }
 UInt32 ArcMaxBufferSize( void )           { return 32UL * 1024 * 1024; }
 void   SetFileMTime( const char *path, const FILETIME *ft )
 { (void)path; (void)ft; }
+void   SetFileDosAttr( const char *path, DWORD attr, int isDir )
+{ (void)path; (void)attr; (void)isDir; }
 
 static int g_fail = 0;
 

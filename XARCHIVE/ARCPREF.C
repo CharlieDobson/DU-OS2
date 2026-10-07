@@ -104,8 +104,21 @@ static int IsKnownKey( const char *line )
            KeyIs( line, "FolderView" )     ||
            KeyIs( line, "AskShortNames" )  ||
            KeyIs( line, "GraphicsMode" )   ||
+           KeyIs( line, "CompressFormat" ) ||
+           KeyIs( line, "CompressFolders" )||
            KeyIs( line, "MemoryLimitMB" );      /* retired 2026-09-06 */
 }
+
+/* Making an archive (see ARCPREF.H): what the Compress dialog offers first.
+ * Both are remembered from the last archive made, because the second archive
+ * of an afternoon is nearly always made the same way as the first. */
+static int g_compressFormat  = 1;     /* ARC_CF_ZIP */
+static int g_compressFolders = 1;
+
+int  ArcPrefCompressFormat( void )       { return g_compressFormat; }
+void ArcPrefSetCompressFormat( int fmt ) { g_compressFormat = ( fmt == 2 ) ? 2 : 1; }
+int  ArcPrefCompressFolders( void )      { return g_compressFolders; }
+void ArcPrefSetCompressFolders( int on ) { g_compressFolders = on ? 1 : 0; }
 
 /* Display setting with nowhere else to live (see ARCPREF.H). */
 static int g_folderView = 1;
@@ -172,6 +185,17 @@ void ArcPrefLoad( void )
             const char *v = ValueOf( p );
             g_graphics = ( *v == '1' ) ? 1 : 0;
         }
+        else if ( KeyIs( p, "CompressFormat" ) )
+        {
+            /* "7z" or "zip"; anything else leaves zip, the default. */
+            const char *v = ValueOf( p );
+            g_compressFormat = ( v[0] == '7' ) ? 2 : 1;
+        }
+        else if ( KeyIs( p, "CompressFolders" ) )
+        {
+            const char *v = ValueOf( p );
+            g_compressFolders = ( *v == '0' ) ? 0 : 1;
+        }
         /* MemoryLimitMB is deliberately not read: see IsKnownKey. */
     }
     fclose( f );
@@ -214,6 +238,9 @@ int ArcPrefSave( void )
     fprintf( f, "AskShortNames=%d\n", g_askShortNames );
     fprintf( f, "; GraphicsMode: 1 puts the DOS screen up in VGA graphics\n" );
     fprintf( f, "GraphicsMode=%d\n", g_graphics );
+    fprintf( f, "; CompressFormat: zip or 7z, what Compress offers first\n" );
+    fprintf( f, "CompressFormat=%s\n", ( g_compressFormat == 2 ) ? "7z" : "zip" );
+    fprintf( f, "CompressFolders=%d\n", g_compressFolders );
     {
         int i;
         for ( i = 0; i < nkeep; i++ )

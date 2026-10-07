@@ -27,6 +27,8 @@ typedef struct {
     int    unpVer;              /* unpack version (29/36 = RAR3 "v3")       */
     UInt16 modDate, modTime;    /* MS-DOS packed modification date/time     */
     UInt32 attrib;              /* file attributes (low byte = DOS bits)    */
+    int    dosAttr;             /* 1 = made on DOS, OS/2 or Windows; on Unix
+                                   attrib is a file mode instead            */
     int    isDir;               /* directory entry                          */
 } RarEntry;
 

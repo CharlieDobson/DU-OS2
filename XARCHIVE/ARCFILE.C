@@ -18,6 +18,7 @@
 #include "cabarc.h"
 #include "mslzarc.h"
 #include "volio.h"
+#include "platform.h"     /* ClearFileAttr */
 
 #define FMT_7Z    1
 #define FMT_ZIP   2
@@ -1003,14 +1004,12 @@ void ArcSetOverwritePrompt( ArcOverwriteFn fn, void *user )
     g_owAll  = -1;
 }
 
-int ArcWantWrite( const char *path )
+/* Whether to write over a file that is there.  The answer is the prompt's,
+ * when there is one - a read-only file is not asked about separately.  It is
+ * the user's own copy and the user has already said yes to replacing it. */
+static int OverwriteAnswer( const char *path )
 {
-    FILE *f;
-    int   ans;
-
-    f = fopen( path, "rb" );
-    if ( !f ) return 1;                    /* nothing there - just write   */
-    fclose( f );
+    int ans;
 
     if ( g_owAll == ARC_OW_YESALL ) return 1;
     if ( g_owAll == ARC_OW_NOALL )  return 0;
@@ -1020,6 +1019,20 @@ int ArcWantWrite( const char *path )
     if ( ans == ARC_OW_YESALL ) { g_owAll = ans; return 1; }
     if ( ans == ARC_OW_NOALL )  { g_owAll = ans; return 0; }
     return ( ans == ARC_OW_YES );
+}
+
+int ArcWantWrite( const char *path )
+{
+    FILE *f;
+
+    f = fopen( path, "rb" );
+    if ( !f ) return 1;                    /* nothing there - just write   */
+    fclose( f );
+
+    if ( !OverwriteAnswer( path ) ) return 0;
+    ClearFileAttr( path );                 /* or "wb" fails on R (and on
+                                              H or S under Windows NT)     */
+    return 1;
 }
 
 /* Defined with the rest of the short-name registry, far below: declared here

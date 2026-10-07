@@ -1179,6 +1179,20 @@ int ZipOpen( const char *path, ZipArchive **out )
         for ( j = 0; fname[j]; j++ )
             e->name[j] = ( fname[j] == '/' ) ? '\\' : fname[j];
         e->name[j] = '\0';
+#if defined(_WIN32)
+        /* A name made on MS-DOS, OS/2 or NT is in the OEM code page - PKZIP
+         * and every DOS tool wrote it that way, and so does ZIPWRITE.C -
+         * while a Win32 file name is ANSI.  The two only differ above 127,
+         * and only a name with an accent in it would ever show it, but that
+         * one would extract as the wrong file.  Bit 11 marks a UTF-8 name,
+         * which is neither and is left alone. */
+        if ( !( ch.flags & 0x0800 ) )
+        {
+            unsigned host = (unsigned)( ch.verMade >> 8 );
+            if ( host == 0 || host == 6 || host == 11 || host == 14 )
+                OemToCharBuff( e->name, e->name, (DWORD)strlen( e->name ) );
+        }
+#endif
 
         last = j - 1;
         e->isDir = ( last >= 0 && e->name[last] == '\\' );
@@ -1193,6 +1207,13 @@ int ZipOpen( const char *path, ZipArchive **out )
         e->modDate    = ch.modDate;
         e->modTime    = ch.modTime;
         e->attrib     = ch.extAttr;
+        {
+            /* FAT, HPFS, NTFS (10 in PKWARE's list, 11 in Info-ZIP's and
+             * 7-Zip's), VFAT.  Anything else keeps a mode, or nothing. */
+            unsigned host = (unsigned)( ch.verMade >> 8 );
+            e->dosAttr = ( host == 0 || host == 6 || host == 10 ||
+                           host == 11 || host == 14 );
+        }
         z->compSize[z->numEntries]    = ch.compSize;
         z->method[z->numEntries]      = aesMethod;
         z->aesStrength[z->numEntries] = aesStrength;
@@ -1252,7 +1273,11 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
 
     if ( e->isDir )
     {
-        if ( destDir && !ArcFlattenPaths() ) MakeDirs( outPath, 1 );
+        if ( destDir && !ArcFlattenPaths() )
+        {
+            MakeDirs( outPath, 1 );
+            if ( e->dosAttr ) SetFileDosAttr( outPath, e->attrib, 1 );
+        }
         return SZ_OK;
     }
     if ( destDir && !ArcWantWrite( outPath ) )
@@ -1328,7 +1353,11 @@ static int ZipExtractIndex( ZipArchive *z, int idx, const char *destDir )
         rc = SZ_ERR_CRC;
     if ( rc == SZ_OK )
     {
-        if ( destDir ) SetFileDosMTime( outPath, e->modDate, e->modTime );
+        if ( destDir )
+        {
+            SetFileDosMTime( outPath, e->modDate, e->modTime );
+            if ( e->dosAttr ) SetFileDosAttr( outPath, e->attrib, 0 );
+        }
     }
     else if ( destDir )
         remove( outPath );          /* don't leave a corrupt/partial file */

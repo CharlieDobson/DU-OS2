@@ -38,6 +38,7 @@
 #define IDD_PASSWORD                    110
 #define IDD_COMMENT                     111
 #define IDD_SUPPORT                     112
+#define IDD_COMPRESS                    113
 
 /* commands (menu items and the toolbar buttons alike) */
 #define IDM_FILE_OPEN                   201
@@ -48,6 +49,7 @@
 #define IDM_ARCHIVE_TEST                208
 #define IDM_ARCHIVE_PATHS               209   /* checkable: keep folder names */
 #define IDM_ARCHIVE_COMMENT             210
+#define IDM_FILE_COMPRESS               211
 #define IDM_HELP_ABOUT                  301
 #define IDM_HELP_SUPPORT                302
 
@@ -76,6 +78,18 @@
  * twin: that tree's next free was 1017, this one's was 1019, and 1020 is
  * the first number free in both. */
 #define IDC_COMMENT_TEXT                1020
+/* The Compress dialog - the same numbers as the Win32s tree. */
+#define IDC_CP_LIST                     1021
+#define IDC_CP_ADDFILES                 1022
+#define IDC_CP_ADDFOLDER                1023
+#define IDC_CP_REMOVE                   1024
+#define IDC_CP_ARCHIVE                  1025
+#define IDC_CP_BROWSE                   1026
+#define IDC_CP_ZIP                      1027
+#define IDC_CP_7Z                       1028
+#define IDC_CP_PATHS                    1029
+#define IDC_CP_EXCLUDE                  1030
+#define IDC_CP_EXCLFILE                 1031
 #define IDC_STATIC                      -1
 
 #endif /* RESOURCE_H */

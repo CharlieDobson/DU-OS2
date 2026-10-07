@@ -957,6 +957,7 @@ int RarOpenPw( const char *path, const char *pw, RarArchive **out )
                 e->modDate    = (UInt16)( ftime >> 16 );
                 e->modTime    = (UInt16)( ftime & 0xFFFF );
                 e->attrib     = attr;
+                e->dosAttr    = ( hdr[15] <= 2 );   /* host MS-DOS, OS/2, Win32 */
                 e->isDir      = ( ( flags & LHD_DIRECTORY ) == LHD_DIRECTORY );
 
                 last = k - 1;
@@ -1202,7 +1203,11 @@ static int RarExtractIndex( RarArchive *z, int idx, const char *destDir )
 
     if ( e->isDir )
     {
-        if ( destDir && !ArcFlattenPaths() ) MakeDirs( outPath, 1 );
+        if ( destDir && !ArcFlattenPaths() )
+        {
+            MakeDirs( outPath, 1 );
+            if ( e->dosAttr ) SetFileDosAttr( outPath, e->attrib, 1 );
+        }
         return SZ_OK;
     }
     if ( destDir && !ArcWantWrite( outPath ) )
@@ -1309,7 +1314,11 @@ static int RarExtractIndex( RarArchive *z, int idx, const char *destDir )
 
     if ( rc == SZ_OK )
     {
-        if ( destDir ) SetFileDosMTime( outPath, e->modDate, e->modTime );
+        if ( destDir )
+        {
+            SetFileDosMTime( outPath, e->modDate, e->modTime );
+            if ( e->dosAttr ) SetFileDosAttr( outPath, e->attrib, 0 );
+        }
     }
     else if ( destDir )
         remove( outPath );
@@ -1369,7 +1378,10 @@ static void SolidFinishFile( SolidSink *s )
             s->rc = ( s->z->headFlags[ s->curIdx ] & LHD_PASSWORD )
                   ? SZ_ERR_BADPASS : SZ_ERR_CRC;
         else if ( s->destDir )
+        {
             SetFileDosMTime( s->outPath, e->modDate, e->modTime );
+            if ( e->dosAttr ) SetFileDosAttr( s->outPath, e->attrib, 0 );
+        }
     }
     s->curIdx = -1;
 }
@@ -1473,6 +1485,8 @@ static int SolidExtract( RarArchive *z, const int *indices, int count,
                           z->entries[i].isDir );
                 if ( ArcNameVerdict() != ARC_NAME_OK ) continue;
                 MakeDirs( outPath, 1 );
+                if ( z->entries[i].dosAttr )
+                    SetFileDosAttr( outPath, z->entries[i].attrib, 1 );
             }
 
     for ( i = 0; i < z->numEntries; i++ )
@@ -1610,7 +1624,12 @@ static int SolidExtract( RarArchive *z, const int *indices, int count,
                 if ( !ArcWantWrite( outPath ) ) continue;
                 MakeDirs( outPath, 0 );
                 out = fopen( outPath, "wb" );
-                if ( out ) fclose( out );
+                if ( !out ) continue;
+                fclose( out );
+                SetFileDosMTime( outPath, z->entries[i].modDate,
+                                 z->entries[i].modTime );
+                if ( z->entries[i].dosAttr )
+                    SetFileDosAttr( outPath, z->entries[i].attrib, 0 );
             }
 
     free( req );

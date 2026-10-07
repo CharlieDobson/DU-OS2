@@ -1024,7 +1024,11 @@ static int CabExtractEntry( CabReader *rd, const CabEntry *ent,
 
     if ( rc == SZ_OK )
     {
-        if ( destDir ) SetFileDosMTime( outPath, ent->modDate, ent->modTime );
+        if ( destDir )
+        {
+            SetFileDosMTime( outPath, ent->modDate, ent->modTime );
+            SetFileDosAttr( outPath, ent->attrib, 0 );
+        }
     }
     else if ( destDir )
         remove( outPath );             /* don't leave a partial file */

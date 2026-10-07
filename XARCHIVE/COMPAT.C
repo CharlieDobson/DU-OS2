@@ -49,6 +49,22 @@ int WideCharToMultiByte( unsigned cp, DWORD flags,
     return i + 1;
 }
 
+/* Each byte to the code point of the same value - the inverse of the
+ * mapping above, so a name the archive writer stores comes back unchanged.
+ * srcLen -1 means "up to and including the NUL", and the count returned
+ * includes it, as Win32's does. */
+int MultiByteToWideChar( unsigned cp, DWORD flags,
+                         const char *src, int srcLen,
+                         WCHAR *wdst, int wdstChars )
+{
+    int i = 0, n = ( srcLen < 0 ) ? (int)strlen( src ) + 1 : srcLen;
+    (void)cp; (void)flags;
+
+    for ( ; i < n && i < wdstChars; i++ )
+        wdst[i] = (WCHAR)(unsigned char)src[i];
+    return i;
+}
+
 /*---- Calendar math -------------------------------------------------------- */
 #define EPOCH_1601_TO_1970  116444736000000000LL   /* 100-ns ticks */
 #define TICKS_PER_SEC       10000000LL

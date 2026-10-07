@@ -78,6 +78,13 @@ typedef int            Int32;
                                * is fine.  The backends only reach for this
                                * when the format itself says how much should
                                * be there and the volumes on disk fall short. */
+#define SZ_ERR_NOFILES    16  /* MAKING an archive: nothing was found to put
+                               * in it - the names given matched no file, or
+                               * everything they matched was excluded.  The
+                               * only code that belongs to the writer alone;
+                               * every other failure of a compression job is
+                               * one of the codes above, meaning what it
+                               * means for an extraction.                  */
 
 /*---- Configurable limits (keep memory manageable on era hardware) -------- *
  * The extractor refuses archives that would exceed these, with a clear
@@ -382,7 +389,14 @@ int  ArcFlattenPaths( void );
  *
  * ArcWantWrite is for the backends: called with the would-be output path
  * before creating a file, it returns 1 to (over)write and 0 to skip the
- * entry.  It only prompts when the file exists.
+ * entry.  It only prompts when the file exists, and when the answer is to
+ * write it takes the read-only, hidden and system attributes off the old
+ * file first (ClearFileAttr, PLATFORM.H) - so a read-only file is replaced
+ * like any other, with no second question.
+ *
+ * The backends give each file they write the attributes the archive
+ * recorded (SetFileDosAttr) after its time stamp, so a file that comes out
+ * read-only is still one that can be stamped.
  *-------------------------------------------------------------------------- */
 #define ARC_OW_YES     0   /* overwrite this file            */
 #define ARC_OW_NO      1   /* keep this file                 */

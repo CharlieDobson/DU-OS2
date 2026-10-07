@@ -14,13 +14,15 @@ THE BACKEND IS A VERBATIM COPY, AND IS MEANT TO STAY ONE
                    DISKARC.C CABARC.C MSLZARC.C MSZIPDEC.C LZXDEC.C ^
                    QTMDEC.C LZMADEC.C CRC32.C ARCPREF.C ARCCRYP.C AES.C ^
                    SHA.C VOLIO.C NUMFMT.C ^
+                   ARCCOMP.C ZIPWRITE.C SZWRITE.C DEFLENC.C LZMAENC.C ^
                    ARCDEFS.H ARCFILE.H ARCPREF.H SZARC.H ZIPARC.H RARARC.H ^
                    RAR3DEC.H RAR5ARC.H DISKARC.H CABARC.H MSLZARC.H ^
                    MSZIPDEC.H LZXDEC.H QTMDEC.H LZMADEC.H CRC32.H ^
-                   ARCCRYP.H AES.H SHA.H VOLIO.H NUMFMT.H PLATFORM.H) do ^
+                   ARCCRYP.H AES.H SHA.H VOLIO.H NUMFMT.H PLATFORM.H ^
+                   ARCCOMP.H ARCCOMPI.H DEFLENC.H LZMAENC.H) do ^
           fc /b %F S:\CPP\DU32\XARCHIVE\%F
 
-    (42 files.  The list used to stop at the ones the first port had, and
+    (51 files.  The list used to stop at the ones the first port had, and
     the crypto, volume and number-format files were checked by hand.)
 
     Any difference is drift, not a port: the platform is dealt with by
@@ -28,7 +30,47 @@ THE BACKEND IS A VERBATIM COPY, AND IS MEANT TO STAY ONE
     by editing a copy.  If one of them has to change for OS/2, change it in
     the DU32 tree behind an __OS2__ guard and copy the whole file back.
 
-    Last synced 2026-10-02, thirteen files: CABARC, MSLZARC, MSZIPDEC,
+    Last synced 2026-10-07, sixteen files: extraction now puts back the
+    attributes the archive recorded and writes over read-only, hidden and
+    system files once the user has said yes; 7z folders are LZMA2.
+    ARCDEFS.H, ARCFILE.C (ArcWantWrite clears the old file's attributes),
+    ARCCOMP.C (so does replacing an archive), PLATFORM.H (SetFileDosAttr,
+    ClearFileAttr), SZARC.C, ZIPARC.C/.H, RARARC.C/.H, RAR5ARC.C/.H,
+    CABARC.C, DISKARC.C (set them after the time), LZMAENC.C/.H
+    (Lzma2Encode), SZWRITE.C (uses it).  OS2PLAT.C implements the two new
+    calls over DosQueryPathInfo / DosSetPathInfo FIL_STANDARD: the date
+    fields go back zeroed, which leaves them alone, and the directory bit is
+    never written; a folder takes only hidden and system.  BUILD\OS2T.C
+    gained a SetFileDosAttr stub, since it #includes SZARC.C.  MKOS2 builds,
+    MKTEST ALL PASS.  NOT RUN ON OS/2.  The detail is in
+    S:\CPP\DU32\XARCHIVE\BUILD-NOTES.txt, "ATTRIBUTES ON EXTRACTION, AND
+    LZMA2".  Also that day, in PMMAIN.C only: a compress that succeeds
+    opens the new archive after its report (ArcOnDone, ARCJOB_COMPRESS ->
+    OpenArchiveFile -> an ARCJOB_OPEN; the worker has already stopped when
+    ArcOnDone runs, as the encrypted-header retry relies on too).
+
+    Synced before that 2026-10-06, fifteen files, for MAKING archives (File >
+    Compress): ARCCOMP.C/.H, ARCCOMPI.H, ZIPWRITE.C, SZWRITE.C, DEFLENC.C/.H
+    and LZMAENC.C/.H, all new, plus ARCDEFS.H (SZ_ERR_NOFILES), SZARC.C (the
+    BCJ chunk fix and the new error's text), ZIPARC.C (an OEM name turned to
+    ANSI on Win32 - nothing changes here), PLATFORM.H (PlatFind*), ARCPREF.C
+    and ARCPREF.H (CompressFormat / CompressFolders).  OS2PLAT.C implements
+    PlatFindFirst/Next/Close over DosFindFirst (long names on HPFS; the local
+    stamp moved to UTC by DosGetDateTime's zone) and PlatPhysFree (total
+    physical less resident); COMPAT.C and windows.h gained
+    MultiByteToWideChar, the inverse of the Latin-1 WideCharToMultiByte.
+    PMMAIN.C: File > Compress and a Compress button, enabled only with no
+    archive open; IDD_COMPRESS (RES\XARCHIVE.RC, the Win32s dialog's
+    controls on the same numbers - but no drop target); the job runs on the
+    worker as ARCJOB_COMPRESS and ArcOnDone reports and frees it; the folder
+    picker is captioned per use.  The About box says it creates Zip and
+    7-Zip archives; still v1.0.  MKOS2.CMD compiles and links the five new
+    sources at -w4 with no warnings; MKTEST ALL PASS.  NOT RUN ON OS/2 -
+    the dialog, Add Files' multiple selection (FDS_MULTIPLESEL) and the
+    worker job want a real box.  Everything about the writer itself is in
+    S:\CPP\DU32\XARCHIVE\BUILD-NOTES.txt, "MAKING ARCHIVES".
+
+    Synced before that 2026-10-02, thirteen files: CABARC, MSLZARC, MSZIPDEC,
     LZXDEC and QTMDEC (.C and .H), all new, plus ARCFILE.C, ARCFILE.H and
     SZARC.C, for Microsoft cabinets (.CAB, cabinet sets, Quantum and LZX
     included) and COMPRESS.EXE's SZDD and KWAJ files.  MKOS2.CMD compiles

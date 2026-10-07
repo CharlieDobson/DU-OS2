@@ -716,13 +716,13 @@ int Rar5OpenPw( const char *path, const char *pw, Rar5Archive **out )
             UInt32 fileFlags = BrVint( &b );
             UInt32 unpSize    = BrVint( &b );
             UInt32 attr       = BrVint( &b );
-            UInt32 mtime = 0, dcrc = 0, compInfo, nameLen;
+            UInt32 mtime = 0, dcrc = 0, compInfo, nameLen, hostOS;
             int    hasMtime = 0, hasCrc = 0;
 
             if ( fileFlags & F5_MTIME ) { mtime = BrU32( &b ); hasMtime = 1; }
             if ( fileFlags & F5_CRC )   { dcrc  = BrU32( &b ); hasCrc = 1; }
             compInfo = BrVint( &b );
-            (void)BrVint( &b );                              /* host OS */
+            hostOS   = BrVint( &b );                 /* 0 Windows, 1 Unix */
             nameLen  = BrVint( &b );
 
             /* A CONTINUATION rather than a new file: this volume's bytes join
@@ -781,6 +781,7 @@ int Rar5OpenPw( const char *path, const char *pw, Rar5Archive **out )
                 e->hasCrc     = hasCrc;
                 e->methodCode = (int)( ( compInfo >> 7 ) & 7 );
                 e->attrib     = attr;
+                e->dosAttr    = ( hostOS == 0 );
                 e->isDir      = ( fileFlags & F5_DIR ) ? 1 : 0;
                 if ( last >= 0 && e->name[last] == '\\' )
                 { e->name[last] = '\0'; e->isDir = 1; }
@@ -1002,7 +1003,11 @@ static int Rar5ExtractIndex( Rar5Archive *z, int idx, const char *destDir )
 
     if ( e->isDir )
     {
-        if ( destDir && !ArcFlattenPaths() ) MakeDirs( outPath, 1 );
+        if ( destDir && !ArcFlattenPaths() )
+        {
+            MakeDirs( outPath, 1 );
+            if ( e->dosAttr ) SetFileDosAttr( outPath, e->attrib, 1 );
+        }
         return SZ_OK;
     }
     if ( destDir && !ArcWantWrite( outPath ) )
@@ -1109,6 +1114,7 @@ static int Rar5ExtractIndex( Rar5Archive *z, int idx, const char *destDir )
             ft.dwLowDateTime = e->mtimeLo; ft.dwHighDateTime = e->mtimeHi;
             SetFileMTime( outPath, &ft );
         }
+        if ( destDir && e->dosAttr ) SetFileDosAttr( outPath, e->attrib, 0 );
     }
     else if ( destDir )
         remove( outPath );

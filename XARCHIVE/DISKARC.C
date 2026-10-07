@@ -667,7 +667,11 @@ static int DiskExtractIndex( DiskArchive *d, int idx, const char *destDir )
 
     if ( e->isDir )
     {
-        if ( destDir && !ArcFlattenPaths() ) MakeDirs( outPath, 1 );
+        if ( destDir && !ArcFlattenPaths() )
+        {
+            MakeDirs( outPath, 1 );
+            SetFileDosAttr( outPath, e->attrib, 1 );
+        }
         return SZ_OK;
     }
     if ( destDir && !ArcWantWrite( outPath ) )
@@ -715,7 +719,11 @@ static int DiskExtractIndex( DiskArchive *d, int idx, const char *destDir )
 
     if ( rc == SZ_OK )
     {
-        if ( destDir ) SetFileDosMTime( outPath, e->modDate, e->modTime );
+        if ( destDir )
+        {
+            SetFileDosMTime( outPath, e->modDate, e->modTime );
+            SetFileDosAttr( outPath, e->attrib, 0 );
+        }
     }
     else if ( destDir )
         remove( outPath );
