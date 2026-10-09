@@ -1,10 +1,10 @@
 # Dobson Utilities for OS/2
 
 ## System Requirements
-CPU: 80386 or newer
-RAM: 4MB
-HDD: 600KB
-OS: OS/2 v2.0 or later
+- CPU: 80386 or newer
+- RAM: 4MB
+- HDD: 600KB
+- OS: OS/2 v2.0 or later
 
 Note XArchive's 7Zip functionality can require far more RAM
 depending on dictionary size.
