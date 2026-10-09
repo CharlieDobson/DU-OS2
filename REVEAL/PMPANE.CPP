@@ -7,9 +7,8 @@
  * business, which is what keeps a new page down to one Build...() function.
  *
  * The look is the Windows builds': an illustration and a title across the
- * top of the page, then label/value pairs under ruled section headings, bar
- * gauges where a proportion says more than a number, and a block map for
- * the first megabyte.
+ * top of the page, then label/value pairs under ruled section headings, and
+ * bar gauges where a proportion says more than a number.
  *
  * COORDINATES.  PM puts the origin at the BOTTOM-left and counts upwards.
  * A report is a document that flows from the top down, and every measure in
@@ -84,7 +83,6 @@ static const char* CategoryCaptions[ CAT_COUNT ] = {
     "This system",
     "Central Processing Unit",
     "Physical memory and the swap file",
-    "First megabyte memory map",
     "Display mode and display drivers",
     "Disk, diskette and CD-ROM drives",
     "Network software and redirected drives",
@@ -94,34 +92,8 @@ static const char* CategoryCaptions[ CAT_COUNT ] = {
     "Processor, coprocessor and memory throughput"
 };
 
-/*---------------------------------------------------------------------------
- * The first-megabyte map's palette and legend (0x00RRGGBB; the pane's PS is
- * put into RGB mode on every paint)
- *-------------------------------------------------------------------------*/
-
-typedef struct memmap_style_t {
-    LONG        colour;
-    const char* name;
-} memmap_style_t;
-
-static const memmap_style_t MemMapStyles[ MM_CLASS_COUNT ] = {
-    { 0x00FFFFFFL, "Unused"       },
-    { 0x00000080L, "System"       },
-    { 0x000000FFL, "In use"       },
-    { 0x00C0C0C0L, "Free"         },
-    { 0x00800080L, "Video RAM"    },
-    { 0x00FF0000L, "Adapter ROM"  },
-    { 0x00008080L, "Upper memory" },
-    { 0x00800000L, "System ROM"   }
-};
-
-#define MEMMAP_ROWS     8       /* 128 KB per row                           */
-#define MEMMAP_COLS     32
-#define MEMMAP_CELL_H   15
-
 #define PANE_BLACK       0x00000000L
 #define PANE_WHITE       0x00FFFFFFL
-#define PANE_GREY        0x00808080L
 
 /*===========================================================================
  * Fonts
@@ -464,14 +436,6 @@ static LONG ValueColumn( LONG pane_width )
     return x;
 }
 
-/* The legend wraps to as many columns as the pane is wide, so the height
- * allows for its worst case - two columns, four lines. */
-
-static LONG MemMapHeight( void )
-{
-    return MEMMAP_ROWS * MEMMAP_CELL_H + 10 + line_height * 5;
-}
-
 /* One place decides how tall each row kind is, so measuring, painting and
    placing the button can never disagree about it. */
 
@@ -481,7 +445,6 @@ static LONG RowHeight( int kind )
         case RK_HEADING:    return line_height + 10;
         case RK_BLANK:      return line_height / 2;
         case RK_GAUGE:      return line_height + 6;
-        case RK_MEMMAP:     return MemMapHeight();
         case RK_BUTTON:     return PANE_BUTTON_H + 8;
         case RK_END:        return 0;
         default:            break;
@@ -609,73 +572,6 @@ static void PaintGauge( HPS hps, LONG width, LONG y, const report_row_t* row )
     TextTD( hps, FONT_TEXT, value_x + bar_w + 8, y + 2, text, clr.text );
 }
 
-static void PaintMemMap( HPS hps, LONG width, LONG y )
-{
-    LONG avail  = width - PANE_MARGIN * 2 - 44;
-    LONG cell_w = avail / MEMMAP_COLS;
-    LONG map_x  = PANE_MARGIN + 44;
-    LONG legend_y;
-    int  row, col, i;
-
-    if ( cell_w > 16 ) cell_w = 16;
-    if ( cell_w < 4 )  cell_w = 4;
-
-    for ( row = 0; row < MEMMAP_ROWS; ++row ) {
-        char label[ 16 ];
-        LONG top = y + row * MEMMAP_CELL_H;
-
-        sprintf( label, "%3dK", row * 128 );
-        TextTD( hps, FONT_TEXT, PANE_MARGIN, top, label, clr.grey_text );
-
-        for ( col = 0; col < MEMMAP_COLS; ++col ) {
-            int  index = row * MEMMAP_COLS + col;
-            BYTE kind  = ( index < MEMMAP_BLOCKS ) ? g_memmap[ index ] : (BYTE)MM_UNUSED;
-            LONG left  = map_x + col * cell_w;
-            LONG right = left + cell_w - 1;
-            LONG bot   = top + MEMMAP_CELL_H - 2;
-
-            if ( kind >= MM_CLASS_COUNT ) kind = MM_UNUSED;
-
-            /* a grey frame, then the class colour inside it: two fills per
-               cell and no line drawing at all */
-            FillTD( hps, left, top, right, bot, PANE_GREY );
-            FillTD( hps, left + 1, top + 1, right - 1, bot - 1, MemMapStyles[ kind ].colour );
-        }
-    }
-
-    /* legend, as many entries to a line as the pane is wide enough for */
-    legend_y = y + MEMMAP_ROWS * MEMMAP_CELL_H + 8;
-    {
-        LONG entry_w = char_width * 14 + 22;
-        LONG columns = ( width - PANE_MARGIN * 2 ) / entry_w;
-        int  shown   = 0;
-
-        if ( columns < 2 ) columns = 2;
-        if ( columns > 4 ) columns = 4;
-
-        for ( i = 0; i < MM_CLASS_COUNT; ++i ) {
-            LONG column, line, sx, sy;
-
-            /* No cell is ever Free in this build - OS/2 has no DOS arena to
-               ask - so the legend does not offer a colour the map never uses */
-            if ( i == MM_FREE ) continue;
-
-            column = shown % columns;
-            line   = shown / columns;
-            ++shown;
-
-            sx = PANE_MARGIN + column * entry_w;
-            sy = legend_y + line * line_height + 2;
-
-            FillTD( hps, sx, sy, sx + 12, sy + 10, PANE_BLACK );
-            FillTD( hps, sx + 1, sy + 1, sx + 11, sy + 9, MemMapStyles[ i ].colour );
-
-            TextTD( hps, FONT_TEXT, sx + 17, legend_y + line * line_height,
-                    MemMapStyles[ i ].name, clr.text );
-        }
-    }
-}
-
 /*---------------------------------------------------------------------------
  * PaintColumns - a tab-separated row, each cell at its column stop
  *
@@ -769,10 +665,6 @@ static void PaintRow( HPS hps, LONG width, LONG y, const report_row_t* row )
         case RK_BUTTON:
             /* Nothing to draw: the row only reserves the space, and the real
                control paints itself.  PositionPaneButton puts it here. */
-            break;
-
-        case RK_MEMMAP:
-            PaintMemMap( hps, width, y );
             break;
 
         default:

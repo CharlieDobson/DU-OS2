@@ -28,7 +28,6 @@
 #define IDB_CX6X86                      211
 #define IDB_NX586                       212
 #define IDB_MEMORY                      213
-#define IDB_FIRSTMEG                    214
 #define IDB_DRIVES                      215
 #define IDB_NETWORK                     216
 #define IDB_PORTS                       217

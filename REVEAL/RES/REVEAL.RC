@@ -31,14 +31,13 @@ BEGIN
         MENUITEM "~System",             40100
         MENUITEM "~Processor",          40101
         MENUITEM "~Memory",             40102
-        MENUITEM "~First Megabyte",     40103
-        MENUITEM "~Display",            40104
-        MENUITEM "Dri~ves",             40105
-        MENUITEM "~Network",            40106
-        MENUITEM "P~orts",              40107
-        MENUITEM "OS/~2",               40108
-        MENUITEM "~Environment",        40109
-        MENUITEM "~Benchmark",          40110
+        MENUITEM "~Display",            40103
+        MENUITEM "Dri~ves",             40104
+        MENUITEM "~Network",            40105
+        MENUITEM "P~orts",              40106
+        MENUITEM "OS/~2",               40107
+        MENUITEM "~Environment",        40108
+        MENUITEM "~Benchmark",          40109
         MENUITEM SEPARATOR
         MENUITEM "E~xit\tF3",           IDM_FILE_EXIT
     END
@@ -138,7 +137,6 @@ BITMAP IDB_AMDK6        "AMDK6.BMP"
 BITMAP IDB_CX6X86       "CX6X86.BMP"
 BITMAP IDB_NX586        "NX586.BMP"
 BITMAP IDB_MEMORY       "RAM.BMP"
-BITMAP IDB_FIRSTMEG     "1STMEG.BMP"
 BITMAP IDB_DRIVES       "HDD.BMP"
 BITMAP IDB_NETWORK      "NETDRIVE.BMP"
 BITMAP IDB_PORTS        "IO.BMP"

@@ -13,7 +13,7 @@
  *                         parallel ports, coprocessor, model byte
  *   CONFIG.SYS            swap file, device drivers, mouse, keyboard, LIBPATH
  *   TESTCFG$              a copy of the adapter/BIOS ROM area C0000h-FFFFFh
- *                         (LOWMEM.CPP) for the BIOS names and the map
+ *                         (LOWMEM.CPP) for the BIOS names
  *   the Window List       what is running
  *
  * Include <os2.h> before this header.
@@ -48,7 +48,6 @@ enum reveal_category_t {
     CAT_SYSTEM = 0,
     CAT_PROCESSOR,
     CAT_MEMORY,
-    CAT_FIRSTMEG,
     CAT_DISPLAY,
     CAT_DRIVES,
     CAT_NETWORK,
@@ -77,7 +76,6 @@ enum report_kind_t {
     RK_COLROW,      /* tab-separated data row (fixed pitch)                */
     RK_GAUGE,       /* label, value text and a 0..100 bar                  */
     RK_NOTE,        /* small note spanning the pane                        */
-    RK_MEMMAP,      /* the first-megabyte map block (tall, self-drawing)   */
     RK_BUTTON       /* a real push button, captioned from 'label'          */
 };
 
@@ -96,27 +94,6 @@ typedef struct report_row_t {
 
 /* a bit of report_row_t.align: column 'n' (0 = the first) right-justified */
 #define RIGHT_COL( n )  ( 1 << ( n ) )
-
-/*---------------------------------------------------------------------------
- * First-megabyte map: 256 blocks of 4 KB.
- *-------------------------------------------------------------------------*/
-
-#define MEMMAP_BLOCKS       256
-#define MEMMAP_BLOCK_BYTES  4096L
-
-enum memmap_class_t {
-    MM_UNUSED = 0,      /* nothing there / not reported                    */
-    MM_SYSTEM,          /* interrupt vectors, BIOS data area               */
-    MM_PROGRAM,         /* OS/2, its drivers and programs                  */
-    MM_FREE,            /* (never used by this build - see the legend)     */
-    MM_VIDEO,           /* video adapter RAM                               */
-    MM_ADAPTER_ROM,     /* option ROM found by its 55 AA signature         */
-    MM_UPPER,           /* the rest of the adapter area                    */
-    MM_SYSTEM_ROM,      /* the system BIOS itself                          */
-    MM_CLASS_COUNT
-};
-
-extern BYTE g_memmap[ MEMMAP_BLOCKS ];
 
 /*---------------------------------------------------------------------------
  * PMDATA.CPP - data gathering and report building

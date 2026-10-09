@@ -57,8 +57,8 @@
  * Cached machine description
  *
  * The expensive, unchanging half (CPU identification, ROM scans, CONFIG.SYS)
- * is read once at start-up.  The volatile half (memory and swap figures, the
- * first-megabyte map) is re-read by RvDataRefresh.
+ * is read once at start-up.  The volatile half (memory and swap figures) is
+ * re-read by RvDataRefresh.
  *=========================================================================*/
 
 typedef struct rv_memory_t {
@@ -111,8 +111,6 @@ static char                 g_bios_name[ 64 ];
 static char                 g_bios_date[ 40 ];
 static char                 g_video_rom_vendor[ 64 ];
 static char                 g_video_rom_version[ 64 ];
-
-BYTE g_memmap[ MEMMAP_BLOCKS ];
 
 /*---------------------------------------------------------------------------
  * Names the ROM searches look for - the Windows builds' tables, copied from
@@ -703,61 +701,6 @@ static void ReadMemoryStatus( void )
 }
 
 /*===========================================================================
- * The first-megabyte map
- *=========================================================================*/
-
-static void MarkBlocks( ULONG from, ULONG to, BYTE what )
-{
-    int first = (int)( from / MEMMAP_BLOCK_BYTES );
-    int last  = (int)( ( to + MEMMAP_BLOCK_BYTES - 1 ) / MEMMAP_BLOCK_BYTES );
-    int i;
-
-    if ( first < 0 ) first = 0;
-    if ( last > MEMMAP_BLOCKS ) last = MEMMAP_BLOCKS;
-
-    for ( i = first; i < last; ++i ) g_memmap[ i ] = what;
-}
-
-/*---------------------------------------------------------------------------
- * BuildMemoryMap
- *
- * Conventional memory is all shown as in use: it is OS/2's, which runs its
- * kernel and drivers there and hands what is left to its own memory manager
- * - there is no DOS arena to ask.  The upper memory area is classified by
- * the 55 AA signature every option ROM must start with, read out of LOWMEM's
- * copy of the ROM area; without that copy there is no map.
- *-------------------------------------------------------------------------*/
-
-static void BuildMemoryMap( void )
-{
-    ULONG addr;
-    int   i;
-
-    for ( i = 0; i < MEMMAP_BLOCKS; ++i ) g_memmap[ i ] = MM_UNUSED;
-    if ( !g_rom ) return;
-
-    MarkBlocks( 0, 0xA0000UL, MM_PROGRAM );
-    MarkBlocks( 0, MEMMAP_BLOCK_BYTES, MM_SYSTEM );     /* vectors + BDA    */
-
-    MarkBlocks( 0xA0000UL, 0xC0000UL, MM_VIDEO );
-    MarkBlocks( 0xC0000UL, 0xF0000UL, MM_UPPER );
-
-    for ( addr = 0xC0000UL; addr < 0xF0000UL; addr += 0x800UL ) {
-        const BYTE* rom = LowRom( addr, 3 );
-
-        if ( rom != NULL && rom[ 0 ] == 0x55 && rom[ 1 ] == 0xAA ) {
-            ULONG length = (ULONG)rom[ 2 ] * 512UL;
-
-            if ( length == 0 || length > 0x20000UL ) length = 0x800UL;
-            MarkBlocks( addr, addr + length, MM_ADAPTER_ROM );
-            addr += ( ( length - 1 ) & ~0x7FFUL );
-        }
-    }
-
-    MarkBlocks( 0xF0000UL, 0x100000UL, MM_SYSTEM_ROM );
-}
-
-/*===========================================================================
  * Processor speed
  *
  * The time stamp counter against a clock.  The clock is the 1.19 MHz
@@ -994,7 +937,6 @@ void RvDataTerm( void )
 void RvDataRefresh( void )
 {
     ReadMemoryStatus();
-    BuildMemoryMap();
 }
 
 /*===========================================================================
@@ -1005,7 +947,6 @@ static const char* CategoryNames[ CAT_COUNT ] = {
     "System",
     "Processor",
     "Memory",
-    "First Megabyte",
     "Display",
     "Drives",
     "Network",
@@ -1019,7 +960,6 @@ static const int CategoryBitmaps[ CAT_COUNT ] = {
     IDB_SYSTEM,
     IDB_CPU,            /* replaced at run time by the detected part        */
     IDB_MEMORY,
-    IDB_FIRSTMEG,
     0,                  /* Display: no illustration in the resource set     */
     IDB_DRIVES,
     IDB_NETWORK,
@@ -1390,45 +1330,6 @@ static void BuildMemory( void )
         RNote( "\"Available to programs\" counts the swap file's room" );
         RNote( "to grow, so it can be larger than the memory fitted." );
     }
-}
-
-/*---------------------------------------------------------------------------
- * First Megabyte - the map, and the legend the map needs
- *-------------------------------------------------------------------------*/
-
-static void BuildFirstMeg( void )
-{
-    ULONG counts[ MM_CLASS_COUNT ];
-    int   i;
-
-    RHeading( "Memory below 1 MB" );
-
-    if ( !g_rom ) {
-        RNote( "The adapter and BIOS area can only be read through the" );
-        RNote( "TESTCFG.SYS driver, and it did not answer.  Check that" );
-        RNote( "CONFIG.SYS has DEVICE=...\\OS2\\BOOT\\TESTCFG.SYS." );
-        return;
-    }
-
-    for ( i = 0; i < MM_CLASS_COUNT; ++i ) counts[ i ] = 0;
-    for ( i = 0; i < MEMMAP_BLOCKS; ++i ) {
-        if ( g_memmap[ i ] < MM_CLASS_COUNT ) counts[ g_memmap[ i ] ]++;
-    }
-
-    RAdd( RK_MEMMAP, "", "" );
-
-    RBlank();
-    RHeading( "Totals" );
-    RFmt( RK_ITEM, "OS/2, drivers and programs", "%s",
-          KBytes( ( counts[ MM_SYSTEM ] + counts[ MM_PROGRAM ] ) * 4UL ) );
-    RFmt( RK_ITEM, "Video adapter", "%s",     KBytes( counts[ MM_VIDEO ] * 4UL ) );
-    RFmt( RK_ITEM, "Adapter ROM", "%s",       KBytes( counts[ MM_ADAPTER_ROM ] * 4UL ) );
-    RFmt( RK_ITEM, "Upper memory area", "%s", KBytes( counts[ MM_UPPER ] * 4UL ) );
-    RFmt( RK_ITEM, "System ROM BIOS", "%s",   KBytes( counts[ MM_SYSTEM_ROM ] * 4UL ) );
-
-    RBlank();
-    RNote( "Each cell is 4 KB.  Conventional memory belongs to OS/2" );
-    RNote( "itself, so all of it is shown in use." );
 }
 
 /*---------------------------------------------------------------------------
@@ -2265,7 +2166,6 @@ int RvBuildReport( int category, report_row_t* rows, int max_rows )
         case CAT_SYSTEM:        BuildSystem();      break;
         case CAT_PROCESSOR:     BuildProcessor();   break;
         case CAT_MEMORY:        BuildMemory();      break;
-        case CAT_FIRSTMEG:      BuildFirstMeg();    break;
         case CAT_DISPLAY:       BuildDisplay();     break;
         case CAT_DRIVES:        BuildDrives();      break;
         case CAT_NETWORK:       BuildNetwork();     break;
