@@ -110,6 +110,16 @@ void ClearFileAttr( const char *path )
     ApplyAttr( path, 0, FILE_ARCHIVED );
 }
 
+void ClearArchiveBit( const char *path )
+{
+    FILESTATUS3 fs;
+
+    if ( DosQueryPathInfo( (PCSZ)path, FIL_STANDARD, &fs, sizeof( fs ) ) != 0 )
+        return;
+    if ( !( fs.attrFile & FILE_ARCHIVED ) ) return;
+    ApplyAttr( path, 0, FILE_READONLY | FILE_HIDDEN | FILE_SYSTEM );
+}
+
 /*---- 8.3 filesystem probe (for ArcFsName's name mangling) -----------------
  * Called by the shared ARCFILE.C (extern under #ifdef __OS2__) at the start
  * of every extraction: 1 when the drive holding 'path' takes only 8.3 names

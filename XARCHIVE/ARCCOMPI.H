@@ -57,8 +57,9 @@ struct ArcCompJob {
     int        fmt;
     int        keepPaths;
     int        recurse;
+    int        clearArc;    /* take the A bit off what went in              */
 
-    char     **items;       /* as given to ArcCompAdd                       */
+    char     **items;      /* as given to ArcCompAdd                       */
     int        nItems;
 
     char     **bases;       /* full folder paths, each ending in '\'        */

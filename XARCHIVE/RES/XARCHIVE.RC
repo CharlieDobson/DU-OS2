@@ -289,41 +289,49 @@ END
 /*---------------------------------------------------------------------------
  * Compress.  The same controls on the same numbers as the Win32s dialog,
  * laid out from the bottom.  No drop target here (the Win32s one takes
- * dropped files): Add Files takes several at once instead.
+ * dropped files): Add Files takes several at once instead.  The order below
+ * IS the tab order, so each group box comes before what it holds and each
+ * label before its field - unlike the Win32s template, whose groups and
+ * first label sit at the end.
  *-------------------------------------------------------------------------*/
 
 DLGTEMPLATE IDD_COMPRESS LOADONCALL MOVEABLE DISCARDABLE
 BEGIN
-    DIALOG "Compress", IDD_COMPRESS, 24, 24, 300, 216,
+    DIALOG "Compress", IDD_COMPRESS, 24, 24, 300, 204,
            FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
            FCF_TITLEBAR | FCF_SYSMENU
     BEGIN
         LTEXT      "~Files and folders to compress:", IDC_STATIC,
-                                                8, 198, 220,  8
-        LISTBOX                                 IDC_CP_LIST, 8, 131, 220, 64,
+                                                8, 186, 220,  8
+        LISTBOX                                 IDC_CP_LIST, 8, 119, 220, 64,
                                     LS_EXTENDEDSEL | LS_HORZSCROLL |
                                     LS_NOADJUSTPOS | WS_GROUP | WS_TABSTOP
-        PUSHBUTTON "Add f~iles...",             IDC_CP_ADDFILES,  234, 181, 58, 14
-        PUSHBUTTON "Add f~older...",            IDC_CP_ADDFOLDER, 234, 163, 58, 14
-        PUSHBUTTON "~Remove",                   IDC_CP_REMOVE,    234, 145, 58, 14
-        LTEXT      "~Archive:",                 IDC_STATIC,         8, 114, 38,  8
-        ENTRYFIELD "",                          IDC_CP_ARCHIVE,    50, 113, 176,  8,
+        PUSHBUTTON "Add f~iles...",             IDC_CP_ADDFILES,  234, 169, 58, 14
+        PUSHBUTTON "Add f~older...",            IDC_CP_ADDFOLDER, 234, 151, 58, 14
+        PUSHBUTTON "~Remove",                   IDC_CP_REMOVE,    234, 133, 58, 14
+        LTEXT      "~Archive:",                 IDC_STATIC,         8, 102, 38,  8
+        ENTRYFIELD "",                          IDC_CP_ARCHIVE,    50, 101, 176,  8,
                                     ES_MARGIN | ES_AUTOSCROLL
-        PUSHBUTTON "~Browse...",                IDC_CP_BROWSE,    234, 110, 58, 14
-        GROUPBOX   "Format",                    IDC_STATIC,         8,  68, 284, 38
+        PUSHBUTTON "~Browse...",                IDC_CP_BROWSE,    234,  98, 58, 14
+        GROUPBOX   "Format",                    IDC_STATIC,         8,  56, 137, 38
         AUTORADIOBUTTON "~Zip",
-                                                IDC_CP_ZIP,        16,  85, 268, 10,
+                                                IDC_CP_ZIP,        16,  73, 121, 10,
                                     WS_GROUP | WS_TABSTOP
         AUTORADIOBUTTON "~7-Zip",
-                                                IDC_CP_7Z,         16,  73, 268, 10
+                                                IDC_CP_7Z,         16,  61, 121, 10
+        GROUPBOX   "Options",                   IDC_STATIC,       155,  56, 137, 38
         AUTOCHECKBOX "Store folder ~names",
-                                                IDC_CP_PATHS,       8,  52, 284, 10,
+                                                IDC_CP_PATHS,     163,  73, 121, 10,
+                                    WS_GROUP | WS_TABSTOP
+        AUTOCHECKBOX "~Clear Archive attribute",
+                                                IDC_CP_RESETARCATTRIB,
+                                                                  163,  61, 121, 10,
                                     WS_GROUP | WS_TABSTOP
         LTEXT      "E~xclude:",                 IDC_STATIC,         8,  36, 38,  8
         ENTRYFIELD "",                          IDC_CP_EXCLUDE,    50,  35, 176,  8,
                                     ES_MARGIN | ES_AUTOSCROLL
         PUSHBUTTON "~List file...",             IDC_CP_EXCLFILE,  234,  32, 58, 14
-        LTEXT      "Names or wildcards, separated by ';'.  @FILE reads a list.",
+        LTEXT      "Names or wildcards, separated by ';'.  @FILE exclusion file.",
                                                 IDC_STATIC,        48,  22, 244,  8
         DEFPUSHBUTTON "OK",                     DID_OK,           184,   4, 50, 14
         PUSHBUTTON "Cancel",                    DID_CANCEL,       242,   4, 50, 14

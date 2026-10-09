@@ -6,7 +6,8 @@
  * far pointers stripped, Win16 GlobalAllocPtr replaced by malloc, the DOS
  * file-time restore removed.  Restructured from a one-shot ExtractZip into the
  * open/list/extract-subset shape that SZARC uses, and returning the shared
- * SZ_ERR_* result codes.  Supports stored (0) and deflated (8) entries.
+ * SZ_ERR_* result codes.  Supports stored (0), imploded (6) and deflated (8)
+ * entries; the inflater has been table-driven since 2026-10-07 (see Inflate).
  *===========================================================================*/
 
 #include <windows.h>     /* lstrcpyn */
@@ -49,7 +50,7 @@
  * Both zip encryption schemes are stream ciphers from the reader's point of
  * view, which is what makes this tidy: a single filter sits between the file
  * and the decompressor, and the decompressor never learns that the archive was
- * encrypted at all.  Everything above BrFill and the stored-copy loop is
+ * encrypted at all.  Everything above BrLoad and the stored-copy loop is
  * unchanged from the days when zips were plaintext.
  *
  * The HMAC is deliberately fed the CIPHERTEXT, before decryption, because that
@@ -164,53 +165,86 @@ static unsigned long UpdateCrc( unsigned long crc,
 
 /*===========================================================================
  * Inflate (RFC 1951) - sliding-window decoder streaming to a FILE
+ *
+ * TABLE-DRIVEN since 2026-10-07.  Every code used to be resolved a bit at a
+ * time, with a call per bit and another per input byte, which made a zip
+ * about thirty times slower to extract than the same files in an MSZIP
+ * cabinet (MSZIPDEC.C).  Now, as there:
+ *
+ *   a code of up to FAST_BITS bits - nearly every code in a real stream - is
+ *   one lookup in a table indexed by the next FAST_BITS input bits; only a
+ *   longer one walks the code lengths;
+ *
+ *   input arrives BR_INBUF bytes at a time, decrypted a buffer at a time,
+ *   and never past the entry's own data, so CiphFinish's byte count holds;
+ *
+ *   output goes straight into the 32 KB window - a match is copied in runs -
+ *   and the window goes to the sink (CRC, file, memory) each time it fills.
+ *
+ * Corrupt data is refused where zlib refuses it: a code set that is
+ * over-subscribed, a length repeat with nothing before it or running past
+ * the end, no end-of-block code, a stored block whose length check fails,
+ * and a distance back past the first byte.
  *===========================================================================*/
 #define WSIZE        32768U
 #define WSIZE_MASK   (WSIZE - 1)
+#define BR_INBUF     4096U
 
 typedef struct {
-    VolFile      *fp;
-    unsigned long bitsLeft;
-    unsigned long bitBuf;
-    unsigned long bytesLeft;
-    int           eof;
-    ZipCipher    *ciph;         /* NULL for a plaintext entry */
+    VolFile       *fp;
+    unsigned long  bitsLeft;    /* real bits in bitBuf; those above are 0  */
+    unsigned long  bitBuf;      /* the next bit is bit 0                   */
+    unsigned long  bytesLeft;   /* data not yet read from the file         */
+    int            eof;         /* a bit was wanted past the end           */
+    ZipCipher     *ciph;        /* NULL for a plaintext entry              */
+    unsigned char *in;          /* BR_INBUF bytes, read and decrypted      */
+    unsigned int   inPos;
+    unsigned int   inLen;
 } BitReader;
 
 static void BrInit( BitReader *br, VolFile *fp, unsigned long compSize,
-                    ZipCipher *ciph )
+                    ZipCipher *ciph, unsigned char *inBuf )
 {
     br->fp = fp; br->bitsLeft = 0; br->bitBuf = 0;
     br->bytesLeft = compSize; br->eof = 0;
     br->ciph = ciph;
+    br->in = inBuf; br->inPos = 0; br->inLen = 0;
 }
 
-static int BrFill( BitReader *br )
+/* Read and decrypt the next buffer of the entry's data.  -1 when there is no
+ * more (or the read failed).  Decryption happens here and nowhere else: this
+ * is where the compressed stream turns into bytes, and the decompressors
+ * above never learn that an entry was encrypted. */
+static int BrLoad( BitReader *br )
 {
-    int c;
-    if ( br->bytesLeft == 0 ) { br->eof = 1; return -1; }
-    c = VolGetc( br->fp );
-    if ( c == EOF ) { br->eof = 1; return -1; }
-    /* The one place a compressed stream turns into bytes, and therefore the
-     * one place decryption has to happen.  A byte at a time is not as costly
-     * as it looks: ZipCrypto is byte-oriented anyway, and AES-CTR only runs
-     * the block cipher once per sixteen calls. */
-    if ( br->ciph )
+    unsigned int n = ( br->bytesLeft > BR_INBUF ) ? BR_INBUF
+                                                  : (unsigned int)br->bytesLeft;
+    if ( n == 0 ) return -1;
+    n = (unsigned int)VolRead( br->in, 1, n, br->fp );
+    if ( n == 0 ) { br->bytesLeft = 0; return -1; }
+    CiphDecrypt( br->ciph, br->in, n );
+    br->bytesLeft -= n;
+    br->inPos = 0;
+    br->inLen = n;
+    return 0;
+}
+
+/* At least 'n' bits (n <= 24) in bitBuf.  -1 when the data ends first; the
+ * bits that are there stay, and the ones above them read as 0. */
+static int BrNeed( BitReader *br, unsigned n )
+{
+    while ( br->bitsLeft < n )
     {
-        unsigned char b = (unsigned char)c;
-        CiphDecrypt( br->ciph, &b, 1 );
-        c = b;
+        if ( br->inPos == br->inLen && BrLoad( br ) ) return -1;
+        br->bitBuf |= (unsigned long)br->in[br->inPos++] << br->bitsLeft;
+        br->bitsLeft += 8;
     }
-    br->bytesLeft--;
-    br->bitBuf |= ( (unsigned long)(unsigned char)c ) << br->bitsLeft;
-    br->bitsLeft += 8;
     return 0;
 }
 
 static unsigned long BrBits( BitReader *br, unsigned n )
 {
-    while ( br->bitsLeft < n )
-        if ( BrFill( br ) ) return 0;
+    if ( BrNeed( br, n ) ) { br->eof = 1; return 0; }
     return br->bitBuf & ( ( 1UL << n ) - 1UL );
 }
 
@@ -229,55 +263,108 @@ static unsigned long BrRead( BitReader *br, unsigned n )
 
 #define MAX_BITS   15
 #define MAX_CODES  288
+#define FAST_BITS  9
+#define FAST_SIZE  ( 1U << FAST_BITS )
 
+/* fast[] holds ( length << 9 ) | symbol for each code of up to FAST_BITS
+ * bits, at every index whose low bits are that code as it arrives; 0 means
+ * the code there is longer - no real code has length 0. */
 typedef struct {
-    short          vals[MAX_CODES];
-    unsigned short offsets[MAX_BITS + 2];
-    unsigned short maxlen;
+    unsigned short count[MAX_BITS + 1];  /* codes of each length           */
+    unsigned short symbol[MAX_CODES];    /* symbols in canonical order     */
+    unsigned short fast[FAST_SIZE];
 } HuffTree;
 
+/* -1 for a set of lengths that is over-subscribed.  An incomplete set is
+ * allowed, as RFC 1951 allows a distance tree of one code; a bit pattern
+ * that is no code at all is caught when it is decoded. */
 static int BuildHuff( HuffTree *ht, const unsigned char *lens, int n )
 {
-    int i, len;
-    unsigned short cnt[MAX_BITS + 1];
-    unsigned short nxt[MAX_BITS + 1];
+    unsigned short offs[MAX_BITS + 2];
+    unsigned long  next[MAX_BITS + 2];
+    unsigned long  code;
+    int            len, sym, left;
 
-    memset( cnt, 0, sizeof( cnt ) );
-    for ( i = 0; i < n; i++ )
-        if ( lens[i] ) cnt[(int)lens[i]]++;
+    memset( ht->count, 0, sizeof( ht->count ) );
+    for ( sym = 0; sym < n; sym++ )
+        ht->count[lens[sym]]++;
+    ht->count[0] = 0;
 
-    ht->maxlen = 0;
+    left = 1;
     for ( len = 1; len <= MAX_BITS; len++ )
-        if ( cnt[len] && (unsigned)len > ht->maxlen )
-            ht->maxlen = (unsigned short)len;
-    if ( ht->maxlen == 0 ) return 0;
+    {
+        left <<= 1;
+        left -= ht->count[len];
+        if ( left < 0 ) return -1;
+    }
 
-    ht->offsets[0] = 0;
-    for ( len = 1; len <= MAX_BITS + 1; len++ )
-        ht->offsets[len] = ht->offsets[len-1] + cnt[len-1];
+    offs[1] = 0;
+    for ( len = 1; len < MAX_BITS; len++ )
+        offs[len + 1] = (unsigned short)( offs[len] + ht->count[len] );
+    for ( sym = 0; sym < n; sym++ )
+        if ( lens[sym] ) ht->symbol[offs[lens[sym]]++] = (unsigned short)sym;
 
-    memcpy( nxt, ht->offsets, sizeof( nxt ) );
-    for ( i = 0; i < n; i++ )
-        if ( lens[i] )
-            ht->vals[nxt[(int)lens[i]]++] = (short)i;
+    /* RFC 1951 sends a code's most significant bit first, into a stream
+     * read least significant first, so the index is the code reversed. */
+    memset( ht->fast, 0, sizeof( ht->fast ) );
+    code = 0;
+    for ( len = 1; len <= MAX_BITS; len++ )
+    {
+        code = ( code + ht->count[len - 1] ) << 1;
+        next[len] = code;
+    }
+    for ( sym = 0; sym < n; sym++ )
+    {
+        unsigned long rev = 0, val;
+        int           i;
 
+        len = lens[sym];
+        if ( !len || len > FAST_BITS ) continue;
+        val = next[len]++;
+        for ( i = 0; i < len; i++ )
+        {
+            rev = ( rev << 1 ) | ( val & 1 );
+            val >>= 1;
+        }
+        for ( ; rev < FAST_SIZE; rev += 1UL << len )
+            ht->fast[rev] = (unsigned short)( ( len << 9 ) | sym );
+    }
     return 0;
 }
 
-static int HuffDecode( HuffTree *ht, BitReader *br )
+/* The next symbol, or -1 for a pattern that is no code or a code that
+ * would need bits past the end of the data. */
+static int HuffDecode( const HuffTree *ht, BitReader *br )
 {
-    unsigned long code, base;
-    unsigned int  len, count;
+    unsigned int entry, len;
+    int          code, first, index, count;
 
-    code = 0; base = 0;
-    for ( len = 1; len <= (unsigned int)ht->maxlen; len++ )
+    BrNeed( br, MAX_BITS );            /* short only at the very end */
+    entry = ht->fast[br->bitBuf & ( FAST_SIZE - 1 )];
+    if ( entry )
     {
-        code = ( code << 1 ) | (unsigned long)BrRead( br, 1 );
-        if ( br->eof ) return -1;
-        count = ht->offsets[len+1] - ht->offsets[len];
-        if ( count && code >= base && code < base + count )
-            return ht->vals[ht->offsets[len] + (unsigned int)( code - base )];
-        base = ( base + count ) << 1;
+        len = entry >> 9;
+        if ( len > br->bitsLeft ) { br->eof = 1; return -1; }
+        BrConsume( br, len );
+        return (int)( entry & 0x1FF );
+    }
+
+    /* Longer than the table: walk the lengths a code bit at a time.  'code'
+     * never falls below 'first', so the subtraction cannot wrap. */
+    code = first = index = 0;
+    for ( len = 1; len <= MAX_BITS; len++ )
+    {
+        if ( len > br->bitsLeft ) { br->eof = 1; return -1; }
+        code |= (int)( ( br->bitBuf >> ( len - 1 ) ) & 1 );
+        count = ht->count[len];
+        if ( code - first < count )
+        {
+            BrConsume( br, len );
+            return ht->symbol[index + code - first];
+        }
+        index += count;
+        first  = ( first + count ) << 1;
+        code <<= 1;
     }
     return -1;
 }
@@ -312,40 +399,47 @@ static const unsigned char distExtra[30] = {
 
 #define OBUF_SIZE 8192U
 
+/* Where decoded bytes go: the CRC always, and a file or a memory buffer
+ * (neither when testing).  Explode collects bytes in buf and sends them a
+ * buffer at a time; Inflate sends its window. */
 typedef struct {
     FILE          *out;      /* file sink (NULL when testing or mem sink)   */
     unsigned char *mem;      /* memory sink (NULL when file / test)         */
     unsigned long  memPos;
     unsigned long  memCap;
-    unsigned char *buf;
+    unsigned char *buf;      /* Explode only                                */
     unsigned int   len;
     unsigned long  crc;
     int            rc;       /* SZ_OK / SZ_ERR_WRITE */
 } OutBuf;
 
-static int OutFlush( OutBuf *o )
+static int OutWrite( OutBuf *o, const unsigned char *p, unsigned int n )
 {
-    if ( o->len )
+    if ( n == 0 ) return 0;
+    o->crc = UpdateCrc( o->crc, p, (unsigned long)n );
+    if ( o->out && fwrite( p, 1, n, o->out ) != n )
+    {                                        /* out == NULL => test only */
+        o->rc = SZ_ERR_WRITE;
+        return -1;
+    }
+    if ( o->mem )                            /* memory sink (.imz unwrap)  */
     {
-        o->crc = UpdateCrc( o->crc, o->buf, (unsigned long)o->len );
-        if ( o->out && fwrite( o->buf, 1, o->len, o->out ) != o->len )
-        {                                    /* out == NULL => test only */
+        if ( o->memPos + n > o->memCap )
+        {
             o->rc = SZ_ERR_WRITE;
             return -1;
         }
-        if ( o->mem )                        /* memory sink (.imz unwrap)  */
-        {
-            if ( o->memPos + o->len > o->memCap )
-            {
-                o->rc = SZ_ERR_WRITE;
-                return -1;
-            }
-            memcpy( o->mem + o->memPos, o->buf, o->len );
-            o->memPos += o->len;
-        }
-        o->len = 0;
+        memcpy( o->mem + o->memPos, p, n );
+        o->memPos += n;
     }
     return 0;
+}
+
+static int OutFlush( OutBuf *o )
+{
+    int r = OutWrite( o, o->buf, o->len );
+    o->len = 0;
+    return r;
 }
 
 static int OutByte( OutBuf *o, unsigned char b )
@@ -356,178 +450,253 @@ static int OutByte( OutBuf *o, unsigned char b )
     return 0;
 }
 
-static int InflateBlock( BitReader *br, OutBuf *o,
-                         unsigned char *window, unsigned int *wpos,
-                         HuffTree *hl, HuffTree *hd )
-{
-    int sym, li, di, len;
-    unsigned int dist, back;
-    unsigned char b;
+/* Inflate's window, which is also its output buffer: win[0..pos) has not
+ * been sent on yet, and win[pos..WSIZE) still holds the lap before. */
+typedef struct {
+    unsigned char *win;
+    unsigned int   pos;
+    unsigned long  total;    /* bytes decoded so far - how far back a
+                              * distance may reach */
+} InfWin;
 
-    for ( ;; )
+static int WinPut( InfWin *w, OutBuf *o, unsigned char b )
+{
+    w->win[w->pos++] = b;
+    w->total++;
+    if ( w->pos == WSIZE )
     {
-        sym = HuffDecode( hl, br );
-        if ( sym < 0 ) return SZ_ERR_DATA;
-        if ( sym == 256 ) break;
-        if ( sym < 256 )
+        w->pos = 0;
+        return OutWrite( o, w->win, WSIZE );
+    }
+    return 0;
+}
+
+static int InflateStored( BitReader *br, OutBuf *o, InfWin *w )
+{
+    unsigned int len, nlen;
+
+    BrConsume( br, (unsigned)( br->bitsLeft & 7U ) );  /* to a byte boundary */
+    len  = (unsigned int)BrRead( br, 16 );
+    nlen = (unsigned int)BrRead( br, 16 );
+    if ( br->eof || len != ( ~nlen & 0xFFFFU ) ) return SZ_ERR_DATA;
+
+    while ( len > 0 )
+    {
+        if ( br->bitsLeft >= 8 )            /* whole bytes already taken in */
         {
-            b = (unsigned char)sym;
-            window[*wpos] = b;
-            *wpos = ( *wpos + 1 ) & WSIZE_MASK;
-            if ( OutByte( o, b ) ) return o->rc;
+            if ( WinPut( w, o, (unsigned char)br->bitBuf ) ) return o->rc;
+            BrConsume( br, 8 );
+            len--;
         }
-        else
+        else                                /* then straight from the buffer */
         {
-            li = sym - 257;
-            if ( li < 0 || li >= 29 ) return SZ_ERR_DATA;
-            len = lenBase[li] + (int)BrRead( br, lenExtra[li] );
-            if ( br->eof ) return SZ_ERR_DATA;
-            di = HuffDecode( hd, br );
-            if ( br->eof || di < 0 || di >= 30 ) return SZ_ERR_DATA;
-            dist = distBase[di] + (unsigned int)BrRead( br, distExtra[di] );
-            if ( br->eof ) return SZ_ERR_DATA;
-            while ( len-- > 0 )
+            unsigned int run;
+
+            if ( br->inPos == br->inLen && BrLoad( br ) ) return SZ_ERR_DATA;
+            run = br->inLen - br->inPos;
+            if ( run > len ) run = len;
+            if ( run > WSIZE - w->pos ) run = WSIZE - w->pos;
+            memcpy( w->win + w->pos, br->in + br->inPos, run );
+            br->inPos += run;
+            w->pos    += run;
+            w->total  += run;
+            len       -= run;
+            if ( w->pos == WSIZE )
             {
-                back = ( *wpos + WSIZE - dist ) & WSIZE_MASK;
-                b = window[back];
-                window[*wpos] = b;
-                *wpos = ( *wpos + 1 ) & WSIZE_MASK;
-                if ( OutByte( o, b ) ) return o->rc;
+                w->pos = 0;
+                if ( OutWrite( o, w->win, WSIZE ) ) return o->rc;
             }
         }
     }
     return SZ_OK;
 }
 
+static int InflateCodes( BitReader *br, OutBuf *o, InfWin *w,
+                         const HuffTree *hl, const HuffTree *hd )
+{
+    unsigned char *win = w->win;
+    unsigned int   pos = w->pos;
+    int            rc  = SZ_OK;
+
+    for ( ;; )
+    {
+        int sym = HuffDecode( hl, br );
+
+        if ( sym < 256 )
+        {
+            if ( sym < 0 ) { rc = SZ_ERR_DATA; break; }
+            win[pos++] = (unsigned char)sym;
+            w->total++;
+            if ( pos == WSIZE )
+            {
+                pos = 0;
+                if ( OutWrite( o, win, WSIZE ) ) { rc = o->rc; break; }
+            }
+        }
+        else if ( sym == 256 )
+            break;
+        else
+        {
+            unsigned int len, dist, src;
+            int          li = sym - 257, di;
+
+            if ( li >= 29 ) { rc = SZ_ERR_DATA; break; }
+            len = lenBase[li] + (unsigned int)BrRead( br, lenExtra[li] );
+            di  = HuffDecode( hd, br );
+            if ( di < 0 || di >= 30 ) { rc = SZ_ERR_DATA; break; }
+            dist = distBase[di] + (unsigned int)BrRead( br, distExtra[di] );
+            if ( br->eof || dist > w->total ) { rc = SZ_ERR_DATA; break; }
+            w->total += len;
+
+            /* In runs that wrap neither end; a byte at a time inside a run,
+             * so a distance shorter than the length repeats as it should. */
+            src = ( pos - dist ) & WSIZE_MASK;
+            while ( len > 0 )
+            {
+                unsigned int run = len, i;
+
+                if ( run > WSIZE - pos ) run = WSIZE - pos;
+                if ( run > WSIZE - src ) run = WSIZE - src;
+                for ( i = 0; i < run; i++ ) win[pos + i] = win[src + i];
+                pos += run;
+                src  = ( src + run ) & WSIZE_MASK;
+                len -= run;
+                if ( pos == WSIZE )
+                {
+                    pos = 0;
+                    if ( OutWrite( o, win, WSIZE ) ) { rc = o->rc; goto out; }
+                }
+            }
+        }
+    }
+out:
+    w->pos = pos;
+    return rc;
+}
+
 static const int clOrder[19] = {
     16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15
 };
+
+/* A dynamic block's header: the code-length code, then the two trees. */
+static int InflateDynamic( BitReader *br, HuffTree *hl, HuffTree *hd,
+                           HuffTree *hcl )
+{
+    unsigned char clLens[19];
+    unsigned char allLens[288 + 32];
+    int           hlit, hdist, hclen, ci, total, idx;
+
+    hlit  = (int)BrRead( br, 5 ) + 257;
+    hdist = (int)BrRead( br, 5 ) + 1;
+    hclen = (int)BrRead( br, 4 ) + 4;
+
+    memset( clLens, 0, sizeof( clLens ) );
+    for ( ci = 0; ci < hclen; ci++ )
+        clLens[clOrder[ci]] = (unsigned char)BrRead( br, 3 );
+    if ( br->eof || BuildHuff( hcl, clLens, 19 ) ) return SZ_ERR_DATA;
+
+    total = hlit + hdist;
+    idx   = 0;
+    while ( idx < total )
+    {
+        int           s = HuffDecode( hcl, br ), rep;
+        unsigned char val;
+
+        if ( s < 0 ) return SZ_ERR_DATA;
+        if ( s < 16 )
+        {
+            allLens[idx++] = (unsigned char)s;
+            continue;
+        }
+        if ( s == 16 )
+        {
+            if ( idx == 0 ) return SZ_ERR_DATA;      /* nothing to repeat */
+            val = allLens[idx - 1];
+            rep = (int)BrRead( br, 2 ) + 3;
+        }
+        else if ( s == 17 )
+        {
+            val = 0;
+            rep = (int)BrRead( br, 3 ) + 3;
+        }
+        else
+        {
+            val = 0;
+            rep = (int)BrRead( br, 7 ) + 11;
+        }
+        if ( br->eof || idx + rep > total ) return SZ_ERR_DATA;
+        while ( rep-- ) allLens[idx++] = val;
+    }
+
+    if ( allLens[256] == 0 ) return SZ_ERR_DATA;     /* no end-of-block code */
+    if ( BuildHuff( hl, allLens, hlit ) ) return SZ_ERR_DATA;
+    if ( BuildHuff( hd, allLens + hlit, hdist ) ) return SZ_ERR_DATA;
+    return SZ_OK;
+}
 
 static int Inflate( VolFile *in, FILE *out,
                     unsigned char *memSink, unsigned long memCap,
                     unsigned long compSize, unsigned long uncompSize,
                     unsigned long *crcOut, ZipCipher *ciph )
 {
-    unsigned char *window;
+    unsigned char *inBuf;
     unsigned char  llit[288], ldist[32];
-    unsigned char  clLens[19];
-    unsigned char  allLens[288 + 32];
     HuffTree      *hl, *hd, *hcl;
     BitReader      br;
     OutBuf         o;
-    unsigned int   wpos;
+    InfWin         w;
     int            rc, bfinal, btype;
-    int            hlit, hdist, hclen, ci, total, idx, s, rep;
-    unsigned int   blen, bnlen;
-    unsigned char  stbyte;
-    unsigned int   excess;
 
     (void)uncompSize;
-    window = NULL; hl = NULL; hd = NULL; hcl = NULL;
-    wpos = 0; rc = SZ_OK;
-    o.buf = NULL;
-
-    window = (unsigned char *)malloc( WSIZE );
-    hl     = (HuffTree *)malloc( sizeof( HuffTree ) );
-    hd     = (HuffTree *)malloc( sizeof( HuffTree ) );
-    o.buf  = (unsigned char *)malloc( OBUF_SIZE );
-    if ( !window || !hl || !hd || !o.buf ) { rc = SZ_ERR_MEMORY; goto done; }
+    w.win = (unsigned char *)malloc( WSIZE );
+    inBuf = (unsigned char *)malloc( BR_INBUF );
+    hl    = (HuffTree *)malloc( sizeof( HuffTree ) );
+    hd    = (HuffTree *)malloc( sizeof( HuffTree ) );
+    hcl   = (HuffTree *)malloc( sizeof( HuffTree ) );
+    if ( !w.win || !inBuf || !hl || !hd || !hcl ) { rc = SZ_ERR_MEMORY; goto done; }
+    w.pos = 0;
+    w.total = 0;
 
     o.out = out; o.mem = memSink; o.memPos = 0; o.memCap = memCap;
-    o.len = 0; o.crc = 0; o.rc = SZ_OK;
-    BrInit( &br, in, compSize, ciph );
+    o.buf = NULL; o.len = 0; o.crc = 0; o.rc = SZ_OK;
+    BrInit( &br, in, compSize, ciph, inBuf );
 
     for ( ;; )
     {
         bfinal = (int)BrRead( &br, 1 );
         btype  = (int)BrRead( &br, 2 );
+        if ( br.eof ) { rc = SZ_ERR_DATA; goto done; }
 
         if ( btype == 0 )
-        {
-            excess = (unsigned int)( br.bitsLeft & 7U );
-            if ( excess ) BrConsume( &br, excess );
-            blen  = (unsigned int)BrRead( &br, 16 );
-            bnlen = (unsigned int)BrRead( &br, 16 );
-            (void)bnlen;
-            while ( blen-- > 0 )
-            {
-                stbyte = (unsigned char)BrRead( &br, 8 );
-                if ( br.eof ) { rc = SZ_ERR_DATA; goto done; }
-                window[wpos] = stbyte;
-                wpos = ( wpos + 1 ) & WSIZE_MASK;
-                if ( OutByte( &o, stbyte ) ) { rc = o.rc; goto done; }
-            }
-        }
+            rc = InflateStored( &br, &o, &w );
         else if ( btype == 1 )
         {
             StaticLens( llit, ldist );
             BuildHuff( hl, llit, 288 );
             BuildHuff( hd, ldist, 32 );
-            rc = InflateBlock( &br, &o, window, &wpos, hl, hd );
-            if ( rc ) goto done;
+            rc = InflateCodes( &br, &o, &w, hl, hd );
         }
         else if ( btype == 2 )
         {
-            hlit  = (int)BrRead( &br, 5 ) + 257;
-            hdist = (int)BrRead( &br, 5 ) + 1;
-            hclen = (int)BrRead( &br, 4 ) + 4;
-
-            memset( clLens, 0, sizeof( clLens ) );
-            for ( ci = 0; ci < hclen; ci++ )
-                clLens[clOrder[ci]] = (unsigned char)BrRead( &br, 3 );
-
-            hcl = (HuffTree *)malloc( sizeof( HuffTree ) );
-            if ( !hcl ) { rc = SZ_ERR_MEMORY; goto done; }
-            BuildHuff( hcl, clLens, 19 );
-
-            total = hlit + hdist;
-            idx   = 0;
-            while ( idx < total )
-            {
-                s = HuffDecode( hcl, &br );
-                if ( s < 0 ) { rc = SZ_ERR_DATA; goto done; }
-                if ( s < 16 )
-                    allLens[idx++] = (unsigned char)s;
-                else if ( s == 16 )
-                {
-                    rep = (int)BrRead( &br, 2 ) + 3;
-                    stbyte = idx ? allLens[idx-1] : 0;
-                    while ( rep-- && idx < total ) allLens[idx++] = stbyte;
-                }
-                else if ( s == 17 )
-                {
-                    rep = (int)BrRead( &br, 3 ) + 3;
-                    while ( rep-- && idx < total ) allLens[idx++] = 0;
-                }
-                else
-                {
-                    rep = (int)BrRead( &br, 7 ) + 11;
-                    while ( rep-- && idx < total ) allLens[idx++] = 0;
-                }
-            }
-            BuildHuff( hl, allLens,        hlit );
-            BuildHuff( hd, allLens + hlit, hdist );
-            free( hcl ); hcl = NULL;
-            rc = InflateBlock( &br, &o, window, &wpos, hl, hd );
-            if ( rc ) goto done;
+            rc = InflateDynamic( &br, hl, hd, hcl );
+            if ( rc == SZ_OK ) rc = InflateCodes( &br, &o, &w, hl, hd );
         }
         else
-        {
-            rc = SZ_ERR_DATA; goto done;
-        }
-
+            rc = SZ_ERR_DATA;
+        if ( rc ) goto done;
         if ( bfinal ) break;
     }
 
-    if ( OutFlush( &o ) ) { rc = o.rc; goto done; }
+    if ( OutWrite( &o, w.win, w.pos ) ) { rc = o.rc; goto done; }
     *crcOut = o.crc;
+    rc = SZ_OK;
 
 done:
-    if ( window ) free( window );
-    if ( hl )     free( hl );
-    if ( hd )     free( hd );
-    if ( hcl )    free( hcl );
-    if ( o.buf )  free( o.buf );
+    if ( w.win ) free( w.win );
+    if ( inBuf ) free( inBuf );
+    if ( hl )    free( hl );
+    if ( hd )    free( hd );
+    if ( hcl )   free( hcl );
     return rc;
 }
 
@@ -614,7 +783,7 @@ static int Explode( VolFile *in, FILE *out,
                     unsigned int gpflag, unsigned long *crcOut,
                     ZipCipher *ciph )
 {
-    unsigned char *window;
+    unsigned char *window, *inBuf;
     SfTree        *litT, *lenT, *distT;
     BitReader      br;
     OutBuf         o;
@@ -622,7 +791,7 @@ static int Explode( VolFile *in, FILE *out,
     unsigned long  produced;
     int            rc, bigDict, threeTrees, distLow, minMatch;
 
-    window = NULL; litT = NULL; lenT = NULL; distT = NULL;
+    window = NULL; inBuf = NULL; litT = NULL; lenT = NULL; distT = NULL;
     wpos = 0; produced = 0; rc = SZ_OK;
     o.buf = NULL;
 
@@ -632,17 +801,18 @@ static int Explode( VolFile *in, FILE *out,
     minMatch   = threeTrees ? 3 : 2;
 
     window = (unsigned char *)malloc( WSIZE );
+    inBuf  = (unsigned char *)malloc( BR_INBUF );
     lenT   = (SfTree *)malloc( sizeof( SfTree ) );
     distT  = (SfTree *)malloc( sizeof( SfTree ) );
     o.buf  = (unsigned char *)malloc( OBUF_SIZE );
     if ( threeTrees ) litT = (SfTree *)malloc( sizeof( SfTree ) );
-    if ( !window || !lenT || !distT || !o.buf || ( threeTrees && !litT ) )
+    if ( !window || !inBuf || !lenT || !distT || !o.buf || ( threeTrees && !litT ) )
     { rc = SZ_ERR_MEMORY; goto edone; }
     memset( window, 0, WSIZE );
 
     o.out = out; o.mem = memSink; o.memPos = 0; o.memCap = memCap;
     o.len = 0; o.crc = 0; o.rc = SZ_OK;
-    BrInit( &br, in, compSize, ciph );
+    BrInit( &br, in, compSize, ciph, inBuf );
 
     if ( threeTrees && SfLoad( litT, &br, 256 ) ) { rc = SZ_ERR_DATA; goto edone; }
     if ( SfLoad( lenT,  &br, 64 ) )               { rc = SZ_ERR_DATA; goto edone; }
@@ -698,6 +868,7 @@ static int Explode( VolFile *in, FILE *out,
 
 edone:
     if ( window ) free( window );
+    if ( inBuf )  free( inBuf );
     if ( litT )   free( litT );
     if ( lenT )   free( lenT );
     if ( distT )  free( distT );
@@ -754,16 +925,18 @@ static void ZipReadComment( ZipArchive *z, long eocdPos, unsigned short len )
 
 /*---- The largest single extraction this archive will ask for -------------- *
  * Zip is the cheap one and it is cheap by a wide margin: extraction to disk
- * streams through a fixed 32 KB sliding window and an 8 KB output buffer, and
- * neither Inflate nor Explode allocates anything that grows with the entry.
- * It is the same figure for a 2 KB zip and a 2 GB one, which is precisely why
- * a single program-wide memory check could never have been right - see
- * ArcMemNeeded in ARCFILE.C.
+ * streams through a fixed 32 KB sliding window, a 4 KB input buffer and (for
+ * Explode) an 8 KB output buffer, and neither Inflate nor Explode allocates
+ * anything that grows with the entry.  It is the same figure for a 2 KB zip
+ * and a 2 GB one, which is precisely why a single program-wide memory check
+ * could never have been right - see ArcMemNeeded in ARCFILE.C.
  *
- * Measured against the tracking allocator: NASTY.ZIP peaks at 44 KB with a
- * 32 KB largest block, which is the window.  The trees are a few hundred
- * bytes each and are counted here rather than waved away, since on the
- * machines this matters a few hundred bytes is a real fraction.
+ * Measured against the tracking allocator (before the table-driven inflater
+ * of 2026-10-07): NASTY.ZIP peaked at 44 KB with a 32 KB largest block, which
+ * is the window.  The trees - about 1.6 KB each for Inflate's, with their
+ * lookup tables - are counted here rather than waved away, since on the
+ * machines this matters a few KB is a real fraction.  The sum covers either
+ * decompressor; each needs less.
  *
  * z MAY BE NULL, and that is load-bearing rather than mere tolerance:
  * ArcMemStartupOk asks this function what the cheapest possible extraction
@@ -776,7 +949,7 @@ UInt32 ZipMemNeeded( ZipArchive *z )
     UInt32 trees = (UInt32)( sizeof( HuffTree ) * 3 + sizeof( SfTree ) * 3 );
 
     (void)z;
-    return (UInt32)WSIZE + (UInt32)OBUF_SIZE + trees;
+    return (UInt32)WSIZE + (UInt32)BR_INBUF + (UInt32)OBUF_SIZE + trees;
 }
 
 const char *ZipComment( ZipArchive *z )

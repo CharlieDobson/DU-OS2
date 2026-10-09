@@ -90,6 +90,7 @@
 #define IDC_CP_PATHS                    1029
 #define IDC_CP_EXCLUDE                  1030
 #define IDC_CP_EXCLFILE                 1031
+#define IDC_CP_RESETARCATTRIB           1032
 #define IDC_STATIC                      -1
 
 #endif /* RESOURCE_H */

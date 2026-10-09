@@ -932,12 +932,20 @@ static int ExtractProgress( void *user, int fileIndex, int fileCount,
 /* Progress for a compression job.  WORKER THREAD, like ExtractProgress:
  * while the files are still being found fileCount is -1 and there is no
  * total yet, so the line says so and the bar waits; after that the bar is
- * measured in kilobytes read, which is what takes the time. */
+ * measured in kilobytes read, which is what takes the time.  When the
+ * Archive attribute is to come off the files, that is a last part of its
+ * own, after the archive is made. */
 static int CompressProgress( void *user, int i, int n, const char *name,
                              UInt32 doneKB, UInt32 totalKB )
 {
     (void)user;
-    if ( n < 0 )
+    if ( n == ARC_COMP_CLEARING )
+    {
+        char line[CCHMAXPATH + 32];
+        sprintf( line, "Clearing Archive attribute: %.200s", name ? name : "" );
+        ProgressSet( 100, line );
+    }
+    else if ( n < 0 )
     {
         char line[CCHMAXPATH + 32];
         sprintf( line, "Scanning %d: %.200s", i + 1, name ? name : "" );
@@ -1815,17 +1823,19 @@ static void DoExtractTo( HWND hwnd )
  *
  * The same dialog as the Win32s build's, control for control: the list
  * (Add Files - several at once - Add Folder, Remove), the archive's name and
- * Browse for its folder, the format, folder names or flat, and what to leave
- * out.  The job is set up here on the UI thread and handed to the worker as
- * ARCJOB_COMPRESS; ArcOnDone reports it and frees it.  The format and the
- * folder-names choice are remembered in XARCHIVE.INI.
+ * Browse for its folder, the format, folder names or flat, whether the files
+ * lose their Archive attribute, and what to leave out.  The job is set up
+ * here on the UI thread and handed to the worker as ARCJOB_COMPRESS;
+ * ArcOnDone reports it and frees it.  The format and the two options are
+ * remembered in XARCHIVE.INI.
  *===========================================================================*/
-static char **g_compItems = NULL;
-static int    g_compCount = 0;
+static char **g_compItems    = NULL;
+static int    g_compCount    = 0;
 static char   g_compArchive[CCHMAXPATH];
 static char   g_compExclude[CCHMAXPATH * 2];
-static int    g_compFmt   = ARC_CF_ZIP;
-static int    g_compPaths = 1;
+static int    g_compFmt      = ARC_CF_ZIP;
+static int    g_compPaths    = 1;
+static int    g_compClearArc = 0;
 
 static void FreeCompItems( void )
 {
@@ -1928,6 +1938,7 @@ MRESULT EXPENTRY CompressDlgProc( HWND hDlg, ULONG msg, MPARAM mp1, MPARAM mp2 )
     case WM_INITDLG:
         WinCheckButton( hDlg, ( g_compFmt == ARC_CF_7Z ) ? IDC_CP_7Z : IDC_CP_ZIP, 1 );
         WinCheckButton( hDlg, IDC_CP_PATHS, g_compPaths ? 1 : 0 );
+        WinCheckButton( hDlg, IDC_CP_RESETARCATTRIB, g_compClearArc ? 1 : 0 );
         /* An ENTRYFIELD stops at 32 characters unless told otherwise. */
         WinSendDlgItemMsg( hDlg, IDC_CP_ARCHIVE, EM_SETTEXTLIMIT,
                            MPFROMSHORT( CCHMAXPATH - 8 ), 0 );
@@ -2052,6 +2063,7 @@ MRESULT EXPENTRY CompressDlgProc( HWND hDlg, ULONG msg, MPARAM mp1, MPARAM mp2 )
             }
             g_compFmt   = CompFormatChecked( hDlg );
             g_compPaths = WinQueryButtonCheckstate( hDlg, IDC_CP_PATHS ) ? 1 : 0;
+            g_compClearArc = WinQueryButtonCheckstate( hDlg, IDC_CP_RESETARCATTRIB ) ? 1 : 0;
             {
                 /* A name saying .7z or .zip has the last word on the format;
                  * one with no extension gets the format's. */
@@ -2197,8 +2209,9 @@ static void DoCompress( HWND hwnd )
         return;
     }
 
-    g_compFmt   = ArcPrefCompressFormat();
-    g_compPaths = ArcPrefCompressFolders();
+    g_compFmt      = ArcPrefCompressFormat();
+    g_compPaths    = ArcPrefCompressFolders();
+    g_compClearArc = ArcPrefCompressClearArchive();
     FreeCompItems();
     if ( WinDlgBox( HWND_DESKTOP, hwnd, CompressDlgProc, NULLHANDLE,
                     IDD_COMPRESS, NULL ) != DID_OK || g_compCount == 0 )
@@ -2208,6 +2221,7 @@ static void DoCompress( HWND hwnd )
     }
     ArcPrefSetCompressFormat( g_compFmt );
     ArcPrefSetCompressFolders( g_compPaths );
+    ArcPrefSetCompressClearArchive( g_compClearArc );
     ArcPrefSave();
 
     /* Replacing an archive is the user's call.  Nothing is lost until the
@@ -2232,6 +2246,7 @@ static void DoCompress( HWND hwnd )
     }
     ArcCompSetFormat( j, g_compFmt );
     ArcCompSetPaths( j, g_compPaths );
+    ArcCompSetClearArchive( j, g_compClearArc );
     rc = ArcCompExclude( j, g_compExclude );
     for ( i = 0; i < g_compCount && rc == SZ_OK; i++ )
         rc = ArcCompAdd( j, g_compItems[i] );
@@ -2539,10 +2554,16 @@ static void CreateToolbar( HWND parent )
 {
     HPS         hps;
     FONTMETRICS fm;
-    int         i;
+    POINTL      aptl[TXTBOX_COUNT];
+    char        label[32];
+    LONG        cxText, cxWidest;
+    int         i, j, len;
 
     /* Size the buttons from the system font so the strip scales with the
-     * display, rather than freezing pixel counts from a 1024x768 desktop. */
+     * display, rather than freezing pixel counts from a 1024x768 desktop.
+     * The width comes from the widest label as drawn plus room for the bevel:
+     * ten average characters clipped both ends of "Compress", whose C and m
+     * run well past the average. */
     hps = WinGetPS( parent );
     if ( hps != NULLHANDLE )
     {
@@ -2550,7 +2571,26 @@ static void CreateToolbar( HWND parent )
         if ( GpiQueryFontMetrics( hps, (LONG)sizeof( fm ), &fm ) &&
              fm.lAveCharWidth > 0 && fm.lMaxBaselineExt > 0 )
         {
-            g_btnW = fm.lAveCharWidth * 10;
+            cxWidest = 0;
+            for ( i = 0; i < TB_COUNT; i++ )
+            {
+                /* the mnemonic '~' is not drawn, so it is not measured */
+                len = 0;
+                for ( j = 0; g_tbText[i][j] != '\0' &&
+                             len < (int)sizeof( label ) - 1; j++ )
+                {
+                    if ( g_tbText[i][j] != '~' ) label[len++] = g_tbText[i][j];
+                }
+                if ( GpiQueryTextBox( hps, (LONG)len, (PCH)label,
+                                      TXTBOX_COUNT, aptl ) )
+                {
+                    cxText = aptl[TXTBOX_TOPRIGHT].x - aptl[TXTBOX_TOPLEFT].x;
+                    if ( cxText > cxWidest ) cxWidest = cxText;
+                }
+            }
+
+            g_btnW = cxWidest + fm.lAveCharWidth * 3;
+            if ( g_btnW < fm.lAveCharWidth * 10 ) g_btnW = fm.lAveCharWidth * 10;
             g_btnH = fm.lMaxBaselineExt * 2;
         }
         WinReleasePS( hps );

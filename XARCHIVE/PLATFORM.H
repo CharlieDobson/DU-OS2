@@ -40,6 +40,11 @@ void SetFileDosAttr( const char *path, DWORD attr, int isDir );
  * to recreate a hidden or system file.  No-op when none are set. */
 void ClearFileAttr( const char *path );
 
+/* Take the archive bit off a file that has just gone into an archive, and
+ * leave R, H and S as they are.  Silently does nothing when the bit is not
+ * set or cannot be changed (a write-protected disk, a CD-ROM). */
+void ClearArchiveBit( const char *path );
+
 /*---- Reading a folder, for the archive writer ------------------------------ *
  * One entry of a directory search, with everything the writer needs taken
  * from the search itself - so a folder of a thousand files costs a thousand

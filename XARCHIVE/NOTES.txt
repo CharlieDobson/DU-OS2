@@ -30,9 +30,35 @@ THE BACKEND IS A VERBATIM COPY, AND IS MEANT TO STAY ONE
     by editing a copy.  If one of them has to change for OS/2, change it in
     the DU32 tree behind an __OS2__ guard and copy the whole file back.
 
-    Last synced 2026-10-07, sixteen files: extraction now puts back the
-    attributes the archive recorded and writes over read-only, hidden and
-    system files once the user has said yes; 7z folders are LZMA2.
+    Last synced 2026-10-07 (evening), two files: ZIPARC.C, whose inflater
+    is table-driven now (a 9-bit lookup per code, input read and decrypted
+    4 KB at a time, output straight into the window) - zips test about
+    thirty times faster - and no longer hangs on a stream whose final-block
+    bit is damaged; and MSZIPDEC.C, whose header comment said the zip
+    inflater was the slow one.  This build's -otexan is unchanged; the DOS
+    build now compiles the backend the same way.  MKOS2 builds, MKTEST ALL
+    PASS.  NOT RUN ON OS/2.  Detail: S:\CPP\DU32\XARCHIVE\BUILD-NOTES.txt,
+    "ZIP EXTRACTION TABLE-DRIVEN, AND NO STACK CHECKS IN THE DOS BACKEND".
+
+    Synced before that, 2026-10-07 (afternoon), six files, for Compress's
+    new "Clear Archive attribute" box: ARCCOMP.C/.H and ARCCOMPI.H
+    (ArcCompSetClearArchive; once the archive is renamed into place each
+    file in it loses its A bit, reported as ARC_COMP_CLEARING), ARCPREF.C/.H
+    (CompressClearArchive=0|1) and PLATFORM.H (ClearArchiveBit).  OS2PLAT.C
+    implements ClearArchiveBit over ApplyAttr, keeping R, H and S.  The
+    dialog follows Charlie's Win32s redesign: Format (Zip / 7-Zip) and
+    Options (Store folder names / Clear Archive attribute) side by side, 12
+    units shorter, IDC_CP_RESETARCATTRIB = 1032 as in the Win32s tree.  The
+    template's order is the tab order - list, Add files, Add folder, Remove,
+    Archive, Browse, Zip/7-Zip, the two boxes, Exclude, List file, OK,
+    Cancel - checked in the compiled .res.  PMMAIN.C reads and saves the box
+    and shows "Clearing Archive attribute: NAME" for the last pass.  MKOS2
+    builds, MKTEST ALL PASS.  NOT RUN ON OS/2.
+
+    Synced before that, also 2026-10-07, sixteen files: extraction now puts
+    back the attributes the archive recorded and writes over read-only,
+    hidden and system files once the user has said yes; 7z folders are
+    LZMA2.
     ARCDEFS.H, ARCFILE.C (ArcWantWrite clears the old file's attributes),
     ARCCOMP.C (so does replacing an archive), PLATFORM.H (SetFileDosAttr,
     ClearFileAttr), SZARC.C, ZIPARC.C/.H, RARARC.C/.H, RAR5ARC.C/.H,

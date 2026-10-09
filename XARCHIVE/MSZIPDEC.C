@@ -6,10 +6,11 @@
  *
  * Decoding is table-driven: a code of up to MZ_FAST_BITS bits is resolved by
  * one lookup, and the rare longer one walks the canonical code lengths.
- * ZIPARC.C's inflater resolves every code a bit at a time, which suits a zip
- * read a byte at a time through the decryption layer, but would make a 486
- * crawl through a 30 MB cabinet.  That inflater is left alone: it is tested
- * against every zip in the suite, and the two share nothing but the RFC.
+ * ZIPARC.C's inflater used to resolve every code a bit at a time; it was
+ * made table-driven the same way on 2026-10-07, after a zip measured about
+ * thirty times slower to test than the same files in a cabinet.  The two
+ * still share nothing but the RFC: a zip streams from a file through the
+ * decryption layer, an MSZIP block arrives whole in memory.
  *===========================================================================*/
 
 #include <stdlib.h>

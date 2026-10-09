@@ -214,6 +214,7 @@ const char *ArcCompFormatName( int fmt )
 void ArcCompSetFormat( ArcCompJob *j, int fmt )   { j->fmt = fmt; }
 void ArcCompSetPaths( ArcCompJob *j, int keep )   { j->keepPaths = keep ? 1 : 0; }
 void ArcCompSetRecurse( ArcCompJob *j, int on )   { j->recurse = on ? 1 : 0; }
+void ArcCompSetClearArchive( ArcCompJob *j, int on ) { j->clearArc = on ? 1 : 0; }
 
 static int ListAdd( char ***list, int *n, const char *s )
 {
@@ -450,7 +451,7 @@ static int AddFound( ArcCompJob *j, int base, const char *rel,
             return SZ_OK;
         }
         if ( ( j->nEnts & 31 ) == 0 &&
-             !CompProgress( j, (int)j->nEnts, -1, rel ) )
+             !CompProgress( j, (int)j->nEnts, ARC_COMP_SCANNING, rel ) )
             return SZ_ERR_CANCEL;
         return NewEntry( j, base, rel, f, 0 );
     }
@@ -837,6 +838,29 @@ static void TempName( const char *target, char *dst, int size )
     }
 }
 
+/* The archive is in place: take the archive bit off each file in it whose
+ * bit was set when it was found.  Each one is a directory write - DOS flushes
+ * the sector on every attribute change - so a long list on an uncached disk
+ * takes a while, and progress goes on being reported for it.  Cancel cannot
+ * stop this part: the archive has already been made. */
+static void ClearArchiveBits( ArcCompJob *j )
+{
+    char   path[SZ_MAX_NAME * 2];
+    UInt32 k;
+
+    for ( k = 0; k < j->nOrder; k++ )
+    {
+        CompEntry *e = &j->ents[j->order[k]];
+
+        if ( e->isDir || e->state != CS_DONE || !( e->attr & 0x20 ) ) continue;
+        if ( j->prog )
+            j->prog( j->user, (int)k, ARC_COMP_CLEARING, CompStoredName( j, e ),
+                     j->totalBytes / 1024, j->totalBytes / 1024 );
+        CompSourcePath( j, e, path, sizeof( path ) );
+        ClearArchiveBit( path );
+    }
+}
+
 int ArcCompRun( ArcCompJob *j, const char *archivePath,
                 ArcCompProgress prog, void *user )
 {
@@ -886,6 +910,7 @@ int ArcCompRun( ArcCompJob *j, const char *archivePath,
         CompSetProblem( j, j->outFull );
         return SZ_ERR_WRITE;
     }
+    if ( j->clearArc ) ClearArchiveBits( j );
     return SZ_OK;
 }
 

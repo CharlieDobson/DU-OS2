@@ -31,6 +31,7 @@
  *     ArcCompJob *j = ArcCompCreate();
  *     ArcCompSetFormat( j, ARC_CF_7Z );          or ArcCompFormatFromName
  *     ArcCompSetPaths( j, 1 );
+ *     ArcCompSetClearArchive( j, 1 );            the A bit off afterwards
  *     ArcCompExclude( j, "*.BAK;@C:\\SKIP.TXT" );
  *     ArcCompAdd( j, "C:\\WORK\\SRC" );          a folder: all of it
  *     ArcCompAdd( j, "C:\\WORK\\*.TXT" );        a wildcard in one folder
@@ -60,13 +61,20 @@ typedef struct ArcCompJob ArcCompJob;
  * SZ_ERR_CANCEL.
  *
  *   fileIndex, fileCount  the entry being worked on, and how many there are.
- *                         During ArcCompScan fileCount is -1: the files are
- *                         still being found, and fileIndex is how many so
- *                         far.
+ *                         During ArcCompScan fileCount is ARC_COMP_SCANNING:
+ *                         the files are still being found, and fileIndex is
+ *                         how many so far.  After the archive is made, while
+ *                         the Archive attribute comes off the files in it
+ *                         (ArcCompSetClearArchive), it is ARC_COMP_CLEARING
+ *                         - and returning 0 then changes nothing, since the
+ *                         archive is already made.
  *   name                  that entry's name as stored in the archive.
  *   doneKB, totalKB       input read so far, and in all (0 while scanning).
  *                         Kilobytes so a front end can multiply by 100
  *                         without overflowing. */
+#define ARC_COMP_SCANNING  (-1)
+#define ARC_COMP_CLEARING  (-2)
+
 typedef int (*ArcCompProgress)( void *user, int fileIndex, int fileCount,
                                 const char *name,
                                 UInt32 doneKB, UInt32 totalKB );
@@ -90,6 +98,13 @@ void ArcCompSetPaths( ArcCompJob *j, int keepPaths );
  * way PKZIP's -r does.  Off by default: a named folder is always taken whole
  * anyway, and so is a folder a wildcard matches. */
 void ArcCompSetRecurse( ArcCompJob *j, int recurse );
+
+/* Take the Archive attribute off each file that went in, once the archive
+ * is complete - the way a backup marks what it has saved, so the next one
+ * can take only the files changed since (XCOPY /A and /M go by it).  Off by
+ * default.  Folders and files left out keep theirs, and so does every file
+ * when the run fails or is cancelled. */
+void ArcCompSetClearArchive( ArcCompJob *j, int clear );
 
 /* Something to leave out.  'spec' may hold several, separated by ';':
  *
