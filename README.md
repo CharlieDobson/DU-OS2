@@ -1,5 +1,4 @@
-# DU-OS2
-Dobson Utilities for OS/2
+# Dobson Utilities for OS/2
 
 ## System Requirements
 CPU: 80386 or newer
