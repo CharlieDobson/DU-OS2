@@ -1,0 +1,31 @@
+[Group]
+; Title of the folder Setup creates on the desktop to hold a program object
+; for each utility.
+Name=Dobson Utilities
+
+[Files]
+DISKSTAT.EXE
+ENHNOTE.EXE
+EXPLORER.EXE
+REVEAL.EXE
+XARCHIVE.EXE
+
+[Shortcuts]
+; One program object per line, created in the desktop folder as a PM
+; program:  EXENAME.EXE="Title shown under the icon"
+DISKSTAT.EXE="Disk Statistics"
+ENHNOTE.EXE="Enhanced Notepad"
+EXPLORER.EXE="Explorer"
+REVEAL.EXE="Reveal"
+XARCHIVE.EXE="XArchive"
+
+[RemovedShortcuts]
+; Program objects retired from earlier versions.  One EXE name per line, as
+; it appeared in [Shortcuts] before; each is removed from the desktop folder
+; on install.  (The Windows installers list captions here; OS/2 objects are
+; found by an ID built from the EXE name, so the name is what goes here.)
+; Example:
+;   OLDTOOL.EXE
+
+[DiskSpace]
+required=1200

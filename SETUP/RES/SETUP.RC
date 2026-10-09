@@ -1,0 +1,145 @@
+/*===========================================================================
+ * SETUP.RC  -  Setup for OS/2 (PM) resource script
+ * Compile with:  wrc -bt=os2 -r ...
+ *
+ * OS/2 resource grammar: a dialog is a DLGTEMPLATE wrapping a DIALOG,
+ * EDITTEXT is ENTRYFIELD, "&" mnemonics are "~", and dialog coordinates
+ * are dialog units measured from the BOTTOM-left.  There is no VERSIONINFO
+ * equivalent.
+ *
+ * Static text is one control per line rather than one word-wrapped control,
+ * so the line breaks are the same here as in the Windows builds.
+ *===========================================================================*/
+#include <os2.h>
+#include "resource.h"
+
+/* WC_COMBOBOX is defined in pmwin.h as ((PSZ)0xffff0002); the cast makes it
+ * unusable in a CONTROL statement's class field, which wants a plain
+ * number, so the constant is written out here. */
+#define RC_WC_COMBOBOX  0xffff0002
+
+/*---------------------------------------------------------------------------
+ * Icon.  Must be an OS/2-format icon, not a Windows .ICO -- BUILD\MKOS2.CMD
+ * converts ..\RES\SETUP.ICO into SETUP.PTR next to itself before this
+ * script is compiled.  wrc will happily embed a Windows .ICO here and say
+ * nothing; PM then cannot load it.
+ *-------------------------------------------------------------------------*/
+
+ICON ID_SETUP "SETUP.PTR"
+
+/*---------------------------------------------------------------------------
+ * Page 1 - Welcome: where to install.
+ *
+ * IDC_ICON is an empty static marking where the program icon goes; SETUP.CPP
+ * puts the icon control there at run time.  A template holding an ICON
+ * control is all-or-nothing: if PM declines the control, WinLoadDlg fails
+ * and the page never opens (wrc also emits that control with no size).
+ *
+ * The drive combobox is a CONTROL statement rather than COMBOBOX because
+ * wrc's COMBOBOX adds CBS_SIMPLE to whatever style is written, giving the
+ * control two contradictory kinds at once; CONTROL takes the style as
+ * written.  Its rectangle is tall enough to hold the drop-down list (a PM
+ * combobox's window covers the list, not just the entry field) and is kept
+ * clear of the other controls: the list drops into the empty space to the
+ * left of the buttons.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_WELCOME LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Dobson Utilities Setup", IDD_WELCOME, 24, 24, 300, 170,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT       "",                 IDC_ICON,     12, 134,  20,  20
+        LTEXT       "This program installs the Dobson Utilities for OS/2",
+                                        IDC_STATIC,   40, 154, 252,   8
+        LTEXT       "onto your hard disk.",
+                                        IDC_STATIC,   40, 145, 252,   8
+        LTEXT       "Program objects go in the desktop folder",
+                                        IDC_STATIC,   40, 130, 252,   8
+        LTEXT       "",                 IDC_NOTE,     40, 121, 252,   8
+        LTEXT       "Directory:",       IDC_STATIC,   40,  98,  40,   8
+        ENTRYFIELD  "",                 IDC_FOLDER,   84,  96, 200,  12,
+                                        ES_MARGIN | ES_AUTOSCROLL
+        LTEXT       "Drive:",           IDC_STATIC,   40,  78,  40,   8
+        CONTROL     "",                 IDC_DRIVE,    84,  20,  56,  68,
+                                        RC_WC_COMBOBOX,
+                                        CBS_DROPDOWNLIST | WS_TABSTOP | WS_VISIBLE
+        DEFPUSHBUTTON "~Next >",        DID_OK,      184,   8,  50,  14
+        PUSHBUTTON  "Cancel",           DID_CANCEL,  240,   8,  50,  14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Page 2 - Progress.
+ *
+ * IDC_GAUGE is only a placeholder: SETUP.CPP queries its position, throws it
+ * away and puts a window of its own bar class in the same place, so the bar
+ * repaints itself from WM_PAINT while the extraction loop runs.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_PROGRESS LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Installing", IDD_PROGRESS, 24, 24, 280, 116,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT       "Installing the Dobson Utilities, please wait...",
+                                        IDC_STATIC,   20,  94, 244,   8
+        LTEXT       "",                 IDC_STATUS,   20,  76, 244,   8
+        LTEXT       "",                 IDC_GAUGE,    20,  52, 244,  14
+        PUSHBUTTON  "Cancel",           DID_CANCEL,  214,   8,  50,  14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Page 3 - Integration options.
+ *
+ * The Windows installers offer the Task Manager here too; the OS/2 suite
+ * has none, so this page has the one option.
+ *
+ * Width: on real OS/2 (2026-10-09) the 60-character lines were cut off on
+ * the right in a 244-unit control.  English text in the dialog font runs
+ * about 4.5 dialog units a character, so a line of N characters wants
+ * 4.5 * N units plus a margin, and a checkbox another 12 for its box.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_OPTIONS LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Integration Options", IDD_OPTIONS, 24, 24, 320, 112,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT       "Setup can connect the Enhanced Notepad to your text files.",
+                                        IDC_STATIC,   20,  92, 288,   8
+        AUTOCHECKBOX "Add the Enhanced ~Notepad to the Open menu of .TXT files",
+                                        IDC_OPT_ENHNOTE, 20, 66, 288, 10
+        LTEXT       "The Notepad then appears under Open on the pop-up menu",
+                                        IDC_STATIC,   20,  48, 288,   8
+        LTEXT       "of every .TXT file.",
+                                        IDC_STATIC,   20,  39, 288,   8
+        DEFPUSHBUTTON "~Next >",        DID_OK,      204,   8,  50,  14
+        PUSHBUTTON  "Cancel",           DID_CANCEL,  260,   8,  50,  14
+    END
+END
+
+/*---------------------------------------------------------------------------
+ * Page 4 - Complete.  IDC_NOTE names the desktop folder; IDC_ICON is the
+ * icon's place, filled at run time as on the Welcome page.
+ *-------------------------------------------------------------------------*/
+
+DLGTEMPLATE IDD_COMPLETE LOADONCALL MOVEABLE DISCARDABLE
+BEGIN
+    DIALOG "Setup Complete", IDD_COMPLETE, 24, 24, 260, 104,
+           FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
+           FCF_TITLEBAR | FCF_SYSMENU
+    BEGIN
+        LTEXT       "",                 IDC_ICON,     16,  60,  20,  20
+        LTEXT       "The Dobson Utilities have been installed.",
+                                        IDC_STATIC,   44,  78, 208,   8
+        LTEXT       "The programs are in the desktop folder",
+                                        IDC_NOTE1,    44,  64, 208,   8
+        LTEXT       "",                 IDC_NOTE,     44,  55, 208,   8
+        DEFPUSHBUTTON "E~xit",          DID_OK,      195,   8,  50,  14
+    END
+END

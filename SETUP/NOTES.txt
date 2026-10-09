@@ -1,0 +1,142 @@
+SETUP for OS/2 - working notes
+==============================
+
+What it is
+----------
+The OS/2 2.x / Warp installer for the Dobson Utilities for OS/2 (DISKSTAT,
+ENHNOTE, EXPLORER, REVEAL, XARCHIVE).  A PM program with no main window:
+four dialog pages, Welcome -> Progress -> Options -> Complete, the same
+shape as the Win32s installer in S:\CPP\DU32\SETUP, which it was written
+from.  Default install directory C:\DU-OS2.
+
+Ships as SETUP.EXE + SETUP.INF + DU.CWD side by side.  DU.CWD is a PKZIP
+2.04g archive holding every file in the INF's [Files] list; it is not made
+by the build.
+
+Files
+-----
+  SETUP.CPP      the pages, the install loop, the Workplace Shell objects
+  INIPARSE.CPP   SETUP.INF key=value reader (OS/2 copy of the DU32 helper)
+  UNZIP.CPP      PKZIP 2.04g extractor (OS/2 copy; timestamps via
+                 DosSetPathInfo, FDATE/FTIME are DOS-packed already)
+  INSTTOOL.CPP   copy / obsolete-file removal / validation (OS/2 copy on
+                 DosCopy, DosFindFirst, DosQueryFSInfo)
+  RES\           SETUP.RC, RESOURCE.H, SETUP.ICO (the Windows icon;
+                 BUILD converts it)
+  BUILD\         MKOS2.CMD -> SETUP.EXE, cross-built on Windows with Open
+                 Watcom 1.9 like the rest of the OS/2 tree
+
+The INF is read by Setup's own ReadSection / INIPARSE: OS/2's Prf* calls
+only read binary OS2.INI-style profiles, so GetPrivateProfileString has no
+equivalent and [Shortcuts] lines (EXE="Title") are split by hand.
+
+Where the shortcuts go
+----------------------
+No Program Manager, no .LNK: the Workplace Shell has objects, made with
+WinCreateObject (PMWP, INCL_WINWORKPLACE).
+
+  folder    class WPFolder, title [Group] Name=, location <WP_DESKTOP>,
+            setup "OBJECTID=<DU_OS2_FOLDER>", CO_UPDATEIFEXISTS
+  programs  class WPProgram, one per [Shortcuts] line, title = the quoted
+            name, location <DU_OS2_FOLDER>, setup
+            "EXENAME=<dest>\X.EXE;STARTUPDIR=<dest>;PROGTYPE=PM;
+             OBJECTID=<DU_OS2_X>", CO_REPLACEIFEXISTS
+
+A WPProgram object is the thing a user gets by dragging Program out of the
+Templates folder - a real program reference with the EXE's own icon - and
+NOT a shadow (WinCreateShadow is deliberately not used).
+
+The OBJECTIDs are what make a reinstall clean.  The folder is updated in
+place so anything the user dropped in it survives; each program object is
+replaced, so its path and title are always this run's (the Windows
+installers get the same effect with DeleteItem + AddItem).  Because the
+objects are found by ID, [RemovedShortcuts] lists EXE NAMES on OS/2, where
+the Windows INFs list captions.
+
+WinSaveObject(hobj, FALSE) is called after each create so the object is
+written to OS2.INI straight away rather than at shutdown.
+
+The Options page has one item: ASSOCFILTER=*.TXT set on the Notepad's
+object (found as <DU_OS2_ENHNOTE>) through WinSetObjectData, which puts
+"Enhanced Notepad" on the Open submenu of every .TXT file's pop-up menu.
+The checkbox is disabled when that object does not exist.  The Windows
+installers' Task Manager option has no OS/2 counterpart (no Task Manager in
+the OS/2 set).
+
+On the way out Setup opens the folder with WinOpenObject, as IBM's own
+installers do, so the result is in front of the user.
+
+PM things worth knowing here
+----------------------------
+- The drive combobox's rectangle in SETUP.RC is tall (68 units) because a
+  PM combobox window covers its drop-down list; the list drops into the
+  empty space left of the buttons, overlapping nothing.
+- Static text width: on real OS/2 (2026-10-09) a 58-character line in a
+  244-unit control was cut off on the right, i.e. 4.2 dialog units per
+  character is NOT enough for the dialog font.  The pages were widened so
+  every line has at least 4.9 units per character (a checkbox needs about
+  12 more for its box), and the Welcome page's folder note was split so
+  the folder name sits on a line of its own.  Size new text from that.
+- EM_SETTEXTLIMIT is sent to the directory field in WM_INITDLG: a PM entry
+  field takes 32 characters otherwise.
+- The progress bar is a window of its own class (DUSetupBar) put where the
+  IDC_GAUGE placeholder static was, so it repaints from WM_PAINT during the
+  extraction loop.  Same arrangement as XARCHIVE's PMMAIN.C.
+- Each page is a top-level dialog, which PM does not list in the Window
+  List; PageInit adds a switch entry so a page that drops behind another
+  window can be brought back.
+- DosError(FERR_DISABLEHARDERR) at startup, or probing an empty removable
+  drive raises the system's hard-error popup.
+- Drives offered: letters in DosQueryCurrentDisk's map, not A: or B:, that
+  DosQueryFSAttach reports as local or remote with a file system other than
+  CDFS, and that answer DosQueryFSInfo(FSIL_ALLOC).
+
+First run on OS/2 (2026-10-09): exited at once
+----------------------------------------------
+The first build started and exited straight away, no window, no message.
+That is the shape of WinDlgBox returning DID_ERROR: the Welcome template
+could not be built, RunPage saw "not DID_OK" and main returned.  Decoding
+the bound DLGTEMPLATEs (see below) showed two controls with no precedent in
+the working ports:
+
+  ICON ID_SETUP, IDC_ICON, x, y, 0, 0
+      wrc emits a WC_STATIC, SS_ICON, with a ZERO size and the resource
+      reference as the three bytes FF 01 00 (the binary "#1" form).  A
+      dialog template is all-or-nothing: if PM declines one control the
+      whole WinLoadDlg fails.  This is why XARCHIVE dropped its About-box
+      icon.  Fixed by making IDC_ICON an empty 20x20 static in the template
+      and creating the icon control at run time (PlaceIcon in SETUP.CPP) -
+      a refused icon then costs the picture and nothing else.
+
+  COMBOBOX "", IDC_DRIVE, ..., CBS_DROPDOWNLIST | WS_VISIBLE
+      wrc adds CBS_SIMPLE (1) to whatever style is written, so the control
+      came out 0x80020005 = CBS_SIMPLE | CBS_DROPDOWNLIST, two contradictory
+      kinds at once.  Fixed with a CONTROL statement and the class number
+      0xffff0002, which takes the style verbatim: now 0x80020004.
+
+Which of the two PM actually refused is not known - no OS/2 box here - so
+both were removed, and RunPage now reports a page that will not open, with
+the PM error from WinGetLastError, instead of exiting silently.  If the
+rebuilt SETUP.EXE still fails, that message is the thing to read.
+
+How the templates were decoded (no OS/2 needed): the LX header is at the
+DWORD at 0x3C; resource table offset/count at hdr+0x50/+0x54, 14-byte
+entries {type, id, size, object, offset-in-object}; object table at
+hdr+0x40 (24-byte entries, page-table index at +12), object page table at
+hdr+0x48 (8-byte entries, page offset << hdr+0x2C), data pages start at the
+DWORD at hdr+0x80.  A DLGTEMPLATE is {cb, type, codepage, offadlgti=14,
+status, focus, coffPresParams} then 30-byte DLGTITEMs {status, cChildren,
+cchClass, offClass (the WC_ number when cchClass is 0), cchText, offText,
+flStyle, x, y, cx, cy, id, offPP, offCtlData}; the first item is the frame
+and its cChildren counts the rest.  The wrc .res file is NOT this format
+(it is Watcom's own container) - decode the bound EXE.
+
+Verified on OS/2 (2026-10-09)
+-----------------------------
+After the two fixes above (dialog templates, then text widths) Charlie ran
+the rebuilt SETUP.EXE on OS/2 and reported that everything works as
+expected: the four pages, the extraction, the desktop folder with its
+program objects, the Options page and the run-time icons.
+
+Still an estimate: [DiskSpace] required=1200, worked out from the EXE
+sizes.  Revisit it if the payload grows.
