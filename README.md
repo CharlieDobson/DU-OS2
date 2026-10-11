@@ -2,7 +2,7 @@
 
 ## System Requirements
 - CPU: 80386 or newer
-- RAM: 4MB
+- RAM: 2MB
 - HDD: 600KB
 - OS: OS/2 v2.0 or later
 
