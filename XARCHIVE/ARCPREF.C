@@ -2,7 +2,7 @@
  * ARCPREF.C  -  Persisted user preferences (XARCHIVE.INI).  See ARCPREF.H.
  * Target: MSVC 2.2 Win32s / Open Watcom DOS / Open Watcom OS/2 PM
  *
- * Compiled byte-identical into the DU32 (Win32s), DOSSPIKE (DOS) and DU-OS2
+ * Compiled byte-identical into the DU32 (Win32s), DOSBUILD (DOS) and DU-OS2
  * (PM) builds, so all three read and write the same file the same way.  No
  * platform headers are used at all here - only stdio/string - which is what
  * keeps it portable across the three toolchains.
