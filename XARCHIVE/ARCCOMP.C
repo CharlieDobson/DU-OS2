@@ -23,7 +23,9 @@
  * HOW EACH FILE IS PACKED is the writer's decision, made from CompSniff's
  * reading of the file's first 16 KB: compressed formats it knows by their
  * signatures, anything statistically indistinguishable from noise, x86
- * executables (PE, LE, LX) that the 7z branch filter helps, and text.
+ * executables (PE, LE, LX) that the 7z branch filters help, sampled data
+ * (PCM sound, true-colour pictures) that the 7z Delta filter helps, and
+ * text.  Always from the bytes, never from the name.
  *
  * NO RECURSION ON THE STACK.  A folder walk descends one level per folder,
  * and each level's search record and two path buffers come from the heap, so
@@ -41,6 +43,15 @@
 
 #define WALK_MAX_DEPTH   100
 #define SNIFF_BYTES      16384U
+
+/* The most file data one archive may be given: 2000 MB (times 1,048,576).
+ * Every offset the writers use is a signed 'long', so the archive FILE has
+ * to stay under 2,147,483,647 bytes.  Data that will not compress comes out
+ * stored, no smaller than it went in; and a zip of 65,535 entries with the
+ * longest names allowed carries about 37 MB of local and central headers on
+ * top of that.  2000 MB of input therefore tops out near 2037 MB of archive,
+ * under the wall with about 10 MB to spare. */
+#define COMP_MAX_INPUT   0x7D000000UL
 
 /*===========================================================================
  * Small string helpers
@@ -364,6 +375,15 @@ static int BaseIndex( ArcCompJob *j, const char *dir )
     return j->nBases - 1;
 }
 
+/* The running total of input bytes is 32 bits.  Three files of 1.5 GB would
+ * carry it past 4 GB and back round to a figure under COMP_MAX_INPUT, and
+ * the archive would be started; so it pins at the top instead, and the check
+ * in ArcCompScan refuses. */
+static UInt32 AddSat( UInt32 total, UInt32 add )
+{
+    return ( total + add < total ) ? 0xFFFFFFFFUL : total + add;
+}
+
 static int NewEntry( ArcCompJob *j, int base, const char *rel,
                      const PlatFind *f, int isDir )
 {
@@ -391,7 +411,7 @@ static int NewEntry( ArcCompJob *j, int base, const char *rel,
     e->mtLo    = f->mtime.dwLowDateTime;
     e->mtHi    = f->mtime.dwHighDateTime;
     j->nEnts++;
-    if ( !isDir ) j->totalBytes += e->size;
+    if ( !isDir ) j->totalBytes = AddSat( j->totalBytes, e->size );
     return SZ_OK;
 }
 
@@ -699,25 +719,28 @@ int ArcCompScan( ArcCompJob *j, const char *archivePath,
         if ( !j->ents[k].isDir )
         {
             files++;
-            j->totalBytes += j->ents[k].size;
+            j->totalBytes = AddSat( j->totalBytes, j->ents[k].size );
         }
     }
 
     if ( files == 0 ) return SZ_ERR_NOFILES;
 
     /* Past what one archive can hold here: a zip's directory counts entries
-     * in 16 bits, and every offset this program writes is a signed 'long'.
-     * The data limit allows for the archive coming out no smaller than what
-     * went in, which is what happens to data that will not compress. */
+     * in 16 bits, and the data stops at COMP_MAX_INPUT - see the top of this
+     * file for why that figure keeps the archive under a 'long'. */
     if ( j->fmt == ARC_CF_ZIP && j->nOrder > 65535UL ) return SZ_ERR_TOOBIG;
-    if ( j->totalBytes > 0x7C000000UL ) return SZ_ERR_TOOBIG;
+    if ( j->totalBytes > COMP_MAX_INPUT ) return SZ_ERR_TOOBIG;
 
     j->scanned = 1;
     return SZ_OK;
 }
 
 int    ArcCompCount( ArcCompJob *j )   { return (int)j->nOrder; }
-UInt32 ArcCompTotalKB( ArcCompJob *j ) { return ( j->totalBytes + 1023 ) / 1024; }
+UInt32 ArcCompTotalKB( ArcCompJob *j )
+{
+    /* Rounded up without adding first: a pinned total plus 1023 would wrap. */
+    return j->totalBytes / 1024 + ( ( j->totalBytes & 1023 ) ? 1 : 0 );
+}
 
 /*===========================================================================
  * Sniffing: how should this file be packed?
@@ -732,7 +755,142 @@ static UInt32 Get32( const Byte *p )
     return (UInt32)p[0] | ( (UInt32)p[1] << 8 ) | ( (UInt32)p[2] << 16 ) | ( (UInt32)p[3] << 24 );
 }
 
-int CompSniff( const Byte *b, UInt32 n, int *isText )
+static UInt32 Get16( const Byte *p )   { return (UInt32)p[0] | ( (UInt32)p[1] << 8 ); }
+static UInt32 Get16BE( const Byte *p ) { return ( (UInt32)p[0] << 8 ) | (UInt32)p[1]; }
+static UInt32 Get32BE( const Byte *p )
+{
+    return ( (UInt32)p[0] << 24 ) | ( (UInt32)p[1] << 16 ) | ( (UInt32)p[2] << 8 ) | (UInt32)p[3];
+}
+
+/*---- The Delta filter: sampled data ---------------------------------------
+ * Samples laid out in fixed-size frames compress better once each byte is
+ * replaced by its difference from the byte one frame back - 7-Zip's Delta
+ * filter, whose one parameter is the frame size.  Decided from the file's
+ * own header:
+ *
+ *   PCM WAV and AIFF    the frame is channels x bytes per sample (WAV's
+ *                       blockAlign), which is what 7-Zip itself has put in
+ *                       front of LZMA2 for a .wav since 26.x.  Every sound
+ *                       tried came out 8 to 18% smaller.
+ *   16/24/32-bit BMP,   the frame is one pixel - but only when the picture
+ *   24/32-bit TGA       looks like a photograph.  Flat graphics (fills, a
+ *                       few colours) come out WORSE through Delta, which
+ *                       turns every edge into two, so LooksPhotographic
+ *                       counts how many sampled pixels equal the one before
+ *                       and backs off when most do.  Palette images never
+ *                       qualify: an index is not a sample.
+ *
+ * TGA has no signature, so its header has to agree with itself and with the
+ * file's length before it is believed.
+ *--------------------------------------------------------------------------- */
+#define SN_PHOTO_SAME_PCT  50          /* neighbouring pixels alike, at most */
+
+static int LooksPhotographic( const Byte *px, UInt32 n, UInt32 bpp )
+{
+    UInt32 i, pairs = 0, same = 0;
+
+    if ( n < bpp * 64 ) return 0;                   /* too little to judge */
+    for ( i = bpp; i + bpp <= n; i += bpp )
+    {
+        pairs++;
+        if ( memcmp( px + i, px + i - bpp, (size_t)bpp ) == 0 ) same++;
+    }
+    return pairs != 0 && same * 100 <= pairs * SN_PHOTO_SAME_PCT;
+}
+
+static unsigned SniffDelta( const Byte *b, UInt32 n, UInt32 fileSize )
+{
+    /* WAV: RIFF....WAVE, then chunks; the frame size is in "fmt ". */
+    if ( n >= 12 && StartsWith( b, n, "RIFF", 4 ) && memcmp( b + 8, "WAVE", 4 ) == 0 )
+    {
+        UInt32 p = 12;
+        while ( p + 8 <= n )
+        {
+            UInt32 len = Get32( b + p + 4 );
+            if ( memcmp( b + p, "fmt ", 4 ) == 0 )
+            {
+                UInt32 tag, align;
+                if ( len < 16 || p + 8 + 16 > n ) return 0;
+                tag   = Get16( b + p + 8 );
+                align = Get16( b + p + 8 + 12 );
+                /* 1 = PCM, 3 = IEEE float, FFFE = extensible (PCM in practice) */
+                if ( tag != 1 && tag != 3 && tag != 0xFFFE ) return 0;
+                return ( align >= 1 && align <= 255 ) ? (unsigned)align : 0;
+            }
+            if ( len > n ) return 0;
+            p += 8 + len + ( len & 1 );
+        }
+        return 0;
+    }
+
+    /* AIFF and AIFF-C: FORM....AIFF, big-endian; the frame is in "COMM". */
+    if ( n >= 12 && StartsWith( b, n, "FORM", 4 ) &&
+         ( memcmp( b + 8, "AIFF", 4 ) == 0 || memcmp( b + 8, "AIFC", 4 ) == 0 ) )
+    {
+        UInt32 p = 12;
+        int    aifc = ( b[11] == 'C' );
+        while ( p + 8 <= n )
+        {
+            UInt32 len = Get32BE( b + p + 4 );
+            if ( memcmp( b + p, "COMM", 4 ) == 0 )
+            {
+                UInt32 frame;
+                if ( len < 18 || p + 8 + 18 > n ) return 0;
+                if ( aifc )
+                {
+                    /* only plain samples: NONE, or 'sowt' (byte-swapped) */
+                    if ( len < 22 || p + 8 + 22 > n ) return 0;
+                    if ( memcmp( b + p + 26, "NONE", 4 ) != 0 &&
+                         memcmp( b + p + 26, "sowt", 4 ) != 0 ) return 0;
+                }
+                frame = Get16BE( b + p + 8 ) * ( ( Get16BE( b + p + 14 ) + 7 ) / 8 );
+                return ( frame >= 1 && frame <= 255 ) ? (unsigned)frame : 0;
+            }
+            if ( len > n ) return 0;
+            p += 8 + len + ( len & 1 );
+        }
+        return 0;
+    }
+
+    /* BMP: uncompressed 16-, 24- or 32-bit pixels, if they look photographic. */
+    if ( n >= 54 && b[0] == 'B' && b[1] == 'M' )
+    {
+        UInt32 off  = Get32( b + 10 );
+        UInt32 hsz  = Get32( b + 14 );
+        UInt32 bpp  = Get16( b + 28 );
+        UInt32 comp = Get32( b + 30 );
+        if ( hsz < 40 ) return 0;                   /* the old OS/2 header */
+        if ( comp != 0 && comp != 3 ) return 0;     /* BI_RGB, BI_BITFIELDS */
+        if ( bpp != 16 && bpp != 24 && bpp != 32 ) return 0;
+        if ( off < 54 || off >= n || off > fileSize ) return 0;
+        return LooksPhotographic( b + off, n - off, bpp / 8 ) ? (unsigned)( bpp / 8 ) : 0;
+    }
+
+    /* TGA: uncompressed true colour (type 2) or grey (type 3), no colour
+     * map, sane dimensions, and a length the header accounts for (plus an
+     * optional footer and extension area). */
+    if ( n >= 18 && fileSize >= 18 )
+    {
+        UInt32 idLen = b[0], type = b[2], depth = b[16], desc = b[17];
+        UInt32 w = Get16( b + 12 ), hgt = Get16( b + 14 );
+        if ( b[1] == 0 && ( type == 2 || type == 3 ) &&
+             ( ( type == 2 && ( depth == 24 || depth == 32 ) ) ||
+               ( type == 3 && depth == 8 ) ) &&
+             w >= 1 && w <= 16384 && hgt >= 1 && hgt <= 16384 &&
+             ( desc & 0xC0 ) == 0 && ( ( desc & 0x0F ) == 0 || ( desc & 0x0F ) == 8 ) &&
+             Get16( b + 3 ) == 0 && Get16( b + 5 ) == 0 && b[7] == 0 )
+        {
+            UInt32 bpp    = depth / 8;
+            UInt32 expect = 18 + idLen + w * hgt * bpp;
+            if ( fileSize >= expect && fileSize - expect <= 1024 && 18 + idLen < n )
+                return LooksPhotographic( b + 18 + idLen, n - 18 - idLen, bpp )
+                       ? (unsigned)bpp : 0;
+        }
+    }
+    return 0;
+}
+
+int CompSniff( const Byte *b, UInt32 n, UInt32 fileSize, int *isText, unsigned *delta )
 {
     static const Byte sig7z[6] = { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C };
     static const Byte sigXz[6] = { 0xFD, '7', 'z', 'X', 'Z', 0 };
@@ -741,6 +899,7 @@ int CompSniff( const Byte *b, UInt32 n, int *isText )
     UInt32 i, ctrl = 0;
 
     if ( isText ) *isText = 0;
+    if ( delta )  *delta  = 0;
     if ( n == 0 ) return CK_DATA;
 
     /* Text: no NULs, hardly any control characters other than the usual
@@ -793,6 +952,18 @@ int CompSniff( const Byte *b, UInt32 n, int *isText )
             }
             else if ( h[0] == 'L' && ( h[1] == 'E' || h[1] == 'X' ) )
                 return CK_EXE;
+        }
+    }
+
+    /* Sampled data the Delta filter helps.  Before the noise test: a loud
+     * recording can look like noise byte by byte and still shrink a good
+     * deal once it is differenced. */
+    {
+        unsigned frame = SniffDelta( b, n, fileSize );
+        if ( frame )
+        {
+            if ( delta ) *delta = frame;
+            return CK_DELTA;
         }
     }
 

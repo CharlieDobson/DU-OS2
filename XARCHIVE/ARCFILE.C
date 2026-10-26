@@ -66,7 +66,7 @@ static const unsigned char SIG_RAR[6] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07 };
  * have to fit alongside it.
  *===========================================================================*/
 
-#if !defined(_WIN32) && !defined(__OS2__)
+#if !defined(_WIN32) && !defined(__OS2__) && !defined(__PMDOS__)
 #include <i86.h>            /* int386x, segread - the DOS DPMI query below */
 #endif
 
@@ -80,7 +80,8 @@ static UInt32 g_memBudget = 0;      /* 0 = not measured yet          */
  *
  *   g_memSysFree - what the system claims is free in one block (DPMI 0500h
  *                  under DOS, GlobalMemoryStatus under Win32, DosQuerySysInfo
- *                  under OS/2).  0 when it would not say.
+ *                  under OS/2, INT 21h/48h under PM-DOS).  0 when it would
+ *                  not say.
  *   g_memProbed  - the largest block malloc actually produced.
  *
  * A g_memSysFree near 64 MB on a machine with far more than that is the
@@ -125,6 +126,17 @@ static UInt32 ArcMemSystemFree( void )
      * somewhere other than malloc's willingness. */
     extern unsigned int Os2MemFree( void );
     return (UInt32)Os2MemFree();
+
+#elif defined(__PMDOS__)
+    /* PMDOSPLT.C: the largest block INT 21h/48h says it could hand over -
+     * the program's own heap, or what its slot could still grow by, which
+     * ever is bigger - or 0 when the kernel will not say.  A native PM-DOS
+     * program has no extender between it and the kernel, so this is the
+     * same pool malloc draws on and nothing in it is paged: the DOS rule
+     * below (probe to the ceiling, keep this for the report) is the right
+     * one here too. */
+    extern unsigned int PmMemFree( void );
+    return (UInt32)PmMemFree();
 
 #else
     /* DPMI 0500h "get free memory information": a 48-byte block whose first
@@ -1393,8 +1405,8 @@ const char *ArcUnsupportedHint( ArcFile *a )
     case FMT_7Z:
         return "Some entries use a feature this extractor does not support, "
                "and were skipped.  Everything else was extracted.\n"
-               "Supported: LZMA, LZMA2, stored, the BCJ x86 filter, BCJ2, and "
-               "AES-256 encryption (including encrypted headers).\n"
+               "Supported: LZMA, LZMA2, stored, the BCJ x86 and Delta filters, "
+               "BCJ2, and AES-256 encryption (including encrypted headers).\n"
                "Not supported: other codecs (PPMd, BZip2, Deflate, ARM/other "
                "filters).";
     case FMT_RAR:
@@ -1511,6 +1523,14 @@ const char *ArcUnsupportedHint( ArcFile *a )
 extern int Os2NamesNeed83( const char *path );
 #endif
 
+#ifdef __PMDOS__
+/* PMDOSPLT.C: 1 when the volume holding 'path' (the current drive when path
+ * is NULL or relative) takes 8.3 names only - the kernel's long-name calls
+ * are switched off (LFN=OFF in CONFIG.SYS), or 71A0h says the volume's
+ * longest name is twelve characters; 0 when it takes long names. */
+extern int PmNamesNeed83( const char *path );
+#endif
+
 #if defined(_WIN32)
 /*---- Ask the destination VOLUME, not the operating system ----------------- *
  * GetVolumeInformation reports the longest component name a volume will
@@ -1599,6 +1619,9 @@ static int Win32VolumeNeeds83( const char *destDir )
  *   - OS/2 build: whatever the destination drive's filesystem is
  *     (DosQueryFSAttach via Os2NamesNeed83): FAT is 8.3, HPFS and JFS and
  *     everything else take long names.
+ *   - PM-DOS build: the kernel answers the 71h long-name calls itself, so
+ *     it is whatever the destination volume says through them
+ *     (PmNamesNeed83), and 8.3 when they have been switched off.
  * ArcExtractAll / ArcExtractItems latch the answer per operation in
  * g_names83; ArcFsName probes the current drive if somehow asked outside
  * one. */
@@ -1613,6 +1636,8 @@ static int NamesNeed83( const char *destDir )
     return ( ( v & 0x80000000UL ) != 0 && ( v & 0xFFUL ) == 3 );
 #elif defined(__OS2__)
     return Os2NamesNeed83( destDir );
+#elif defined(__PMDOS__)
+    return PmNamesNeed83( destDir );
 #else
     (void)destDir;
     return 1;

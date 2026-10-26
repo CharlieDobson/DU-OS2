@@ -59,8 +59,17 @@ char *NumFmt( UInt32 v, char *buf );
 /* The same, for a byte TOTAL.  Totals are accumulated as doubles because an
  * archive's contents can add up past what UInt32 holds even when no single
  * entry does, so the front ends already carry them that way.  Negative and
- * non-finite values render as "0" rather than as something alarming. */
+ * non-finite values render as "0" rather than as something alarming.
+ *
+ * NOT IN THE PM-DOS BUILD.  A native PM-DOS program may be running on a 386
+ * with no coprocessor, where floating point is an exception rather than a
+ * slow path, so that front end carries its totals as 64-bit integers, spells
+ * them out in digits itself, and has NumFmtDigits put the separators in. */
+#if defined(__PMDOS__)
+char *NumFmtDigits( const char *digits, char *buf );
+#else
 char *NumFmtD( double v, char *buf );
+#endif
 
 /* As NumFmt, but right-aligned in a field 'width' wide, space-padded on the
  * left.  A number too wide for the field is NOT truncated - it is returned

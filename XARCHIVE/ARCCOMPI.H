@@ -24,6 +24,9 @@
 #define CK_DATA     0       /* compress it                                 */
 #define CK_EXE      1       /* x86 code: the branch filter, then LZMA (7z)  */
 #define CK_PACKED   2       /* already compressed: store it                 */
+#define CK_DELTA    3       /* samples in fixed frames (PCM sound, true-
+                             * colour pixels): the Delta filter, then LZMA
+                             * (7z); deflated as data in a zip             */
 
 /* What became of an entry while the archive was written. */
 #define CS_PENDING  0
@@ -40,6 +43,7 @@ typedef struct {
     Byte    state;          /* CS_*                                         */
     Byte    method;         /* zip: 0 stored, 8 deflated                    */
     Byte    folder;         /* 7z: which coded folder                       */
+    Byte    delta;          /* CK_DELTA: the frame size, 1..255             */
     UInt32  attr;           /* DOS attribute bits                           */
     UInt32  size;           /* as found by the scan                         */
     UInt16  dosDate;        /* last write, local, packed                    */
@@ -113,8 +117,11 @@ int    CompProgress( ArcCompJob *j, int index, int count, const char *name );
 /* Note the first problem file. */
 void   CompSetProblem( ArcCompJob *j, const char *name );
 
-/* Decide CK_* (and the text flag) from the first bytes of a file. */
-int    CompSniff( const Byte *buf, UInt32 len, int *isText );
+/* Decide CK_* (and the text flag) from the first bytes of a file, whose
+ * whole length is 'fileSize'.  For CK_DELTA, *delta receives the frame size
+ * (1..255); either pointer may be NULL. */
+int    CompSniff( const Byte *buf, UInt32 len, UInt32 fileSize,
+                  int *isText, unsigned *delta );
 
 /* Writers.  Each writes the whole archive to 'f', which is open for binary
  * writing and positioned at 0, and fills j->outBytes.  SZ_OK or SZ_ERR_*. */

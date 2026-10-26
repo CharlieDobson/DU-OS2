@@ -170,7 +170,7 @@ int ZipWriteArchive( ArcCompJob *j, FILE *f )
 
         /* Look at the start of it, then decide. */
         got = fread( buf, 1, COMP_IOBUF, src );
-        e->kind = (Byte)CompSniff( buf, (UInt32)got, &isText );
+        e->kind = (Byte)CompSniff( buf, (UInt32)got, e->size, &isText, 0 );
         e->text = (Byte)isText;
         e->method = ( got == 0 || e->kind == CK_PACKED ) ? 0 : 8;
         e->crc = e->packed = e->realSize = 0;

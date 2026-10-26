@@ -512,3 +512,52 @@ RE-SYNCED 2026-09-13 (the minimum RAM check, and RAR4 packed comments)
     bind-checked on Windows plus the shared backend's own tests; the PM
     behaviour of the new warning box and the Info line wants a real OS/2 box,
     as the decoder re-entrancy note above still does.
+
+
+RE-SYNCED 2026-10-19 (the 2000 MB input cap, and a total that could wrap)
+
+    ARCCOMP.C re-copied from S:\CPP\DU32\XARCHIVE.  51 shared files, 0
+    mismatches (cmp).  MKOS2 compiles, links and binds; MKTEST ALL PASS.
+
+    WHAT CHANGED, in the shared file only - nothing on the PM side:
+
+      - The most data one archive may be given is now 2000 MB (0x7D000000
+        bytes, COMP_MAX_INPUT), up from 1984 MB (0x7C000000).  Still under
+        the 'long' wall: 2000 MB of stored data plus the 37 MB of headers a
+        65,535-entry zip can carry comes to about 2037 MB.
+      - The running total of input bytes was a plain 32-bit sum, so three
+        files of 1.5 GB added up to 404 MB and passed the check; the archive
+        would then have been started and run past 2 GB.  AddSat() pins the
+        total at 0xFFFFFFFF instead, and ArcCompScan refuses with
+        SZ_ERR_TOOBIG as it should.  ArcCompTotalKB rounds without adding
+        first, for the same reason.
+
+    The "Too much for one archive ... up to 2 GB" text in PMMAIN.C still
+    describes it.  Not run on OS/2, as ever.
+
+
+RE-SYNCED 2026-10-23 (the Delta filter, and BCJ2 on the way out)
+
+    Six shared files re-copied from S:\CPP\DU32\XARCHIVE: ARCCOMP.C,
+    ARCCOMPI.H, SZWRITE.C, SZARC.C, ARCFILE.C, ZIPWRITE.C.  51 shared files,
+    0 mismatches (cmp).  MKOS2 compiles, links and binds; MKTEST ALL PASS.
+    Nothing on the PM side changed.
+
+    WHAT THE BACKEND GAINED (the full account is BUILD-NOTES.txt's entry of
+    the same date in the DU32 tree):
+
+      - The 7z READER decodes 7-Zip's Delta filter (coder id 03), streamed
+        or whole-buffer, alone over LZMA/LZMA2 or under AES.  7-Zip 26.02
+        puts that filter in front of every PCM .wav it archives by default,
+        so until now such an archive opened here only to say "unsupported".
+        The "Supported:" text in ARCFILE.C names the filter.
+      - The 7z WRITER sniffs PCM WAV/AIFF and photographic 16/24/32-bit
+        BMP/TGA and writes them Delta + LZMA2, one folder per frame size;
+        and an executables folder up to 64 MB goes out as BCJ2 (four
+        packed streams, 7-Zip's own coder order) instead of BCJ.  On the
+        test corpus: WAVs 12.5% smaller, photographs 9.5%, a PE within 0.3%
+        of 7-Zip's own BCJ2.
+
+    Verified against 7-Zip 26.02 both ways on Windows (it extracts every
+    archive we write byte for byte; we extract its Delta and BCJ2 ones),
+    and on the DOS exe under DOSBox-X.  Not run on OS/2, as ever.

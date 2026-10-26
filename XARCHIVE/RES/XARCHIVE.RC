@@ -102,7 +102,7 @@ BEGIN
            FS_NOBYTEALIGN | FS_DLGBORDER | WS_SAVEBITS,
            FCF_TITLEBAR | FCF_SYSMENU
     BEGIN
-        LTEXT   "XArchive v1.0",
+        LTEXT   "XArchive v1.1",
                                     IDC_STATIC,  12, 70, 204,  8
         LTEXT   "Compression and decompression utility.",
                                     IDC_STATIC,  12, 58, 204,  8

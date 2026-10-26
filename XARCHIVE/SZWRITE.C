@@ -7,7 +7,7 @@
  * at a header written last, the packed streams between them, and in the
  * header one FOLDER per coded stream.
  *
- * THREE KINDS OF FOLDER, chosen per file by CompSniff:
+ * FOUR KINDS OF FOLDER, chosen per file by CompSniff:
  *
  *   LZMA2         everything that compresses.  Solid: the files run into
  *                 one another in a single stream, sorted by extension and
@@ -17,10 +17,18 @@
  *                 since 9.x, and because a stretch that will not compress -
  *                 something the sniff missed - goes in as stored chunks
  *                 instead of growing.
- *   BCJ + LZMA2   x86 executables.  The branch filter turns each CALL and
- *                 JMP target into an absolute address first, so the same
- *                 call made from two places becomes the same bytes.  Two
- *                 coders and one bind pair, in 7-Zip's own order.
+ *   BCJ2 + LZMA2  x86 executables.  Each CALL and JMP target is cut out of
+ *                 the code into a side stream of its own as an absolute
+ *                 address, so the code compresses without them and the
+ *                 same call made from two places becomes the same bytes in
+ *                 the side stream.  Four coders and four packed streams, in
+ *                 7-Zip's own order.  An executables folder past
+ *                 SZW_BCJ2_MAX gets the older BCJ filter instead (one
+ *                 coder, in place), since BCJ2's side streams are held in
+ *                 memory until the main pass is over.
+ *   Delta + LZMA2 sampled data - PCM sound, true-colour pictures - where
+ *                 each byte goes in as its difference from the byte one
+ *                 frame back.  One folder per frame size.
  *   Copy          files that are already compressed.  Squeezing a JPEG
  *                 again costs time and comes out a little bigger.
  *
@@ -76,17 +84,29 @@
 #define SZW_DICT_MIN          ( (UInt32)1 << 16 )
 #define SZW_DICT_MAX          ( (UInt32)1 << 26 )
 #define SZW_BCJ_BUF           65536U
+#define SZW_BCJ2_MAX          ( (UInt32)64 << 20 )  /* BCJ2 up to here      */
+#define SZW_SIDE_DICT_MAX     ( (UInt32)1 << 20 )   /* CALL/JUMP streams    */
 
 typedef struct {
-    int    kind;              /* CK_DATA, CK_EXE or CK_PACKED                */
+    int    kind;              /* CK_DATA, CK_EXE, CK_PACKED or CK_DELTA      */
     UInt32 first, count;      /* range of j->order-style indices in 'files'  */
     UInt32 planned;           /* bytes the scan said                         */
-    UInt32 packSize;
-    UInt32 unpackSize;
+    UInt32 packSize;          /* the main packed stream                      */
+    UInt32 unpackSize;        /* bytes of file data in the folder            */
     UInt32 dictSize;
     UInt32 numSubs;           /* files that came out with data               */
     int    lzma2;             /* LZMA2 (the data folders) or LZMA (the header) */
     Byte   props[5];          /* LZMA: all five; LZMA2: the first            */
+    unsigned delta;           /* CK_DELTA: the frame size                    */
+
+    /* BCJ2: three more packed streams follow the main one, in this order. */
+    int    bcj2;
+    UInt32 mainLen;           /* the main stream, before LZMA2               */
+    UInt32 rcSize;            /* the range-coded bits, written raw           */
+    UInt32 callLen, callPack; /* CALL targets, before and after LZMA         */
+    UInt32 jumpLen, jumpPack; /* JUMP targets                                */
+    Byte   callProps[5];
+    Byte   jumpProps[5];
 } SzwFolder;
 
 /*===========================================================================
@@ -251,6 +271,196 @@ static UInt32 BcjEncChunk( BcjEnc *b, Byte *data, UInt32 size )
 }
 
 /*===========================================================================
+ * BCJ2, encoding
+ *
+ * The mirror of SZARC.C's BCJ2 stage.  The code goes out as four streams:
+ * the bytes with every converted branch target cut out (MAIN, which LZMA2
+ * then codes as the folder's stream), the targets of E8 CALLs and of E9 and
+ * 0F 8x jumps as absolute big-endian addresses (CALL and JUMP, each
+ * LZMA-coded once the main pass is over), and one range-coded bit per
+ * branch opcode saying whether its target was cut out (RC, written raw).
+ * A target is cut out when the top byte of its displacement is 00 or FF -
+ * within 16 MB either way, the BCJ filter's own test, and what 7-Zip's
+ * encoder does for a file under 16 MB.
+ *
+ * Positions are counted from the start of the folder's stream, files run
+ * together, exactly as the decoder counts what it emits; an opcode's
+ * absolute target is its displacement plus the address just past the
+ * operand.  The bit for an opcode in the last four bytes of the stream,
+ * which cannot own an operand, is coded as 0, as the decoder expects one
+ * bit for every opcode it meets.
+ *
+ * The range coder is LZMA's, with the 32-bit 'low' and carry flag of
+ * LZMAENC.C, since MSVC 2.2 has no 64-bit integer.  Its first byte is the
+ * zero every LZMA stream starts with, and the decoder skips it.
+ *===========================================================================*/
+#define SZW_RC_TOP        ( (UInt32)1 << 24 )
+#define SZW_RC_BITS       11
+#define SZW_RC_TOTAL      ( 1 << SZW_RC_BITS )
+#define SZW_RC_MOVE       5
+
+#define Bcj2IsJ( b0, b1 ) ( ( ( (b1) & 0xFE ) == 0xE8 ) || \
+                            ( (b0) == 0x0F && ( (b1) & 0xF0 ) == 0x80 ) )
+
+typedef struct {
+    UInt32 low, range;
+    UInt32 carry;
+    Byte   cache;
+    UInt32 cacheSize;
+    HBuf  *out;
+} Bcj2Rc;
+
+static void Bcj2RcInit( Bcj2Rc *rc, HBuf *out )
+{
+    rc->low       = 0;
+    rc->range     = 0xFFFFFFFFUL;
+    rc->carry     = 0;
+    rc->cache     = 0;
+    rc->cacheSize = 1;
+    rc->out       = out;
+}
+
+static void Bcj2RcShiftLow( Bcj2Rc *rc )
+{
+    if ( rc->low < 0xFF000000UL || rc->carry )
+    {
+        Byte temp = rc->cache;
+        do {
+            HByte( rc->out, (Byte)( temp + (Byte)rc->carry ) );
+            temp = 0xFF;
+        } while ( --rc->cacheSize != 0 );
+        rc->cache = (Byte)( rc->low >> 24 );
+    }
+    rc->cacheSize++;
+    rc->low = ( rc->low & 0x00FFFFFFUL ) << 8;
+    rc->carry = 0;
+}
+
+static void Bcj2RcBit( Bcj2Rc *rc, UInt16 *prob, unsigned bit )
+{
+    UInt32 p     = *prob;
+    UInt32 bound = ( rc->range >> SZW_RC_BITS ) * p;
+
+    if ( bit == 0 )
+    {
+        rc->range = bound;
+        p += ( SZW_RC_TOTAL - p ) >> SZW_RC_MOVE;
+    }
+    else
+    {
+        UInt32 nl = rc->low + bound;
+        if ( nl < rc->low ) rc->carry = 1;
+        rc->low = nl;
+        rc->range -= bound;
+        p -= p >> SZW_RC_MOVE;
+    }
+    *prob = (UInt16)p;
+    if ( rc->range < SZW_RC_TOP )
+    {
+        rc->range <<= 8;
+        Bcj2RcShiftLow( rc );
+    }
+}
+
+static void Bcj2RcFlush( Bcj2Rc *rc )
+{
+    int i;
+    for ( i = 0; i < 5; i++ ) Bcj2RcShiftLow( rc );
+}
+
+typedef struct {
+    Byte   *in;               /* raw bytes waiting, SZW_BCJ_BUF              */
+    UInt32  inHave, inPos;
+    int     inEof;
+    UInt32  nowPos;           /* stream offset of in[0]                      */
+    Byte    prevByte;
+    Byte   *out;              /* main-stream bytes ready, SZW_BCJ_BUF        */
+    UInt32  outN, outPos;
+    HBuf    call, jump, rcOut;
+    Bcj2Rc  rc;
+    UInt16  probs[2 + 256];   /* Jcc, E9, then E8 by the byte before it      */
+} Bcj2Enc;
+
+static Bcj2Enc *Bcj2EncCreate( void )
+{
+    Bcj2Enc *b = (Bcj2Enc *)calloc( 1, sizeof( Bcj2Enc ) );
+    int      i;
+
+    if ( !b ) return 0;
+    b->in  = (Byte *)malloc( SZW_BCJ_BUF );
+    b->out = (Byte *)malloc( SZW_BCJ_BUF );
+    if ( !b->in || !b->out )
+    {
+        free( b->in );
+        free( b->out );
+        free( b );
+        return 0;
+    }
+    for ( i = 0; i < 2 + 256; i++ ) b->probs[i] = SZW_RC_TOTAL >> 1;
+    Bcj2RcInit( &b->rc, &b->rcOut );
+    return b;
+}
+
+static void Bcj2EncFree( Bcj2Enc *b )
+{
+    if ( !b ) return;
+    free( b->in );
+    free( b->out );
+    free( b->call.p );
+    free( b->jump.p );
+    free( b->rcOut.p );
+    free( b );
+}
+
+/* Turn what is waiting in 'in' into main-stream bytes in 'out', stopping at
+ * an opcode whose operand has not all arrived yet (unless the input is at
+ * its end, when the opcode goes out unconverted with a 0 bit). */
+static void Bcj2Process( Bcj2Enc *b )
+{
+    while ( b->inPos < b->inHave && b->outN < SZW_BCJ_BUF )
+    {
+        Byte     c = b->in[b->inPos];
+        unsigned idx;
+
+        if ( !Bcj2IsJ( b->prevByte, c ) )
+        {
+            b->out[b->outN++] = c;
+            b->prevByte = c;
+            b->inPos++;
+            continue;
+        }
+        if ( b->inHave - b->inPos < 5 && !b->inEof ) break;
+
+        idx = ( c == 0xE8 ) ? 2 + (unsigned)b->prevByte : ( c == 0xE9 ) ? 1 : 0;
+        b->out[b->outN++] = c;
+        if ( b->inHave - b->inPos >= 5 )
+        {
+            const Byte *p = b->in + b->inPos + 1;
+            Byte nextByte = p[3];
+            if ( Test86MSByte( nextByte ) )
+            {
+                UInt32 src  = (UInt32)p[0] | ( (UInt32)p[1] << 8 ) |
+                              ( (UInt32)p[2] << 16 ) | ( (UInt32)p[3] << 24 );
+                UInt32 dest = b->nowPos + b->inPos + 5 + src;
+                HBuf  *s    = ( c == 0xE8 ) ? &b->call : &b->jump;
+
+                Bcj2RcBit( &b->rc, &b->probs[idx], 1 );
+                HByte( s, (Byte)( dest >> 24 ) );
+                HByte( s, (Byte)( dest >> 16 ) );
+                HByte( s, (Byte)( dest >> 8 ) );
+                HByte( s, (Byte)dest );
+                b->prevByte = nextByte;
+                b->inPos += 5;
+                continue;
+            }
+        }
+        Bcj2RcBit( &b->rc, &b->probs[idx], 0 );
+        b->prevByte = c;
+        b->inPos++;
+    }
+}
+
+/*===========================================================================
  * Reading a folder's files as one stream
  *===========================================================================*/
 typedef struct {
@@ -264,12 +474,22 @@ typedef struct {
     UInt32      crc;
     int         readError;
 
-    /* BCJ stage, when this is an executables folder */
+    UInt32      rawIn;        /* file bytes read, whatever a stage made of them */
+
+    /* BCJ stage, when this is a large executables folder */
     int         bcj;
     BcjEnc      bst;
     Byte       *bbuf;
     UInt32      bHave, bDone, bPos;
     int         bEof;
+
+    /* BCJ2 stage, when this is an executables folder up to SZW_BCJ2_MAX */
+    Bcj2Enc    *b2;
+
+    /* Delta stage, when this is a sampled-data folder */
+    unsigned    delta;        /* the frame size, or 0                        */
+    unsigned    dPos;
+    Byte        dHist[256];   /* the last frame's bytes, as they were        */
 } FolderReader;
 
 static void FinishFile( FolderReader *r )
@@ -311,6 +531,7 @@ static UInt32 RawRead( FolderReader *r, Byte *buf, UInt32 len )
         {
             r->crc = Crc32Update( r->crc, buf, (UInt32)n );
             r->cur->realSize += (UInt32)n;
+            r->rawIn += (UInt32)n;
             j->doneBytes += (UInt32)n;
             return (UInt32)n;
         }
@@ -328,13 +549,71 @@ static UInt32 RawRead( FolderReader *r, Byte *buf, UInt32 len )
     }
 }
 
-/* What the encoder reads: the raw stream, through the x86 filter when this
- * folder has one. */
+/* The raw stream through BCJ2: refill the window, convert, hand out main. */
+static UInt32 Bcj2Read( FolderReader *r, Byte *buf, UInt32 len )
+{
+    Bcj2Enc *b = r->b2;
+
+    for ( ;; )
+    {
+        if ( b->outPos < b->outN )
+        {
+            UInt32 n = b->outN - b->outPos;
+            if ( n > len ) n = len;
+            memcpy( buf, b->out + b->outPos, n );
+            b->outPos += n;
+            return n;
+        }
+        b->outN = b->outPos = 0;
+        if ( !b->inEof )
+        {
+            UInt32 tail = b->inHave - b->inPos;
+            if ( tail && b->inPos ) memmove( b->in, b->in + b->inPos, tail );
+            b->nowPos += b->inPos;
+            b->inHave  = tail;
+            b->inPos   = 0;
+            while ( !b->inEof && b->inHave < SZW_BCJ_BUF )
+            {
+                UInt32 got = RawRead( r, b->in + b->inHave, SZW_BCJ_BUF - b->inHave );
+                if ( got == 0 ) b->inEof = 1;
+                b->inHave += got;
+            }
+        }
+        if ( b->inPos == b->inHave ) return 0;
+        Bcj2Process( b );
+        if ( b->outN == 0 ) return 0;             /* cannot happen: a guard */
+    }
+}
+
+/* The Delta filter, in place: each byte minus the byte one frame back. */
+static void DeltaEncodeRun( FolderReader *r, Byte *data, UInt32 n )
+{
+    unsigned k = r->dPos, d = r->delta;
+    UInt32   i;
+
+    for ( i = 0; i < n; i++ )
+    {
+        Byte cur = data[i];
+        data[i] = (Byte)( cur - r->dHist[k] );
+        r->dHist[k] = cur;
+        if ( ++k == d ) k = 0;
+    }
+    r->dPos = k;
+}
+
+/* What the encoder reads: the raw stream, through this folder's filter. */
 static UInt32 FolderRead( void *user, Byte *buf, UInt32 len )
 {
     FolderReader *r = (FolderReader *)user;
     UInt32 n;
 
+    if ( r->delta )
+    {
+        n = RawRead( r, buf, len );
+        DeltaEncodeRun( r, buf, n );
+        return n;
+    }
+    if ( r->b2 )   return Bcj2Read( r, buf, len );
     if ( !r->bcj ) return RawRead( r, buf, len );
 
     if ( r->bPos == r->bDone )
@@ -445,6 +724,8 @@ static int StreamCmp( const void *a, const void *b )
     const CompEntry *y = &g_sj->ents[ *(const UInt32 *)b ];
     int c;
     if ( x->kind != y->kind ) return (int)x->kind - (int)y->kind;
+    if ( x->kind == CK_DELTA && x->delta != y->delta )
+        return (int)x->delta - (int)y->delta;
     c = StrICmp( ExtOf( x->rel ), ExtOf( y->rel ) );
     if ( c ) return c;
     c = StrICmp( CompStoredName( g_sj, x ), CompStoredName( g_sj, y ) );
@@ -464,7 +745,40 @@ static void WriteCoder( HBuf *h, const SzwFolder *fo )
         HByte( h, 0x00 );
         return;
     }
-    HNum( h, ( fo->kind == CK_EXE ) ? 2 : 1 );
+    if ( fo->bcj2 )
+    {
+        /* 7-Zip's own order: the JUMP and CALL coders, the main LZMA2, then
+         * BCJ2 with its four inputs.  In-streams count up coder by coder
+         * (0, 1, 2, then BCJ2's 3..6: main, call, jump, rc), out-streams
+         * likewise (0..3); the bind pairs and the packed-stream list say
+         * what feeds what, and the four packed streams follow one another
+         * in the archive in the order listed. */
+        HNum( h, 4 );
+        HByte( h, 0x23 );                 /* LZMA, 3-byte id, has properties */
+        HByte( h, 0x03 ); HByte( h, 0x01 ); HByte( h, 0x01 );
+        HNum( h, 5 );
+        HPut( h, fo->jumpProps, 5 );
+        HByte( h, 0x23 );
+        HByte( h, 0x03 ); HByte( h, 0x01 ); HByte( h, 0x01 );
+        HNum( h, 5 );
+        HPut( h, fo->callProps, 5 );
+        HByte( h, 0x21 );                 /* LZMA2 */
+        HByte( h, 0x21 );
+        HNum( h, 1 );
+        HByte( h, fo->props[0] );
+        HByte( h, 0x14 );                 /* BCJ2: 4-byte id, complex        */
+        HByte( h, 0x03 ); HByte( h, 0x03 ); HByte( h, 0x01 ); HByte( h, 0x1B );
+        HNum( h, 4 );                     /* four in, one out                */
+        HNum( h, 1 );
+        HNum( h, 5 ); HNum( h, 0 );       /* BCJ2's jump input <- coder 0    */
+        HNum( h, 4 ); HNum( h, 1 );       /* BCJ2's call input <- coder 1    */
+        HNum( h, 3 ); HNum( h, 2 );       /* BCJ2's main input <- LZMA2      */
+        HNum( h, 2 ); HNum( h, 6 );       /* packed: main, the raw rc bits,  */
+        HNum( h, 1 ); HNum( h, 0 );       /*         call, jump              */
+        return;
+    }
+
+    HNum( h, ( fo->kind == CK_EXE || fo->kind == CK_DELTA ) ? 2 : 1 );
     if ( fo->lzma2 )
     {
         HByte( h, 0x21 );                 /* 1-byte id, has properties */
@@ -486,20 +800,42 @@ static void WriteCoder( HBuf *h, const SzwFolder *fo )
         HNum( h, 1 );                     /* bind: BCJ's input ...           */
         HNum( h, 0 );                     /*     ... is LZMA2's output       */
     }
+    else if ( fo->kind == CK_DELTA )
+    {
+        HByte( h, 0x21 );                 /* 1-byte id, has properties       */
+        HByte( h, 0x03 );
+        HNum( h, 1 );
+        HByte( h, (Byte)( fo->delta - 1 ) );
+        HNum( h, 1 );                     /* bind: Delta's input ...         */
+        HNum( h, 0 );                     /*     ... is LZMA2's output       */
+    }
 }
+
+/* Packed streams a folder puts in the archive. */
+static UInt32 FolderPacks( const SzwFolder *fo ) { return fo->bcj2 ? 4 : 1; }
 
 static void WriteStreamsInfo( HBuf *h, UInt32 packPos, SzwFolder *fo, int nFo,
                               int withSubs, ArcCompJob *j, UInt32 *files,
                               const UInt32 *folderCrc )
 {
     int i;
-    UInt32 k;
+    UInt32 k, nPack = 0;
 
+    for ( i = 0; i < nFo; i++ ) nPack += FolderPacks( &fo[i] );
     HByte( h, k7zPackInfo );
     HNum( h, packPos );
-    HNum( h, (UInt32)nFo );
+    HNum( h, nPack );
     HByte( h, k7zSize );
-    for ( i = 0; i < nFo; i++ ) HNum( h, fo[i].packSize );
+    for ( i = 0; i < nFo; i++ )
+    {
+        HNum( h, fo[i].packSize );
+        if ( fo[i].bcj2 )
+        {
+            HNum( h, fo[i].rcSize );
+            HNum( h, fo[i].callPack );
+            HNum( h, fo[i].jumpPack );
+        }
+    }
     HByte( h, k7zEnd );
 
     HByte( h, k7zUnpackInfo );
@@ -510,8 +846,18 @@ static void WriteStreamsInfo( HBuf *h, UInt32 packPos, SzwFolder *fo, int nFo,
     HByte( h, k7zCodersUnpackSize );
     for ( i = 0; i < nFo; i++ )
     {
+        /* One size per coder output, in coder order. */
+        if ( fo[i].bcj2 )
+        {
+            HNum( h, fo[i].jumpLen );
+            HNum( h, fo[i].callLen );
+            HNum( h, fo[i].mainLen );
+            HNum( h, fo[i].unpackSize );  /* BCJ2's: the code as it was */
+            continue;
+        }
         HNum( h, fo[i].unpackSize );      /* LZMA2's (or Copy's) output */
-        if ( fo[i].kind == CK_EXE ) HNum( h, fo[i].unpackSize );   /* BCJ's */
+        if ( fo[i].kind == CK_EXE || fo[i].kind == CK_DELTA )
+            HNum( h, fo[i].unpackSize );  /* the filter's: the same size */
     }
     if ( folderCrc )
     {
@@ -593,9 +939,51 @@ static UInt32 MemRead( void *user, Byte *buf, UInt32 len )
     MemIn *m = (MemIn *)user;
     UInt32 n = m->len - m->pos;
     if ( n > len ) n = len;
-    memcpy( buf, m->p + m->pos, n );
+    if ( n ) memcpy( buf, m->p + m->pos, n );
     m->pos += n;
     return n;
+}
+
+/* A BCJ2 side stream (CALL or JUMP targets) as plain LZMA, straight into the
+ * archive after the main stream: lc 0, lp 2, pb 2 for 4-byte big-endian
+ * addresses, as 7-Zip codes them, and a dictionary no bigger than the
+ * stream or 1 MB. */
+static int WriteSideStream( FILE *f, const Byte *p, UInt32 len, Byte props[5], UInt32 *packed )
+{
+    LzmaEncProps lp;
+    MemIn        m;
+    UInt32       inT = 0, outT = 0, d = SZW_DICT_MIN, cap = DictCap();
+    int          rc;
+
+    while ( d < len && d < SZW_SIDE_DICT_MAX ) d <<= 1;
+    if ( d > cap ) d = cap;
+    LzmaEncPropsInit( &lp, d );
+    lp.lc = 0;
+    lp.lp = 2;
+    lp.pb = 2;
+    LzmaEncPropsBytes( &lp, props );
+    m.p = p; m.len = len; m.pos = 0;
+    rc = LzmaEncode( &lp, MemRead, &m, FileSink, f, 0, 0, &inT, &outT );
+    *packed = outT;
+    return rc;
+}
+
+/* The main pass is over: the range-coder bits go out raw, then the two
+ * target streams through LZMA.  Fills in the folder's sizes and props. */
+static int Bcj2Finish( Bcj2Enc *b, FILE *f, SzwFolder *fo )
+{
+    int rc;
+
+    Bcj2RcFlush( &b->rc );
+    if ( b->call.failed || b->jump.failed || b->rcOut.failed ) return SZ_ERR_MEMORY;
+    if ( fwrite( b->rcOut.p, 1, b->rcOut.len, f ) != b->rcOut.len ) return SZ_ERR_WRITE;
+    fo->rcSize  = b->rcOut.len;
+    fo->callLen = b->call.len;
+    fo->jumpLen = b->jump.len;
+    rc = WriteSideStream( f, b->call.p, b->call.len, fo->callProps, &fo->callPack );
+    if ( rc == SZ_OK )
+        rc = WriteSideStream( f, b->jump.p, b->jump.len, fo->jumpProps, &fo->jumpPack );
+    return rc;
 }
 
 static int MemWrite( void *user, const Byte *data, UInt32 len )
@@ -648,8 +1036,10 @@ int SzWriteArchive( ArcCompJob *j, FILE *f )
             s = fopen( path, "rb" );
             if ( s )
             {
-                size_t got = fread( sniff, 1, 16384, s );
-                e->kind = (Byte)CompSniff( sniff, (UInt32)got, &isText );
+                size_t   got = fread( sniff, 1, 16384, s );
+                unsigned frame = 0;
+                e->kind  = (Byte)CompSniff( sniff, (UInt32)got, e->size, &isText, &frame );
+                e->delta = (Byte)frame;
                 fclose( s );
             }
             else
@@ -661,8 +1051,9 @@ int SzWriteArchive( ArcCompJob *j, FILE *f )
     g_sj = j;
     qsort( files, nFiles, sizeof( UInt32 ), StreamCmp );
 
-    /* Empty files lead (they need no folder); the rest are grouped by kind,
-     * a new folder at each change of kind and at the 1 GB mark. */
+    /* Empty files lead (they need no folder); the rest are grouped by kind
+     * (and, for sampled data, by frame size), a new folder at each change
+     * and at the 1 GB mark. */
     {
         UInt32 a = 0, b;
         UInt32 *tmp = (UInt32 *)malloc( ( nFiles ? nFiles : 1 ) * sizeof( UInt32 ) );
@@ -680,11 +1071,13 @@ int SzWriteArchive( ArcCompJob *j, FILE *f )
         CompEntry *e = &j->ents[ files[k] ];
         SzwFolder *cur = nFo ? &fo[nFo - 1] : 0;
         if ( !cur || cur->kind != e->kind ||
+             ( e->kind == CK_DELTA && cur->delta != (unsigned)e->delta ) ||
              ( cur->count && cur->planned + e->size > SZ_MAX_UNPACK_SIZE ) )
         {
             if ( nFo == SZW_MAX_FOLDERS ) { rc = SZ_ERR_TOOBIG; goto done; }
             cur = &fo[nFo++];
             cur->kind  = e->kind;
+            cur->delta = e->delta;
             cur->first = k;
         }
         cur->count++;
@@ -738,16 +1131,32 @@ int SzWriteArchive( ArcCompJob *j, FILE *f )
             LzmaEncPropsInit( &p, fo[i].dictSize );
             fo[i].lzma2    = 1;
             fo[i].props[0] = Lzma2EncPropByte( &p );
-            if ( fo[i].kind == CK_EXE )
+            fo[i].bcj2     = ( fo[i].kind == CK_EXE && fo[i].planned <= SZW_BCJ2_MAX );
+            if ( fo[i].bcj2 )
+            {
+                r.b2 = Bcj2EncCreate();
+                if ( !r.b2 ) { rc = SZ_ERR_MEMORY; break; }
+            }
+            else if ( fo[i].kind == CK_EXE )
             {
                 r.bcj  = 1;
                 r.bbuf = (Byte *)malloc( SZW_BCJ_BUF );
                 if ( !r.bbuf ) { rc = SZ_ERR_MEMORY; break; }
             }
+            else if ( fo[i].kind == CK_DELTA )
+                r.delta = fo[i].delta;            /* dHist and dPos are 0 */
             ep.j = j;
             ep.r = &r;
             rc = Lzma2Encode( &p, FolderRead, &r, FileSink, f, EncProgress, &ep, &inT, &outT );
             free( r.bbuf );
+            if ( r.b2 )
+            {
+                /* The main stream is down; now the three cut out of it.
+                 * Nothing read means nothing to follow: the folder goes. */
+                if ( rc == SZ_OK && !j->cancelled && !r.readError && r.rawIn > 0 )
+                    rc = Bcj2Finish( r.b2, f, &fo[i] );
+                Bcj2EncFree( r.b2 );
+            }
         }
         if ( r.fp ) { fclose( r.fp ); r.fp = 0; }
         if ( rc == SZ_OK && j->cancelled ) rc = SZ_ERR_CANCEL;
@@ -755,7 +1164,8 @@ int SzWriteArchive( ArcCompJob *j, FILE *f )
         if ( rc != SZ_OK ) break;
 
         fo[i].packSize   = outT;
-        fo[i].unpackSize = inT;
+        fo[i].mainLen    = inT;               /* BCJ2: less than went in */
+        fo[i].unpackSize = r.rawIn;
         fo[i].numSubs = 0;
         for ( k = fo[i].first; k < fo[i].first + fo[i].count; k++ )
         {

@@ -34,6 +34,8 @@
 #elif defined(__OS2__)
 #  define INCL_DOSNLS
 #  include <os2.h>
+#elif defined(__PMDOS__)
+   /* nothing: PMDOSPLT.C makes the one call */
 #else
 #  include <dos.h>
 #endif
@@ -82,6 +84,21 @@ static void NumQuerySystem( void )
          strlen( ci.szThousandsSeparator ) < NUM_SEP_MAX )
         strcpy( g_sep, ci.szThousandsSeparator );
     else
+        strcpy( g_sep, "," );
+}
+
+#elif defined(__PMDOS__)
+
+/* A native PM-DOS program calls INT 21h/38h itself, with DS:EDX at its own
+ * buffer - there is no extender in between, so none of the DOS half's
+ * detour through real memory.  PMDOSPLT.C makes the call and copies the
+ * separator at offset 7 out of the block; 0 means the kernel said nothing
+ * usable, and the comma stands. */
+extern int PmThousandsSep( char *buf, int size );
+
+static void NumQuerySystem( void )
+{
+    if ( !PmThousandsSep( g_sep, NUM_SEP_MAX ) )
         strcpy( g_sep, "," );
 }
 
@@ -228,6 +245,17 @@ char *NumFmt( UInt32 v, char *buf )
     return NumGroupDigits( digits, buf );
 }
 
+#if defined(__PMDOS__)
+
+/* See NUMFMT.H: the PM-DOS front end counts its totals in 64-bit integers,
+ * spells them out itself, and has the digits grouped here. */
+char *NumFmtDigits( const char *digits, char *buf )
+{
+    return NumGroupDigits( digits, buf );
+}
+
+#else
+
 char *NumFmtD( double v, char *buf )
 {
     char digits[48];
@@ -252,6 +280,8 @@ char *NumFmtD( double v, char *buf )
 
     return NumGroupDigits( digits, buf );
 }
+
+#endif
 
 char *NumFmtRight( UInt32 v, char *buf, int width )
 {

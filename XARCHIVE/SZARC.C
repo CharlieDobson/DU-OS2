@@ -49,6 +49,7 @@
 /* Optional filter coder applied to the main coder's output */
 #define SZ_F_NONE     0
 #define SZ_F_BCJ_X86  1
+#define SZ_F_DELTA    2         /* each byte plus the one a frame back       */
 
 /* Coder kinds, as recognised from the coder id while parsing a folder. */
 #define SZ_C_UNKNOWN  0         /* parsed structurally, cannot be decoded    */
@@ -57,6 +58,7 @@
 #define SZ_C_LZMA2    3
 #define SZ_C_BCJ_X86  4
 #define SZ_C_BCJ2     5
+#define SZ_C_DELTA    7         /* 03: one property byte, the frame size - 1 */
 #define SZ_C_AES      6         /* 06F10701: AES-256-CBC over the packed
                                  * stream.  Unlike every other coder here it
                                  * is not a codec at all - it changes no
@@ -81,8 +83,9 @@
  *
  * Three shapes are decodable:
  *   1 coder    - Copy / LZMA / LZMA2 straight from the packed stream.
- *   2 coders   - the above plus a BCJ x86 filter over its output, bound so
- *                the main coder's output feeds the filter's input.
+ *   2 coders   - the above plus a filter over its output, bound so the main
+ *                coder's output feeds the filter's input: BCJ x86, or Delta
+ *                (what 7-Zip puts in front of a .wav of its own accord).
  *   4 coders   - BCJ2: three coders producing the main, call and jump
  *                streams, plus the BCJ2 coder itself whose fourth input is
  *                the raw range-coder packed stream.
@@ -99,7 +102,8 @@ typedef struct {
 
 typedef struct {
     int    method;          /* SZ_M_COPY / SZ_M_LZMA / SZ_M_LZMA2            */
-    int    filter;          /* SZ_F_NONE / SZ_F_BCJ_X86                      */
+    int    filter;          /* SZ_F_NONE / SZ_F_BCJ_X86 / SZ_F_DELTA         */
+    unsigned deltaDist;     /* SZ_F_DELTA: the frame size, 1..256            */
     Byte   props[8];
     UInt32 propsSize;
     UInt32 numCoders;
@@ -439,6 +443,29 @@ static int CoderMethod( int kind )
     return SZ_M_LZMA2;
 }
 
+/* The filters that may sit over a main coder's output. */
+static int CoderIsFilter( int kind )
+{
+    return kind == SZ_C_BCJ_X86 || kind == SZ_C_DELTA;
+}
+
+/* Record filter coder 'idx' in the folder.  0 when its properties are not
+ * what that filter needs, which leaves the folder unsupported. */
+static int SetFilter( SzFolder *fo, int idx )
+{
+    const SzCoder *c = &fo->coders[idx];
+
+    if ( c->kind == SZ_C_DELTA )
+    {
+        if ( c->propsSize != 1 ) return 0;
+        fo->filter    = SZ_F_DELTA;
+        fo->deltaDist = (unsigned)c->props[0] + 1;
+        return 1;
+    }
+    fo->filter = SZ_F_BCJ_X86;
+    return 1;
+}
+
 /*---- Folder classification ----------------------------------------------- *
  * Decide, from the parsed structure alone, whether this folder is one of the
  * three decodable shapes, and fill in the fields the decoder uses.  Sets
@@ -523,8 +550,8 @@ static void ClassifyFolder( SzFolder *fo )
         for ( c = 0; c < fo->numCoders; c++ )
         {
             if ( (int)c == aesIdx ) continue;
-            if ( CoderIsMain( fo->coders[c].kind ) )       mainIdx = (int)c;
-            else if ( fo->coders[c].kind == SZ_C_BCJ_X86 ) filtIdx = (int)c;
+            if ( CoderIsMain( fo->coders[c].kind ) )        mainIdx = (int)c;
+            else if ( CoderIsFilter( fo->coders[c].kind ) ) filtIdx = (int)c;
             else return;                  /* something we do not decode      */
         }
         if ( mainIdx < 0 ) return;
@@ -551,7 +578,7 @@ static void ClassifyFolder( SzFolder *fo )
             if ( b < 0 ) return;
             if ( fo->bpOut[b] != fo->coders[mainIdx].firstOut ) return;
             if ( finalOut != fo->coders[filtIdx].firstOut ) return;
-            fo->filter = SZ_F_BCJ_X86;
+            if ( !SetFilter( fo, filtIdx ) ) return;
         }
 
         fo->method       = CoderMethod( fo->coders[mainIdx].kind );
@@ -580,15 +607,15 @@ static void ClassifyFolder( SzFolder *fo )
         return;
     }
 
-    /* --- two coders: main + BCJ x86 filter over its output --------------- */
+    /* --- two coders: main + a filter (BCJ x86, Delta) over its output ---- */
     if ( fo->numCoders == 2 )
     {
         int mainIdx = -1, filtIdx = -1;
         UInt32 c;
         for ( c = 0; c < 2; c++ )
         {
-            if ( CoderIsMain( fo->coders[c].kind ) )      mainIdx = (int)c;
-            else if ( fo->coders[c].kind == SZ_C_BCJ_X86 ) filtIdx = (int)c;
+            if ( CoderIsMain( fo->coders[c].kind ) )        mainIdx = (int)c;
+            else if ( CoderIsFilter( fo->coders[c].kind ) ) filtIdx = (int)c;
         }
         if ( mainIdx < 0 || filtIdx < 0 ) return;
         if ( fo->numPackStreams != 1 || fo->numBindPairs != 1 ) return;
@@ -596,9 +623,9 @@ static void ClassifyFolder( SzFolder *fo )
         if ( fo->bpIn[0]  != fo->coders[filtIdx].firstIn )  return;
         if ( fo->bpOut[0] != fo->coders[mainIdx].firstOut ) return;
         if ( finalOut != fo->coders[filtIdx].firstOut )     return;
+        if ( !SetFilter( fo, filtIdx ) )                    return;
 
         fo->method       = CoderMethod( fo->coders[mainIdx].kind );
-        fo->filter       = SZ_F_BCJ_X86;
         fo->propsSize    = fo->coders[mainIdx].propsSize;
         memcpy( fo->props, fo->coders[mainIdx].props, sizeof( fo->props ) );
         fo->mainOutLocal = fo->coders[mainIdx].firstOut;
@@ -725,6 +752,8 @@ static int ReadFolder( ParseState *ps, SzFolder *fo )
         else if ( idSize == 4 && id[0] == 0x03 && id[1] == 0x03 &&
                   id[2] == 0x01 && id[3] == 0x1B )
             cd.kind = SZ_C_BCJ2;
+        else if ( idSize == 1 && id[0] == 0x03 )
+            cd.kind = SZ_C_DELTA;
         else if ( idSize == 4 && id[0] == 0x06 && id[1] == 0xF1 &&
                   id[2] == 0x07 && id[3] == 0x01 )
             cd.kind = SZ_C_AES;
@@ -1432,6 +1461,29 @@ static void BcjX86Decode( Byte *data, UInt32 size )
     BcjX86Chunk( &b, data, size );      /* the <5-byte tail never converts */
 }
 
+/*---- The Delta filter, undone ---------------------------------------------
+ * 7-Zip's Delta coder (id 03) stores each byte as its difference from the
+ * byte one frame back, the frame being 1 to 256 bytes (the coder's one
+ * property, plus one).  Undoing it is each byte plus the byte one frame
+ * back as already restored.  The only state is the last frame, 'hist', with
+ * 'pos' the slot the next byte uses - zero both and a stream can come
+ * through in any pieces. */
+static void DeltaDecodeRun( Byte *hist, unsigned dist, unsigned *pos,
+                            Byte *data, UInt32 n )
+{
+    unsigned k = *pos;
+    UInt32   i;
+
+    for ( i = 0; i < n; i++ )
+    {
+        Byte v = (Byte)( data[i] + hist[k] );
+        data[i] = v;
+        hist[k] = v;
+        if ( ++k == dist ) k = 0;
+    }
+    *pos = k;
+}
+
 /*---- What an LZMA dictionary will ACTUALLY cost --------------------------- *
  * The coder declares a dictionary size, and it is tempting to weigh that
  * figure against the memory budget.  It is the wrong figure.  A dictionary is
@@ -1610,6 +1662,18 @@ static int DecodeFolder( SzArchive *a, UInt32 fIdx, Byte **outBufOut )
                 rc = SZ_ERR_DATA;            /* BCJ must preserve size */
             else
                 BcjX86Decode( outBuf, mainSize );
+        }
+        else if ( rc == SZ_OK && fo->filter == SZ_F_DELTA )
+        {
+            if ( fo->unpackSize != mainSize )
+                rc = SZ_ERR_DATA;            /* so must Delta */
+            else
+            {
+                Byte     hist[256];
+                unsigned pos = 0;
+                memset( hist, 0, sizeof( hist ) );
+                DeltaDecodeRun( hist, fo->deltaDist, &pos, outBuf, mainSize );
+            }
         }
     }
 
@@ -1920,6 +1984,8 @@ const char *SzEntryMethod( SzArchive *a, int index )
     lstrcpy( buf, m );
     if ( fo->filter == SZ_F_BCJ_X86 )
         lstrcat( buf, "+BCJ" );
+    if ( fo->filter == SZ_F_DELTA )
+        lstrcat( buf, "+Delta" );
     if ( fo->isBcj2 )
         lstrcat( buf, "+BCJ2" );
     return buf;
@@ -2321,6 +2387,35 @@ static int SzBcjFinish( SzBcjStage *s )
     {
         if ( !s->next( s->nextUser, s->buf, s->nCarry ) ) return 0;
         s->nCarry = 0;
+    }
+    return 1;
+}
+
+/*---- Delta stage --------------------------------------------------------- *
+ * The streamed form of DeltaDecodeRun: the decoder's output is copied into a
+ * staging buffer a piece at a time, undone there, and passed on.  Nothing is
+ * ever held back, so there is no finish step.
+ *-------------------------------------------------------------------------- */
+typedef struct {
+    Byte     hist[256];
+    unsigned dist, pos;
+    Byte    *buf;            /* SZ_BCJ_BUF staging */
+    LzmaEmit next;           /* downstream sink */
+    void    *nextUser;
+} SzDeltaStage;
+
+static int SzDeltaEmit( void *user, const Byte *data, UInt32 len )
+{
+    SzDeltaStage *s = (SzDeltaStage *)user;
+
+    while ( len )
+    {
+        UInt32 take = ( len > SZ_BCJ_BUF ) ? SZ_BCJ_BUF : len;
+        memcpy( s->buf, data, take );
+        DeltaDecodeRun( s->hist, s->dist, &s->pos, s->buf, take );
+        if ( !s->next( s->nextUser, s->buf, take ) ) return 0;
+        data += take;
+        len  -= take;
     }
     return 1;
 }
@@ -2822,6 +2917,7 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
     SzSink      sink;
     SzBcjStage  bcj;
     SzBcj2Stage bcj2;
+    SzDeltaStage delta;
     Byte       *callBuf = NULL, *jumpBuf = NULL, *rcBuf = NULL;
     UInt32      callLen = 0,     jumpLen = 0,     rcLen = 0;
     LzmaEmit    emit     = SzSinkEmit;
@@ -2952,6 +3048,25 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
         emitUser     = &bcj;
     }
 
+    delta.buf = NULL;
+    if ( fo->filter == SZ_F_DELTA )
+    {
+        if ( fo->unpackSize != fo->mainUnpackSize )
+        {
+            free( order );
+            return SZ_ERR_DATA;              /* Delta must preserve size */
+        }
+        delta.buf = (Byte *)malloc( SZ_BCJ_BUF );
+        if ( !delta.buf ) { free( order ); return SZ_ERR_MEMORY; }
+        memset( delta.hist, 0, sizeof( delta.hist ) );
+        delta.dist     = fo->deltaDist;
+        delta.pos      = 0;
+        delta.next     = SzSinkEmit;
+        delta.nextUser = &sink;
+        emit           = SzDeltaEmit;
+        emitUser       = &delta;
+    }
+
     SzPackSrcInit( &src, a->fp, packSize );
     if ( fo->encrypted )
     {
@@ -2960,7 +3075,8 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
         {
             /* Free what the pipeline already allocated - returning straight
              * out of here would leak the BCJ buffer and the order table. */
-            if ( bcj.buf ) free( bcj.buf );
+            if ( bcj.buf )   free( bcj.buf );
+            if ( delta.buf ) free( delta.buf );
             free( order );
             return krc;                 /* SZ_ERR_PASSWORD -> prompt        */
         }
@@ -3082,6 +3198,7 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
         remove( sink.curPath );
     }
     if ( bcj.buf )   free( bcj.buf );
+    if ( delta.buf ) free( delta.buf );
     if ( bcj2.obuf ) free( bcj2.obuf );
     if ( callBuf )   free( callBuf );
     if ( jumpBuf )   free( jumpBuf );
