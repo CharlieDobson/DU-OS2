@@ -74,4 +74,10 @@ UInt32 CabMemNeeded( CabArchive *cab );
 
 void CabClose( CabArchive *cab );
 
+/* Delete entries - ArcDeleteItems in ARCFILE.H; the arguments are set out
+ * in ARCFILE.C.  Whole folders are copied or dropped; a folder that keeps
+ * only some of its files is decoded and those compressed again as MSZIP. */
+int  CabDeleteWrite( CabArchive *cab, const Byte *del, FILE *out,
+                     ArcCompProgress prog, void *user, const char **why );
+
 #endif /* CABARC_H */

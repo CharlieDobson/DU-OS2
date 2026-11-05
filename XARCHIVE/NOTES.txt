@@ -561,3 +561,13 @@ RE-SYNCED 2026-10-23 (the Delta filter, and BCJ2 on the way out)
     Verified against 7-Zip 26.02 both ways on Windows (it extracts every
     archive we write byte for byte; we extract its Delta and BCJ2 ones),
     and on the DOS exe under DOSBox-X.  Not run on OS/2, as ever.
+
+
+2026-11-04  DELETE
+    Archive > Delete... (Del): PMMAIN.C ARCJOB_DELETE on the worker
+    thread, container emptied before the job and refilled in DeleteOnDone;
+    RES\XARCHIVE.RC menu item + ACCELTABLE VK_DELETE, IDM_ARCHIVE_DELETE
+    212.  Backend re-copied from DU32 (all shared files identical again).
+    BUILD\OS2T.C stubs the writer pieces SZARC.C now borrows, and MKTEST
+    links LZMAENC.C.  MKOS2 builds, MKTEST passes; not run on OS/2.  The
+    whole account is in DU32 BUILD-NOTES.txt, "DELETING FROM AN ARCHIVE".

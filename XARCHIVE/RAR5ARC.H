@@ -60,6 +60,11 @@ int  Rar5ExtractItems( Rar5Archive *r, const int *indices, int count,
                        const char *destDir, SzProgress prog, void *user );
 void Rar5Close( Rar5Archive *r );
 
+/* Delete entries - ArcDeleteItems in ARCFILE.H; the arguments are set out
+ * in ARCFILE.C.  The blocks kept are copied across as they are. */
+int  Rar5DeleteWrite( Rar5Archive *r, const Byte *del, FILE *out,
+                      ArcCompProgress prog, void *user, const char **why );
+
 /*---- Encryption ----------------------------------------------------------- *
  * RAR5 encrypts with AES-256-CBC keyed by PBKDF2-HMAC-SHA256, with a fresh
  * salt and IV per FILE.  Unlike 7z and RAR3 it usually carries an 8-byte

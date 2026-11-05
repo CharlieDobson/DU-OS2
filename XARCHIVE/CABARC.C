@@ -38,6 +38,7 @@
 #include "mszipdec.h"
 #include "lzxdec.h"
 #include "qtmdec.h"
+#include "deflenc.h"    /* deleting: a part-kept folder is packed again */
 #include "platform.h"   /* SetFileDosMTime */
 #include "volio.h"      /* every cabinet of a set through one file handle */
 
@@ -1189,4 +1190,736 @@ void CabClose( CabArchive *cab )
     if ( cab->parts )   free( cab->parts );
     if ( cab->entries ) free( cab->entries );
     free( cab );
+}
+
+/*---- Deleting entries ------------------------------------------------------
+ * A whole new cabinet is written (ARCFILE.C owns the temporary file and the
+ * swap).  Each folder goes one of three ways:
+ *
+ *   every file kept   its CFDATA records are copied byte for byte, checksums
+ *                     and reserved bytes included, and its files keep their
+ *                     offsets
+ *   no file kept      dropped, data and all
+ *   some kept         decoded from its first block, and the kept files'
+ *                     bytes - end to end, in the order they had - compressed
+ *                     again as MSZIP in blocks of 32 KB.  A stored folder
+ *                     stays stored.
+ *
+ * MSZIP because it is the one cabinet method this program can write, and
+ * every reader has it.  Each new block is a deflate stream on its own, with
+ * nothing referring back into the block before.  The format lets a block
+ * lean on the previous one's output without requiring it, and DEFLENC starts
+ * every stream with an empty window.  The cost: a folder packed again comes
+ * out about 2% larger than makecab's MSZIP of the same files.
+ *
+ * A folder that keeps only empty files has no bytes left, and is written
+ * with no CFDATA at all - which is what makecab does with one.
+ *
+ * The header's reserved area is dropped.  What goes there in practice is
+ * Authenticode's pointer to a digital signature, and once a file has gone
+ * the signature matches nothing: kept, it would make the new cabinet look
+ * tampered with instead of simply unsigned.  The per-folder and per-block
+ * reserve SIZES stay, because every CFFOLDER and CFDATA record is laid out
+ * with them; copied records bring their reserved bytes along, and new ones
+ * get zeros.  So the reserve flag stays only while one of those two is not
+ * 0, with the header's own reserve written as 0 bytes.
+ *
+ * Refused: a cabinet inside a program (an IExpress package or an update -
+ * the cabinet is a resource of the .exe, and rewriting the .exe is another
+ * job), a cabinet that is one of a set, and a selection that would leave no
+ * file at all.  Microsoft's FCI never writes a cabinet with no folder or no
+ * file, and this program's own reader refuses one (see CabReadHeader).
+ *--------------------------------------------------------------------------- */
+
+#define CAB_PACK_CAP    ( CAB_BLOCK_OUT + 16 )      /* "CK" + deflate, stored at worst */
+#define CAB_REC_CAP     ( CAB_FILE_SIZE + 1024 )    /* one CFFILE: the spec allows a
+                                                       256-byte name; this is generous */
+#define CAB_SIZE_MAX    0x7FFFFFFFUL                /* cbCabinet, as far as a long seeks */
+#define CAB_MAX_BLOCKS  65535UL                     /* cCFData is 16 bits              */
+
+#define CD_DROP         0
+#define CD_COPY         1
+#define CD_RECODE       2
+
+static const char cdWhySet[] =
+    "This cabinet is one of a set that runs across several files.  Files "
+    "cannot be deleted from a cabinet set.";
+static const char cdWhyExe[] =
+    "This cabinet is stored inside a program file, such as a setup package.  "
+    "Files cannot be deleted from a cabinet inside a program.";
+static const char cdWhyDamaged[] =
+    "A file in this cabinet's list belongs to a folder the cabinet does not "
+    "have.  The cabinet may be damaged.";
+static const char cdWhyAll[] =
+    "A cabinet must hold at least one file.  To remove every file, delete "
+    "the cabinet itself.";
+static const char cdWhyMethod[] =
+    "A folder in this cabinet holds files being kept and files being "
+    "deleted, and that folder uses a compression method this program "
+    "cannot read.";
+static const char cdWhyBig[] =
+    "The new cabinet would be larger than 2 GB, the most a cabinet can hold.";
+static const char cdWhyBlocks[] =
+    "The files kept from one folder would need more data blocks than a "
+    "cabinet folder can hold.";
+
+/* What happens to each of the old cabinet's folders. */
+typedef struct {
+    int    how;                 /* CD_DROP, CD_COPY or CD_RECODE           */
+    int    newIndex;            /* its number in the new cabinet           */
+    UInt32 kept, gone;          /* its files kept and deleted              */
+    UInt32 extent;              /* bytes to decode: the furthest kept end  */
+    UInt32 dataAt;              /* the new coffCabStart                    */
+    UInt32 blocks;              /* the new cCFData                         */
+    UInt16 type;                /* the new typeCompress                    */
+} CdFold;
+
+/* The new cabinet's data area as it is written, and the progress report. */
+typedef struct {
+    FILE           *out;
+    UInt32          at;             /* bytes written so far                */
+    int             dataReserve;
+    int             stored;         /* this folder's blocks are not packed  */
+    UInt32          blocks;         /* CFDATA records in this folder        */
+    UInt32          folderPos;      /* its uncompressed bytes so far        */
+    DeflEnc        *defl;
+    Byte           *raw;            /* the block being gathered            */
+    UInt32          rawLen;
+    Byte           *pack;           /* and that block packed               */
+    UInt32          packLen;
+    Byte           *copy;           /* one CFDATA record, copied whole      */
+    const char     *why;
+    ArcCompProgress prog;
+    void           *user;
+    int             fileIndex, fileCount;
+    const char     *name;
+    UInt32          doneKB, doneFrac, totalKB;
+} CabWriter;
+
+static void CabPut16( Byte *ptr, UInt32 val )
+{
+    ptr[0] = (Byte)val;
+    ptr[1] = (Byte)( val >> 8 );
+}
+
+static void CabPut32( Byte *ptr, UInt32 val )
+{
+    CabPut16( ptr, val );
+    CabPut16( ptr + 2, val >> 16 );
+}
+
+/* Kilobytes, rounded up, without overflowing near 4 GB. */
+static UInt32 CdKB( UInt32 bytes )
+{
+    return ( bytes >> 10 ) + ( ( bytes & 1023 ) ? 1 : 0 );
+}
+
+/*---- Progress --------------------------------------------------------------*/
+static int CwTell( CabWriter *cw )
+{
+    int index = cw->fileIndex;
+
+    if ( !cw->prog ) return SZ_OK;
+    if ( index >= cw->fileCount ) index = cw->fileCount - 1;
+    if ( !cw->prog( cw->user, index, cw->fileCount, cw->name,
+                    cw->doneKB, cw->totalKB ) )
+        return SZ_ERR_CANCEL;
+    return SZ_OK;
+}
+
+/* 'bytes' more of the work done.  Files that overlap make the decoder go
+ * over part of a folder twice, so the count is held at the total. */
+static int CwWork( CabWriter *cw, UInt32 bytes )
+{
+    cw->doneFrac += bytes & 1023;
+    cw->doneKB   += ( bytes >> 10 ) + ( cw->doneFrac >> 10 );
+    cw->doneFrac &= 1023;
+    if ( cw->doneKB > cw->totalKB ) cw->doneKB = cw->totalKB;
+    return CwTell( cw );
+}
+
+/*---- Writing the data area -------------------------------------------------*/
+static int CwWrite( CabWriter *cw, const void *data, UInt32 len )
+{
+    if ( len > CAB_SIZE_MAX - cw->at )
+    {
+        cw->why = cdWhyBig;
+        return SZ_ERR_UNSUPPORTED;
+    }
+    if ( len && fwrite( data, 1, (size_t)len, cw->out ) != (size_t)len )
+        return SZ_ERR_WRITE;
+    cw->at += len;
+    return SZ_OK;
+}
+
+/* DEFLENC's output, into the block buffer.  Refusing when it is full makes
+ * the encoder fail, and the block is then sent stored instead. */
+static int CwPackWrite( void *user, const Byte *data, UInt32 len )
+{
+    CabWriter *cw = (CabWriter *)user;
+
+    if ( len > CAB_PACK_CAP - cw->packLen ) return 0;
+    memcpy( cw->pack + cw->packLen, data, len );
+    cw->packLen += len;
+    return 1;
+}
+
+/* The gathered block out as one CFDATA record.  The checksum is the one
+ * CrNextBlock verifies: the data, then the two size fields. */
+static int CwFlush( CabWriter *cw )
+{
+    static const Byte zeros[256];
+    Byte        hdr[CAB_DATA_SIZE];
+    const Byte *data = cw->raw;
+    UInt32      len  = cw->rawLen;
+    int         rc;
+
+    if ( cw->rawLen == 0 ) return SZ_OK;
+    if ( cw->blocks >= CAB_MAX_BLOCKS )
+    {
+        cw->why = cdWhyBlocks;
+        return SZ_ERR_UNSUPPORTED;
+    }
+
+    if ( !cw->stored )
+    {
+        cw->pack[0] = 'C';
+        cw->pack[1] = 'K';
+        cw->packLen = 2;
+        DeflReset( cw->defl, CwPackWrite, cw );
+        rc = DeflFeed( cw->defl, cw->raw, cw->rawLen );
+        if ( rc == SZ_OK ) rc = DeflFinish( cw->defl );
+
+        /* Data that will not compress: one stored deflate block, final
+         * (bit 0) and type 00, padded to the byte, then LEN and NLEN. */
+        if ( rc != SZ_OK || cw->packLen > cw->rawLen + 7 )
+        {
+            cw->pack[2] = 0x01;
+            CabPut16( cw->pack + 3, cw->rawLen );
+            CabPut16( cw->pack + 5, ~cw->rawLen & 0xFFFFUL );
+            memcpy( cw->pack + 7, cw->raw, cw->rawLen );
+            cw->packLen = cw->rawLen + 7;
+        }
+        data = cw->pack;
+        len  = cw->packLen;
+    }
+
+    CabPut16( hdr + 4, len );
+    CabPut16( hdr + 6, cw->rawLen );
+    CabPut32( hdr, CabChecksum( hdr + 4, 4, CabChecksum( data, len, 0 ) ) );
+
+    rc = CwWrite( cw, hdr, CAB_DATA_SIZE );
+    if ( rc == SZ_OK && cw->dataReserve )
+        rc = CwWrite( cw, zeros, (UInt32)cw->dataReserve );
+    if ( rc == SZ_OK ) rc = CwWrite( cw, data, len );
+    if ( rc != SZ_OK ) return rc;
+
+    cw->blocks++;
+    cw->rawLen = 0;
+    return SZ_OK;
+}
+
+/* Kept bytes into the block being gathered. */
+static int CwPut( CabWriter *cw, const Byte *data, UInt32 len )
+{
+    while ( len > 0 )
+    {
+        UInt32 take = CAB_BLOCK_OUT - cw->rawLen;
+
+        if ( take > len ) take = len;
+        memcpy( cw->raw + cw->rawLen, data, take );
+        cw->rawLen    += take;
+        cw->folderPos += take;
+        data          += take;
+        len           -= take;
+        if ( cw->rawLen == CAB_BLOCK_OUT )
+        {
+            int rc = CwFlush( cw );
+
+            if ( rc != SZ_OK ) return rc;
+        }
+    }
+    return SZ_OK;
+}
+
+/*---- The folders -----------------------------------------------------------*/
+
+/* A folder whose files all stay: its records as they are.  A single cabinet
+ * holds the whole of each folder, so there is one part. */
+static int CdCopyFolder( CabArchive *cab, const CabFolder *fold, CabWriter *cw )
+{
+    const CabPart *part = &cab->parts[fold->firstPart];
+    const CabVol  *vol  = &cab->vols[part->vol];
+    long           at   = vol->base + (long)part->dataAt;
+    UInt32         k;
+    int            rc;
+
+    for ( k = 0; k < part->numBlocks; k++ )
+    {
+        UInt32 cbData, rest;
+
+        if ( VolSeek( cab->fp, at, SEEK_SET ) != 0 ||
+             VolRead( cw->copy, 1, CAB_DATA_SIZE, cab->fp ) != CAB_DATA_SIZE )
+            return SZ_ERR_READ;
+        cbData = CabLe16( cw->copy + 4 );
+
+        /* 8 + 255 + 65535 at most, inside CAB_BLOCK_IN. */
+        rest = (UInt32)vol->dataReserve + cbData;
+        if ( rest && VolRead( cw->copy + CAB_DATA_SIZE, 1, rest, cab->fp ) != rest )
+            return SZ_ERR_READ;
+
+        rc = CwWrite( cw, cw->copy, CAB_DATA_SIZE + rest );
+        if ( rc == SZ_OK ) rc = CwWork( cw, cbData );
+        if ( rc != SZ_OK ) return rc;
+        at += (long)( CAB_DATA_SIZE + rest );
+    }
+    cw->blocks = part->numBlocks;
+    return SZ_OK;
+}
+
+/* The next 'want' bytes of the folder: into the new block when 'keep' is
+ * set, passed over when it is not.  CrCopy, except that the bytes go to the
+ * writer and every decoded block counts as progress. */
+static int CdPass( CabReader *rd, CabWriter *cw, UInt32 want, int keep )
+{
+    while ( want > 0 )
+    {
+        UInt32 take;
+        int    rc;
+
+        if ( rd->frameUsed == rd->frameLen )
+        {
+            rc = CrNextBlock( rd );
+            if ( rc == SZ_OK ) rc = CwWork( cw, rd->frameLen );
+            if ( rc != SZ_OK ) return rc;
+            continue;
+        }
+        take = rd->frameLen - rd->frameUsed;
+        if ( take > want ) take = want;
+        if ( keep )
+        {
+            rc = CwPut( cw, rd->frame + rd->frameUsed, take );
+            if ( rc != SZ_OK ) return rc;
+        }
+        rd->frameUsed += take;
+        rd->pos       += take;
+        want          -= take;
+    }
+    return SZ_OK;
+}
+
+/* A folder that keeps some of its files.  'order' is those files, sorted by
+ * offset; each one's new offset goes into newOff[].  Decoding stops at the
+ * end of the last one kept - whatever follows it is not needed. */
+static int CdRecodeFolder( CabArchive *cab, int folder, const CabOrder *order,
+                           int count, UInt32 *newOff, CabWriter *cw )
+{
+    CabReader rd;
+    int       i, rc;
+
+    cw->blocks    = 0;
+    cw->folderPos = 0;
+    cw->rawLen    = 0;
+    cw->stored    = ( ( cab->folders[folder].type & CAB_COMP_MASK ) ==
+                      CAB_COMP_NONE );
+
+    rc = CrOpen( cab, folder, &rd );
+    if ( rc != SZ_OK ) return rc;
+
+    for ( i = 0; i < count && rc == SZ_OK; i++ )
+    {
+        const CabEntry *ent = &cab->entries[order[i].index];
+
+        newOff[order[i].index] = cw->folderPos;
+        cw->name = ent->name;
+        rc = CwTell( cw );
+        if ( rc == SZ_OK && ent->size > 0 )
+        {
+            /* Files that share bytes: back to the folder's start, as
+             * CabExtractEntry does.  Each gets its own copy. */
+            if ( ent->offset < rd.pos )
+            {
+                CrClose( &rd );
+                rc = CrOpen( cab, folder, &rd );
+            }
+            if ( rc == SZ_OK ) rc = CdPass( &rd, cw, ent->offset - rd.pos, 0 );
+            if ( rc == SZ_OK ) rc = CdPass( &rd, cw, ent->size, 1 );
+        }
+        cw->fileIndex++;
+    }
+    if ( rc == SZ_OK ) rc = CwFlush( cw );
+    CrClose( &rd );
+    return rc;
+}
+
+/*---- The CFFILE table ------------------------------------------------------
+ * Read again from the cabinet rather than rebuilt from the entries, because
+ * an entry's name has been through the code page and had its slashes turned
+ * round; the new cabinet gets the bytes the old one had.  With 'out' NULL,
+ * only measured.
+ *--------------------------------------------------------------------------- */
+static int CdFiles( CabArchive *cab, const Byte *del, const CdFold *folds,
+                    const UInt32 *newOff, Byte *rec, FILE *out, UInt32 *bytes )
+{
+    const CabVol *vol = &cab->vols[0];
+    int           k;
+
+    *bytes = 0;
+    if ( VolSeek( cab->fp, vol->base + (long)vol->filesAt, SEEK_SET ) != 0 )
+        return SZ_ERR_READ;
+
+    for ( k = 0; k < vol->numFiles; k++ )
+    {
+        UInt32 len = CAB_FILE_SIZE;
+        int    ch;
+
+        if ( VolRead( rec, 1, CAB_FILE_SIZE, cab->fp ) != CAB_FILE_SIZE )
+            return SZ_ERR_READ;
+        do
+        {
+            ch = VolGetc( cab->fp );
+            if ( ch == EOF ) return SZ_ERR_READ;
+            if ( len >= CAB_REC_CAP ) return SZ_ERR_DATA;
+            rec[len++] = (Byte)ch;
+        } while ( ch != 0 );
+
+        if ( del[k] ) continue;
+        if ( out )
+        {
+            const CdFold *fold = &folds[cab->entries[k].folder];
+
+            if ( fold->how == CD_RECODE ) CabPut32( rec + 4, newOff[k] );
+            CabPut16( rec + 8, (UInt32)fold->newIndex );
+            if ( fwrite( rec, 1, (size_t)len, out ) != (size_t)len )
+                return SZ_ERR_WRITE;
+        }
+        *bytes += len;
+    }
+    return SZ_OK;
+}
+
+/*---- The checks ------------------------------------------------------------*/
+
+/* Can this cabinet lose files at all? */
+static int CdCanDelete( CabArchive *cab, const char **why )
+{
+    int i;
+
+    if ( !cab ) return SZ_ERR_FORMAT;
+    if ( cab->numVols != 1 ||
+         ( cab->vols[0].flags & ( CAB_FLAG_PREV | CAB_FLAG_NEXT ) ) )
+    {
+        *why = cdWhySet;
+        return SZ_ERR_UNSUPPORTED;
+    }
+    /* Only CabOpenScan opens a cabinet anywhere but at the file's start. */
+    if ( cab->vols[0].embed != 0 )
+    {
+        *why = cdWhyExe;
+        return SZ_ERR_UNSUPPORTED;
+    }
+    /* One cabinet: every CFFILE record is an entry, in order, and each
+     * names one of the cabinet's own folders. */
+    if ( cab->numEntries != cab->vols[0].numFiles )
+    {
+        *why = cdWhyDamaged;
+        return SZ_ERR_UNSUPPORTED;
+    }
+    for ( i = 0; i < cab->numEntries; i++ )
+        if ( cab->entries[i].folder < 0 ||
+             cab->entries[i].folder >= cab->numFolders )
+        {
+            *why = cdWhyDamaged;
+            return SZ_ERR_UNSUPPORTED;
+        }
+    return SZ_OK;
+}
+
+/* Can CabReader decode this method, at this window? */
+static int CdCanDecode( UInt16 type )
+{
+    int bits = CAB_WINDOW( type );
+
+    switch ( type & CAB_COMP_MASK )
+    {
+    case CAB_COMP_NONE:
+    case CAB_COMP_MSZIP:   return 1;
+    case CAB_COMP_QUANTUM: return bits >= QTM_MIN_WINDOW && bits <= QTM_MAX_WINDOW;
+    case CAB_COMP_LZX:     return bits >= LZX_MIN_WINDOW && bits <= LZX_MAX_WINDOW;
+    }
+    return 0;
+}
+
+/* Decide each folder's fate for this selection, numbering the ones that
+ * stay.  *keptOut is the files left. */
+static int CdPlan( CabArchive *cab, const Byte *del, CdFold *folds,
+                   int *keptOut, int *foldersOut, const char **why )
+{
+    int kept = 0, numNew = 0, i, j;
+
+    memset( folds, 0, (size_t)cab->numFolders * sizeof( CdFold ) );
+    for ( i = 0; i < cab->numEntries; i++ )
+    {
+        const CabEntry *ent  = &cab->entries[i];
+        CdFold         *fold = &folds[ent->folder];
+
+        if ( del[i] )
+        {
+            fold->gone++;
+            continue;
+        }
+        fold->kept++;
+        kept++;
+        if ( ent->size > 0 )
+        {
+            UInt32 end = ent->offset + ent->size;
+
+            if ( end < ent->offset ) end = 0xFFFFFFFFUL;  /* for progress only */
+            if ( end > fold->extent ) fold->extent = end;
+        }
+    }
+    if ( kept == 0 )
+    {
+        *why = cdWhyAll;
+        return SZ_ERR_UNSUPPORTED;
+    }
+
+    for ( j = 0; j < cab->numFolders; j++ )
+    {
+        CdFold *fold = &folds[j];
+
+        if ( fold->kept == 0 )
+        {
+            fold->how = CD_DROP;
+            continue;
+        }
+        if ( fold->gone == 0 )
+            fold->how = CD_COPY;
+        else
+        {
+            if ( !CdCanDecode( cab->folders[j].type ) )
+            {
+                *why = cdWhyMethod;
+                return SZ_ERR_UNSUPPORTED;
+            }
+            fold->how = CD_RECODE;
+        }
+        fold->newIndex = numNew++;
+    }
+    *keptOut    = kept;
+    *foldersOut = numNew;
+    return SZ_OK;
+}
+
+/*---- Writing the new cabinet -----------------------------------------------
+ * The header, folder and file tables are measured first and room left for
+ * them; the data follows, a folder at a time; then the tables are written
+ * into the room left, now that every folder's position and block count is
+ * known.
+ *--------------------------------------------------------------------------- */
+static int CdWrite( CabArchive *cab, const Byte *del, CdFold *folds,
+                    int kept, int numNew, FILE *out, CabWriter *cw )
+{
+    const CabVol *vol = &cab->vols[0];
+    CabOrder     *order  = NULL;
+    UInt32       *newOff = NULL;
+    Byte         *rec    = NULL;
+    Byte          hdr[CAB_HDR_SIZE + 4];
+    UInt32        hdrLen, filesAt, fileBytes, dataStart, left;
+    int           reserve, needDefl = 0, count = 0, pos, i, j, rc;
+
+    order  = (CabOrder *)malloc( (size_t)kept * sizeof( CabOrder ) );
+    newOff = (UInt32 *)calloc( (size_t)cab->numEntries, sizeof( UInt32 ) );
+    rec    = (Byte *)malloc( CAB_REC_CAP );
+    cw->raw  = (Byte *)malloc( CAB_BLOCK_OUT );
+    cw->pack = (Byte *)malloc( CAB_PACK_CAP );
+    cw->copy = (Byte *)malloc( CAB_BLOCK_IN );
+    if ( !order || !newOff || !rec || !cw->raw || !cw->pack || !cw->copy )
+    { rc = SZ_ERR_MEMORY; goto done; }
+
+    for ( j = 0; j < cab->numFolders; j++ )
+    {
+        if ( folds[j].how == CD_RECODE &&
+             ( cab->folders[j].type & CAB_COMP_MASK ) != CAB_COMP_NONE )
+            needDefl = 1;
+        if ( folds[j].how == CD_COPY )
+        {
+            UInt32 packed = cab->parts[cab->folders[j].firstPart].packed;
+
+            if ( packed != 0xFFFFFFFFUL ) cw->totalKB += CdKB( packed );
+        }
+        else if ( folds[j].how == CD_RECODE )
+            cw->totalKB += CdKB( folds[j].extent );
+    }
+    if ( needDefl )
+    {
+        rc = DeflCreate( &cw->defl );
+        if ( rc != SZ_OK ) goto done;
+    }
+
+    /* The kept files, a folder at a time, in offset order. */
+    for ( i = 0; i < cab->numEntries; i++ )
+    {
+        if ( del[i] ) continue;
+        order[count].folder = cab->entries[i].folder;
+        order[count].offset = cab->entries[i].offset;
+        order[count].index  = i;
+        count++;
+    }
+    qsort( order, count, sizeof( CabOrder ), CabOrderCmp );
+
+    /* The room the tables take. */
+    reserve = ( vol->folderReserve != 0 || vol->dataReserve != 0 );
+    hdrLen  = CAB_HDR_SIZE + ( reserve ? 4 : 0 );
+    filesAt = hdrLen + (UInt32)numNew * ( CAB_FOLDER_SIZE + vol->folderReserve );
+    rc = CdFiles( cab, del, folds, newOff, rec, NULL, &fileBytes );
+    if ( rc != SZ_OK ) goto done;
+    dataStart = filesAt + fileBytes;
+
+    memset( cw->raw, 0, CAB_BLOCK_OUT );
+    for ( left = dataStart; left > 0; )
+    {
+        UInt32 take = ( left < CAB_BLOCK_OUT ) ? left : CAB_BLOCK_OUT;
+
+        rc = CwWrite( cw, cw->raw, take );
+        if ( rc != SZ_OK ) goto done;
+        left -= take;
+    }
+
+    /* The data. */
+    cw->dataReserve = vol->dataReserve;
+    pos = 0;
+    for ( j = 0; j < cab->numFolders; j++ )
+    {
+        CdFold *fold  = &folds[j];
+        int     first = pos;
+
+        while ( pos < count && order[pos].folder == j ) pos++;
+        if ( fold->how == CD_DROP ) continue;
+
+        fold->dataAt = cw->at;
+        if ( fold->how == CD_COPY )
+        {
+            cw->name = cab->entries[order[first].index].name;
+            rc = CwTell( cw );
+            if ( rc == SZ_OK ) rc = CdCopyFolder( cab, &cab->folders[j], cw );
+            fold->type = cab->folders[j].type;
+            cw->fileIndex += pos - first;
+        }
+        else
+        {
+            rc = CdRecodeFolder( cab, j, order + first, pos - first, newOff, cw );
+            fold->type = (UInt16)( cw->stored ? CAB_COMP_NONE : CAB_COMP_MSZIP );
+        }
+        if ( rc != SZ_OK ) goto done;
+        fold->blocks = cw->blocks;
+    }
+
+    /* Each folder's share was rounded up, so the count ends a little short
+     * of the total; show the bar full. */
+    cw->doneKB = cw->totalKB;
+    rc = CwTell( cw );
+    if ( rc != SZ_OK ) goto done;
+
+    /* And back to the start for the tables. */
+    if ( fseek( out, 0L, SEEK_SET ) != 0 ) { rc = SZ_ERR_WRITE; goto done; }
+    memset( hdr, 0, sizeof( hdr ) );
+    memcpy( hdr, "MSCF", 4 );
+    CabPut32( hdr + 8, cw->at );
+    CabPut32( hdr + 16, filesAt );
+    hdr[24] = 3;                                /* version 1.3 */
+    hdr[25] = 1;
+    CabPut16( hdr + 26, (UInt32)numNew );
+    CabPut16( hdr + 28, (UInt32)kept );
+    CabPut16( hdr + 30, reserve ? CAB_FLAG_RESERVE : 0 );
+    CabPut16( hdr + 32, vol->setId );
+    CabPut16( hdr + 34, vol->index );
+    if ( reserve )
+    {
+        /* cbCFHeader stays 0: the header's own reserve is dropped. */
+        hdr[38] = (Byte)vol->folderReserve;
+        hdr[39] = (Byte)vol->dataReserve;
+    }
+    if ( fwrite( hdr, 1, (size_t)hdrLen, out ) != (size_t)hdrLen )
+    { rc = SZ_ERR_WRITE; goto done; }
+
+    for ( j = 0; j < cab->numFolders; j++ )
+    {
+        Byte frec[CAB_FOLDER_SIZE];
+
+        if ( folds[j].how == CD_DROP ) continue;
+        CabPut32( frec, folds[j].dataAt );
+        CabPut16( frec + 4, folds[j].blocks );
+        CabPut16( frec + 6, folds[j].type );
+        if ( fwrite( frec, 1, CAB_FOLDER_SIZE, out ) != CAB_FOLDER_SIZE )
+        { rc = SZ_ERR_WRITE; goto done; }
+
+        /* The folder's reserved bytes come along, from the old record. */
+        if ( vol->folderReserve )
+        {
+            long   at   = vol->base + (long)vol->foldersAt +
+                          (long)j * ( CAB_FOLDER_SIZE + vol->folderReserve ) +
+                          CAB_FOLDER_SIZE;
+            size_t size = (size_t)vol->folderReserve;
+
+            if ( VolSeek( cab->fp, at, SEEK_SET ) != 0 ||
+                 VolRead( rec, 1, (UInt32)size, cab->fp ) != (UInt32)size )
+            { rc = SZ_ERR_READ; goto done; }
+            if ( fwrite( rec, 1, size, out ) != size )
+            { rc = SZ_ERR_WRITE; goto done; }
+        }
+    }
+
+    rc = CdFiles( cab, del, folds, newOff, rec, out, &fileBytes );
+    if ( rc == SZ_OK &&
+         ( ftell( out ) != (long)dataStart || fflush( out ) != 0 ) )
+        rc = SZ_ERR_WRITE;
+
+done:
+    if ( cw->defl ) DeflFree( cw->defl );
+    if ( cw->raw )  free( cw->raw );
+    if ( cw->pack ) free( cw->pack );
+    if ( cw->copy ) free( cw->copy );
+    if ( order )    free( order );
+    if ( newOff )   free( newOff );
+    if ( rec )      free( rec );
+    cw->defl = NULL;
+    cw->raw  = cw->pack = cw->copy = NULL;
+    return rc;
+}
+
+int CabDeleteWrite( CabArchive *cab, const Byte *del, FILE *out,
+                    ArcCompProgress prog, void *user, const char **why )
+{
+    CabWriter cw;
+    CdFold   *folds;
+    int       kept = 0, numNew = 0, rc;
+
+    rc = CdCanDelete( cab, why );
+    if ( rc != SZ_OK || !del ) return rc;
+
+    folds = (CdFold *)malloc( (size_t)cab->numFolders * sizeof( CdFold ) );
+    if ( !folds ) return SZ_ERR_MEMORY;
+    rc = CdPlan( cab, del, folds, &kept, &numNew, why );
+    if ( rc != SZ_OK || !out )
+    {
+        free( folds );
+        return rc;
+    }
+
+    memset( &cw, 0, sizeof( cw ) );
+    cw.out       = out;
+    cw.prog      = prog;
+    cw.user      = user;
+    cw.fileCount = kept;
+    cw.name      = "";
+    rc = CdWrite( cab, del, folds, kept, numNew, out, &cw );
+    free( folds );
+
+    /* In the terms ARCFILE.C expects: a block that fails its checksum, or a
+     * folder that turns out not to decode, is the source's fault. */
+    if ( rc == SZ_ERR_CRC || rc == SZ_ERR_FORMAT ) rc = SZ_ERR_DATA;
+    if ( rc == SZ_ERR_NORAM ) rc = SZ_ERR_MEMORY;
+    if ( rc == SZ_ERR_UNSUPPORTED ) *why = cw.why ? cw.why : cdWhyMethod;
+    return rc;
 }

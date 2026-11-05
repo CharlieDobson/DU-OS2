@@ -14,6 +14,8 @@
 #define SZARC_H
 
 #include "arcdefs.h"
+#include "arccomp.h"    /* ArcCompProgress, for SzDeleteWrite and the rest */
+#include <stdio.h>      /* FILE */
 
 typedef struct {
     char   name[SZ_MAX_NAME];   /* archive-relative path (back-slashes)     */
@@ -100,6 +102,12 @@ int  SzExtractItems( SzArchive *a, const int *indices, int count,
                      const char *destDir, SzProgress prog, void *user );
 
 void SzClose( SzArchive *a );
+
+/* Delete entries - ArcDeleteItems in ARCFILE.H; the arguments are set out
+ * in ARCFILE.C.  Whole folders are copied or dropped; a folder that keeps
+ * only some of its files is decoded and those compressed again. */
+int  SzDeleteWrite( SzArchive *a, const Byte *del, FILE *out,
+                    ArcCompProgress prog, void *user, const char **why );
 
 /* Human-readable text for an SZ_* result code. */
 const char *SzErrorText( int code );

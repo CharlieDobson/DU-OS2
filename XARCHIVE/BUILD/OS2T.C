@@ -80,6 +80,20 @@ void   SetFileMTime( const char *path, const FILETIME *ft )
 void   SetFileDosAttr( const char *path, DWORD attr, int isDir )
 { (void)path; (void)attr; (void)isDir; }
 
+/* Deleting from a 7z (SzDeleteWrite) borrows the header writer and the BCJ
+ * encoder from SZWRITE.C, which drags the whole compressor in, and a scratch
+ * file from ARCFILE.C.  Nothing here deletes, so they only have to link. */
+void   HPut( HBuf *h, const void *data, UInt32 n ) { (void)h; (void)data; (void)n; }
+void   HByte( HBuf *h, Byte b )                    { (void)h; (void)b; }
+void   HUInt32( HBuf *h, UInt32 v )                { (void)h; (void)v; }
+void   HNum( HBuf *h, UInt32 v )                   { (void)h; (void)v; }
+void   HBits( HBuf *h, const Byte *bits, UInt32 n ) { (void)h; (void)bits; (void)n; }
+UInt32 BcjEncChunk( BcjEnc *b, Byte *data, UInt32 size )
+{ (void)b; (void)data; return size; }
+UInt32 SzwDictFor( UInt32 bytes )                  { (void)bytes; return 1UL << 16; }
+FILE  *ArcDelScratch( void )                       { return NULL; }
+void   ArcDelScratchDone( FILE *f )                { (void)f; }
+
 static int g_fail = 0;
 
 static void CheckPath( const char *destDir, const char *name,

@@ -128,6 +128,39 @@ int    CompSniff( const Byte *buf, UInt32 len, UInt32 fileSize,
 int    ZipWriteArchive( ArcCompJob *j, FILE *f );
 int    SzWriteArchive( ArcCompJob *j, FILE *f );
 
+/*---- Lent by SZWRITE.C to SZARC.C ----------------------------------------- *
+ * Deleting from a 7z writes a header again and can compress a folder again,
+ * and the pieces for both are here already.  SZARC.C is the only other user.
+ *
+ * HBuf    a byte buffer that grows; 'failed' is set when memory runs out and
+ *         every later put is then ignored, so a caller checks once at the end.
+ * HNum    7z's variable-length number.  HBits: a bit vector, MSB first.
+ * BcjEnc  the x86 branch filter, encoding: BcjEncChunk converts in place and
+ *         returns how many bytes are finished; the rest wait for the bytes
+ *         after them, and at the end of the stream go out as they are.  Start
+ *         it zeroed.
+ * SzwDictFor  the LZMA dictionary for 'bytes' of input, within what this
+ *         machine can spare for the encoder. */
+typedef struct {
+    Byte  *p;
+    UInt32 len, cap;
+    int    failed;
+} HBuf;
+
+void   HPut( HBuf *h, const void *data, UInt32 n );
+void   HByte( HBuf *h, Byte b );
+void   HUInt32( HBuf *h, UInt32 v );
+void   HNum( HBuf *h, UInt32 v );
+void   HBits( HBuf *h, const Byte *bits, UInt32 n );
+
+typedef struct {
+    UInt32 base;
+    UInt32 mask;
+} BcjEnc;
+
+UInt32 BcjEncChunk( BcjEnc *b, Byte *data, UInt32 size );
+UInt32 SzwDictFor( UInt32 bytes );
+
 /* Read buffer size for file data. */
 #define COMP_IOBUF  32768U
 

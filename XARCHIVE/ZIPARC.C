@@ -1693,3 +1693,214 @@ int ZipNeedsPassword( ZipArchive *z )
             return 1;
     return 0;
 }
+
+/*===========================================================================
+ * Deleting entries (ArcDeleteItems in ARCFILE.H)
+ *
+ * Every zip entry stands alone - its local header, its data, and a data
+ * descriptor if it has one - so the entries kept are copied across byte for
+ * byte, encrypted or not, and only the central directory is written anew,
+ * with each local header's new offset in it.
+ *
+ * An entry's bytes run from its local header to the next local header in
+ * the file, or to the central directory after the last one.  Taking the
+ * span that way, rather than adding up header + name + extra + packed size,
+ * is what carries a data descriptor along without having to decide whether
+ * one is there (bit 3 says it may be, and some writers leave out its
+ * signature).
+ *
+ * A self-extracting zip keeps its stub: everything before the first local
+ * header goes across first, unchanged, and the offsets written keep the
+ * same bias as the old ones had - so a stub that expects offsets from the
+ * start of the .exe, and one that expects them from the start of the zip,
+ * both still find their entries.
+ *===========================================================================*/
+
+#define ZDEL_BUF  32768U
+
+typedef struct {
+    long off;                   /* local header offset, as stored */
+    int  idx;                   /* the entry                      */
+} ZipSpan;
+
+static int SpanCmp( const void *pa, const void *pb )
+{
+    const ZipSpan *sa = (const ZipSpan *)pa;
+    const ZipSpan *sb = (const ZipSpan *)pb;
+
+    if ( sa->off != sb->off ) return ( sa->off < sb->off ) ? -1 : 1;
+    return sa->idx - sb->idx;
+}
+
+static void ZPut16( Byte *p, UInt32 v ) { p[0] = (Byte)v; p[1] = (Byte)( v >> 8 ); }
+static void ZPut32( Byte *p, UInt32 v )
+{
+    ZPut16( p, v & 0xFFFFUL );
+    ZPut16( p + 2, v >> 16 );
+}
+static UInt32 ZGet16( const Byte *p ) { return (UInt32)p[0] | ( (UInt32)p[1] << 8 ); }
+static UInt32 ZGet32( const Byte *p ) { return ZGet16( p ) | ( ZGet16( p + 2 ) << 16 ); }
+
+typedef struct {
+    ArcCompProgress prog;
+    void           *user;
+    UInt32          doneBytes, totalBytes;
+} ZipDelProg;
+
+static int ZipDelTick( ZipDelProg *zp, int index, int count, const char *name )
+{
+    if ( !zp->prog ) return 1;
+    return zp->prog( zp->user, index, count, name,
+                     zp->doneBytes / 1024, zp->totalBytes / 1024 );
+}
+
+/* Copy 'len' bytes from 'from' in the archive to the end of 'out'. */
+static int ZipCopyRange( ZipArchive *z, long from, UInt32 len, FILE *out,
+                         Byte *buf, ZipDelProg *zp, int index, int count,
+                         const char *name )
+{
+    if ( VolSeek( z->fp, from, SEEK_SET ) != 0 ) return SZ_ERR_READ;
+    while ( len > 0 )
+    {
+        UInt32 part = ( len > ZDEL_BUF ) ? ZDEL_BUF : len;
+
+        if ( VolRead( buf, 1, part, z->fp ) != part ) return SZ_ERR_READ;
+        if ( fwrite( buf, 1, (size_t)part, out ) != (size_t)part )
+            return SZ_ERR_WRITE;
+        len -= part;
+        zp->doneBytes += part;
+        if ( !ZipDelTick( zp, index, count, name ) ) return SZ_ERR_CANCEL;
+    }
+    return SZ_OK;
+}
+
+int ZipDeleteWrite( ZipArchive *z, const Byte *del, FILE *out,
+                    ArcCompProgress prog, void *user, const char **why )
+{
+    EndRec      er;
+    ZipDelProg  zp;
+    ZipSpan    *spans = NULL;
+    Byte       *cdir = NULL, *buf = NULL;
+    long       *newOff = NULL;
+    UInt32     *recPos = NULL;
+    long        eocdPos, cdStart, first, outPos;
+    UInt32      pos, cdOutSize;
+    int         n = z->numEntries, kept = 0, done = 0, i, k, rc;
+    Byte        eocd[22];
+
+    (void)why;
+    /* Nothing in a single-file zip stops an entry from going. */
+    if ( !del || !out ) return SZ_OK;
+
+    zp.prog = prog;
+    zp.user = user;
+    zp.doneBytes = zp.totalBytes = 0;
+
+    rc = FindEndRec( z->fp, &er, &eocdPos );
+    if ( rc != SZ_OK ) return rc;
+    if ( (int)er.entriesTotal != n ) return SZ_ERR_FORMAT;
+    cdStart = (long)er.dirOffset + z->bias;
+
+    rc = SZ_ERR_MEMORY;
+    cdir   = (Byte *)malloc( er.dirSize ? (size_t)er.dirSize : 1 );
+    buf    = (Byte *)malloc( ZDEL_BUF );
+    spans  = (ZipSpan *)malloc( sizeof( ZipSpan ) * ( n ? n : 1 ) );
+    newOff = (long *)malloc( sizeof( long ) * ( n ? n : 1 ) );
+    recPos = (UInt32 *)malloc( sizeof( UInt32 ) * ( n ? n : 1 ) );
+    if ( !cdir || !buf || !spans || !newOff || !recPos ) goto done;
+
+    /* The central directory again, whole and raw: the records kept go out
+     * with only their offset changed. */
+    rc = SZ_ERR_READ;
+    if ( VolSeek( z->fp, cdStart, SEEK_SET ) != 0 ) goto done;
+    if ( VolRead( cdir, 1, er.dirSize, z->fp ) != er.dirSize ) goto done;
+
+    rc = SZ_ERR_FORMAT;
+    for ( pos = 0, i = 0; i < n; i++ )
+    {
+        UInt32 recLen;
+
+        if ( er.dirSize - pos < 46 || ZGet32( cdir + pos ) != SIG_CENT ) goto done;
+        recLen = 46 + ZGet16( cdir + pos + 28 ) + ZGet16( cdir + pos + 30 ) +
+                 ZGet16( cdir + pos + 32 );
+        if ( recLen > er.dirSize - pos ) goto done;
+        recPos[i]    = pos;
+        spans[i].off = (long)ZGet32( cdir + pos + 42 );
+        spans[i].idx = i;
+        pos += recLen;
+    }
+    qsort( spans, (size_t)n, sizeof( ZipSpan ), SpanCmp );
+
+    /* Work to do: the bytes of every entry kept. */
+    for ( k = 0; k < n; k++ )
+    {
+        long end = ( k + 1 < n ) ? spans[k + 1].off : (long)er.dirOffset;
+        if ( end < spans[k].off ) goto done;
+        if ( !del[spans[k].idx] )
+        {
+            kept++;
+            zp.totalBytes += (UInt32)( end - spans[k].off );
+        }
+    }
+
+    /* The stub, or whatever else sits in front of the first entry. */
+    first = ( n > 0 ) ? spans[0].off + z->bias : cdStart;
+    if ( first < 0 ) goto done;
+    zp.totalBytes += (UInt32)first + er.commentLen;
+    rc = ZipCopyRange( z, 0L, (UInt32)first, out, buf, &zp, 0, kept, "" );
+    if ( rc != SZ_OK ) goto done;
+    outPos = first;
+
+    /* The entries kept, in the order they lie in the file. */
+    for ( k = 0; k < n; k++ )
+    {
+        int  idx = spans[k].idx;
+        long end = ( k + 1 < n ) ? spans[k + 1].off : (long)er.dirOffset;
+
+        if ( del[idx] ) continue;
+        newOff[idx] = outPos - z->bias;
+        rc = ZipCopyRange( z, spans[k].off + z->bias,
+                           (UInt32)( end - spans[k].off ), out, buf, &zp,
+                           done, kept, z->entries[idx].name );
+        if ( rc != SZ_OK ) goto done;
+        outPos += end - spans[k].off;
+        done++;
+    }
+
+    /* The new central directory, in the old one's order. */
+    rc = SZ_ERR_WRITE;
+    cdOutSize = 0;
+    for ( i = 0; i < n; i++ )
+    {
+        Byte  *rec = cdir + recPos[i];
+        UInt32 recLen = 46 + ZGet16( rec + 28 ) + ZGet16( rec + 30 ) +
+                        ZGet16( rec + 32 );
+
+        if ( del[i] ) continue;
+        ZPut32( rec + 42, (UInt32)newOff[i] );
+        if ( fwrite( rec, 1, (size_t)recLen, out ) != (size_t)recLen ) goto done;
+        cdOutSize += recLen;
+    }
+
+    /* And the end record, with the comment the archive already had. */
+    memset( eocd, 0, sizeof( eocd ) );
+    ZPut32( eocd, SIG_END );
+    ZPut16( eocd + 8, (UInt32)kept );
+    ZPut16( eocd + 10, (UInt32)kept );
+    ZPut32( eocd + 12, cdOutSize );
+    ZPut32( eocd + 16, (UInt32)( outPos - z->bias ) );
+    ZPut16( eocd + 20, er.commentLen );
+    if ( fwrite( eocd, 1, sizeof( eocd ), out ) != sizeof( eocd ) ) goto done;
+    rc = SZ_OK;
+    if ( er.commentLen )
+        rc = ZipCopyRange( z, eocdPos + 22, er.commentLen, out, buf, &zp,
+                           kept, kept, "" );
+
+done:
+    free( cdir );
+    free( buf );
+    free( spans );
+    free( newOff );
+    free( recPos );
+    return rc;
+}

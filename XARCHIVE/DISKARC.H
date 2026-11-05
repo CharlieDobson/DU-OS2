@@ -30,6 +30,12 @@ typedef struct {
     UInt32 attrib;              /* DOS attribute bits (R/H/S/A/D)           */
     int    isDir;               /* directory entry                          */
     UInt32 firstCluster;        /* start cluster of the chain (0 = empty)   */
+
+    /* Where the entry's own directory record lies, for deleting it: the
+     * first cluster of the directory holding it (0 = the root) and the
+     * slot of its 8.3 record there. */
+    UInt32 dirCluster;
+    UInt32 slot;
 } DiskEntry;
 
 typedef struct DiskArchive DiskArchive;
@@ -69,5 +75,13 @@ int  DiskExtractItems( DiskArchive *d, const int *indices, int count,
                        const char *destDir, SzProgress prog, void *user );
 
 void DiskClose( DiskArchive *d );
+
+/* Delete files and folders from the image itself, as DOS would: their
+ * directory entries are marked and their clusters freed in every FAT.  See
+ * ArcDeleteItems in ARCFILE.H; the arguments are set out in ARCFILE.C,
+ * except that 'path' (the image, to be opened for writing) stands where
+ * the other formats take the new archive, and NULL means a check. */
+int  DiskDeleteWrite( DiskArchive *d, const Byte *del, const char *path,
+                      ArcCompProgress prog, void *user, const char **why );
 
 #endif /* DISKARC_H */

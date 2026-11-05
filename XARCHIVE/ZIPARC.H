@@ -92,4 +92,9 @@ int  ZipNeedsPassword( ZipArchive *z );
 
 void ZipClose( ZipArchive *z );
 
+/* Delete entries - ArcDeleteItems in ARCFILE.H; the arguments are set out
+ * in ARCFILE.C.  The entries kept are copied across as they are. */
+int  ZipDeleteWrite( ZipArchive *z, const Byte *del, FILE *out,
+                     ArcCompProgress prog, void *user, const char **why );
+
 #endif /* ZIPARC_H */

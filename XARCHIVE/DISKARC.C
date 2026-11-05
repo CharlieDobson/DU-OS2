@@ -355,7 +355,7 @@ static void LfnPart( const unsigned char *rec, char *lfn )
 
 /*---- Directory walking --------------------------------------------------- */
 static void ParseDir( DiskArchive *d, const unsigned char *buf, UInt32 len,
-                      const char *prefix, int depth );
+                      const char *prefix, int depth, UInt32 dirCluster );
 
 /* Read a sub-directory's whole cluster chain into a heap buffer.  Caller frees.
  * *outLen receives the byte length.  Returns NULL on error / empty. */
@@ -393,7 +393,8 @@ static unsigned char *ReadDirChain( DiskArchive *d, UInt32 startCluster,
 
 /* Append one enumerated file/dir; recurse into sub-directories. */
 static void AddEntry( DiskArchive *d, const char *prefix, const char *name,
-                      const unsigned char *rec, int depth )
+                      const unsigned char *rec, int depth,
+                      UInt32 dirCluster, UInt32 slot )
 {
     DiskEntry *e;
     UInt32     cluster;
@@ -439,6 +440,8 @@ static void AddEntry( DiskArchive *d, const char *prefix, const char *name,
     e->firstCluster = cluster;
     e->size         = e->isDir ? 0 : e->size;
     e->packed       = e->size;
+    e->dirCluster   = dirCluster;
+    e->slot         = slot;
 
     if ( e->isDir && depth < MAX_DEPTH && ClusterValid( d, cluster ) )
     {
@@ -446,14 +449,14 @@ static void AddEntry( DiskArchive *d, const char *prefix, const char *name,
         unsigned char *sub = ReadDirChain( d, cluster, &subLen );
         if ( sub )
         {
-            ParseDir( d, sub, subLen, path, depth + 1 );
+            ParseDir( d, sub, subLen, path, depth + 1, cluster );
             free( sub );
         }
     }
 }
 
 static void ParseDir( DiskArchive *d, const unsigned char *buf, UInt32 len,
-                      const char *prefix, int depth )
+                      const char *prefix, int depth, UInt32 dirCluster )
 {
     UInt32 pos;
     char   lfn[SZ_MAX_NAME];
@@ -491,9 +494,9 @@ static void ParseDir( DiskArchive *d, const unsigned char *buf, UInt32 len,
         FormatShort( rec, rec[0x0C], short83 );
 
         if ( lfnActive && lfn[0] && ShortSum( rec ) == lfnSum )
-            AddEntry( d, prefix, lfn, rec, depth );
+            AddEntry( d, prefix, lfn, rec, depth, dirCluster, pos / DIRENT_SIZE );
         else
-            AddEntry( d, prefix, short83, rec, depth );
+            AddEntry( d, prefix, short83, rec, depth, dirCluster, pos / DIRENT_SIZE );
 
         lfnActive = 0;
     }
@@ -536,7 +539,7 @@ static int DiskLoad( DiskArchive *d, long imgLen, DiskArchive **out )
     if ( ReadSectors( d, d->rootDirStart, d->rootDirSectors, rootBuf ) != SZ_OK )
     { free( rootBuf ); DiskClose( d ); return SZ_ERR_READ; }
 
-    ParseDir( d, rootBuf, d->rootDirSectors * d->bytesPerSector, "", 0 );
+    ParseDir( d, rootBuf, d->rootDirSectors * d->bytesPerSector, "", 0, 0 );
     free( rootBuf );
 
     if ( d->loadErr != SZ_OK )
@@ -774,4 +777,284 @@ void DiskClose( DiskArchive *d )
         if ( d->entries )         free( d->entries );
         free( d );
     }
+}
+
+/*===========================================================================
+ * Deleting (ArcDeleteItems in ARCFILE.H)
+ *
+ * The way DOS does it, so that the image is one DOS would have left: the
+ * first byte of the entry's 8.3 record, and of each long-name record that
+ * goes with it, becomes E5h, and its cluster chain is set free in every
+ * copy of the FAT.  Nothing is moved and the image keeps its size.
+ *
+ * The records are written before the FAT, as DOS writes them.  An image
+ * left half done - a write error, or a cancel - then holds at worst some
+ * clusters still marked in use that nothing points at, which CHKDSK and
+ * SCANDISK put right, and never a directory record pointing at clusters
+ * that are free.  Each entry is checked against what is on the image
+ * before its record is touched, so an image changed since it was listed
+ * is not written through stale positions.
+ *
+ * Children are deleted before their folders: a child's record lies in its
+ * folder's clusters, and is found by walking that folder's chain, which
+ * must still be in the FAT when that is done.  The walk added each folder
+ * before its contents, so going through the entries backwards does it.
+ *===========================================================================*/
+
+/* Byte offset in the image of directory slot 'slot', in the directory that
+ * starts at dirCluster (0 = the root), or -1 when the slot is not in it. */
+static long SlotOffset( DiskArchive *d, UInt32 dirCluster, UInt32 slot )
+{
+    UInt32 byteOff = slot * DIRENT_SIZE;
+    UInt32 cluster = dirCluster;
+    UInt32 hops;
+
+    if ( dirCluster == 0 )
+    {
+        if ( byteOff + DIRENT_SIZE > d->rootDirSectors * d->bytesPerSector )
+            return -1L;
+        return (long)d->rootDirStart * (long)d->bytesPerSector + (long)byteOff;
+    }
+    if ( !ClusterValid( d, cluster ) ) return -1L;
+    for ( hops = byteOff / d->clusterBytes; hops > 0; hops-- )
+    {
+        cluster = FatEntry( d, cluster );
+        if ( IsEndCluster( d, cluster ) || !ClusterValid( d, cluster ) )
+            return -1L;
+    }
+    return (long)ClusterSector( d, cluster ) * (long)d->bytesPerSector +
+           (long)( byteOff % d->clusterBytes );
+}
+
+/* Set the FAT slot for 'cluster' in the copy in memory, and note which of
+ * its sectors now has to be written. */
+static void FatSet( DiskArchive *d, UInt32 cluster, UInt32 val, Byte *dirty )
+{
+    UInt32 off;
+
+    if ( d->fatType == 16 )
+    {
+        off = cluster * 2;
+        if ( off + 1 >= d->fatBytes ) return;
+        d->fat[off]     = (unsigned char)val;
+        d->fat[off + 1] = (unsigned char)( val >> 8 );
+    }
+    else
+    {
+        off = cluster + ( cluster >> 1 );
+        if ( off + 1 >= d->fatBytes ) return;
+        if ( cluster & 1 )
+        {
+            d->fat[off]     = (unsigned char)( ( d->fat[off] & 0x0F ) |
+                                               ( ( val << 4 ) & 0xF0 ) );
+            d->fat[off + 1] = (unsigned char)( val >> 4 );
+        }
+        else
+        {
+            d->fat[off]     = (unsigned char)val;
+            d->fat[off + 1] = (unsigned char)( ( d->fat[off + 1] & 0xF0 ) |
+                                               ( ( val >> 8 ) & 0x0F ) );
+        }
+    }
+    dirty[off / d->bytesPerSector] = 1;
+    dirty[( off + 1 ) / d->bytesPerSector] = 1;
+}
+
+/* Clusters in the chain from 'cluster', stopping at the guard. */
+static UInt32 ChainLength( DiskArchive *d, UInt32 cluster )
+{
+    UInt32 n = 0;
+
+    while ( ClusterValid( d, cluster ) && n <= d->countOfClusters )
+    {
+        n++;
+        cluster = FatEntry( d, cluster );
+        if ( IsEndCluster( d, cluster ) ) break;
+    }
+    return n;
+}
+
+/* A folder may go only if everything in it was listed and is going too.
+ * Anything the walk did not reach - a folder past MAX_DEPTH, a directory
+ * longer than MAX_DIR_BYTES - would otherwise be cut loose, its clusters
+ * lost, with nothing in the listing to say it had ever been there. */
+static int FolderAllListed( DiskArchive *d, const DiskEntry *dir,
+                            const Byte *del )
+{
+    unsigned char *buf;
+    UInt32         len, pos, live = 0, listed = 0;
+    int            i;
+
+    if ( !ClusterValid( d, dir->firstCluster ) ) return 1;
+    if ( ChainLength( d, dir->firstCluster ) >
+         MAX_DIR_BYTES / d->clusterBytes ) return 0;
+
+    buf = ReadDirChain( d, dir->firstCluster, &len );
+    if ( !buf ) return 0;
+    for ( pos = 0; pos + DIRENT_SIZE <= len; pos += DIRENT_SIZE )
+    {
+        const unsigned char *rec = buf + pos;
+
+        if ( rec[0] == 0x00 ) break;
+        if ( rec[0] == 0xE5 || rec[0x0B] == ATTR_LFN ) continue;
+        if ( ( rec[0x0B] & ATTR_VOLUME ) || rec[0] == 0x2E ) continue;
+        live++;
+    }
+    free( buf );
+
+    for ( i = 0; i < d->numEntries; i++ )
+    {
+        if ( d->entries[i].dirCluster != dir->firstCluster ) continue;
+        if ( !del[i] ) return 0;
+        listed++;
+    }
+    return live == listed;
+}
+
+/* Write the FAT sectors marked dirty to every copy of the FAT. */
+static int FatFlush( DiskArchive *d, const Byte *dirty )
+{
+    UInt32 copy, sec;
+
+    for ( copy = 0; copy < d->numFATs; copy++ )
+        for ( sec = 0; sec < d->sectorsPerFAT; sec++ )
+        {
+            long at;
+
+            if ( !dirty[sec] ) continue;
+            at = (long)( d->reservedSectors + copy * d->sectorsPerFAT + sec ) *
+                 (long)d->bytesPerSector;
+            if ( fseek( d->fp, at, SEEK_SET ) != 0 ) return SZ_ERR_WRITE;
+            if ( fwrite( d->fat + sec * d->bytesPerSector, 1,
+                         (size_t)d->bytesPerSector, d->fp ) !=
+                 (size_t)d->bytesPerSector ) return SZ_ERR_WRITE;
+        }
+    return ( fflush( d->fp ) == 0 ) ? SZ_OK : SZ_ERR_WRITE;
+}
+
+static int MarkDeleted( DiskArchive *d, long off )
+{
+    static const unsigned char gone = 0xE5;
+
+    if ( fseek( d->fp, off, SEEK_SET ) != 0 ) return SZ_ERR_WRITE;
+    if ( fwrite( &gone, 1, 1, d->fp ) != 1 ) return SZ_ERR_WRITE;
+    return SZ_OK;
+}
+
+/* One entry: its records, then its clusters (in memory; FatFlush writes). */
+static int DeleteOne( DiskArchive *d, const DiskEntry *e, Byte *dirty )
+{
+    unsigned char rec[DIRENT_SIZE], lfn[DIRENT_SIZE];
+    unsigned char sum;
+    long          off;
+    UInt32        cluster, slot, seq, guard;
+    int           rc;
+
+    off = SlotOffset( d, e->dirCluster, e->slot );
+    if ( off < 0 ) return SZ_ERR_FORMAT;
+    rc = ReadRaw( d, off, DIRENT_SIZE, rec );
+    if ( rc != SZ_OK ) return rc;
+    if ( rec[0] == 0x00 || rec[0] == 0xE5 || rec[0x0B] == ATTR_LFN ||
+         ( ( GetU16( rec + 0x14 ) << 16 ) | GetU16( rec + 0x1A ) ) !=
+             e->firstCluster ||
+         ( ( rec[0x0B] & ATTR_DIRECTORY ) != 0 ) != ( e->isDir != 0 ) )
+        return SZ_ERR_FORMAT;
+
+    rc = MarkDeleted( d, off );
+    if ( rc != SZ_OK ) return rc;
+
+    /* The long name, if it has one, lies in the slots just before, last
+     * part first: sequence 1 nearest the 8.3 record, and the part with 40h
+     * set the furthest away.  Only records that carry this entry's own
+     * checksum, in order, belong to it. */
+    sum = ShortSum( rec );
+    for ( slot = e->slot, seq = 1; slot > 0 && seq <= 20; seq++ )
+    {
+        slot--;
+        off = SlotOffset( d, e->dirCluster, slot );
+        if ( off < 0 || ReadRaw( d, off, DIRENT_SIZE, lfn ) != SZ_OK ) break;
+        if ( lfn[0x0B] != ATTR_LFN || lfn[0] == 0xE5 || lfn[0x0D] != sum ||
+             (UInt32)( lfn[0] & 0x1F ) != seq ) break;
+        rc = MarkDeleted( d, off );
+        if ( rc != SZ_OK ) return rc;
+        if ( lfn[0] & 0x40 ) break;
+    }
+
+    for ( cluster = e->firstCluster, guard = 0;
+          ClusterValid( d, cluster ) && guard <= d->countOfClusters; guard++ )
+    {
+        UInt32 next = FatEntry( d, cluster );
+
+        FatSet( d, cluster, 0, dirty );
+        if ( IsEndCluster( d, next ) ) break;
+        cluster = next;
+    }
+    return SZ_OK;
+}
+
+int DiskDeleteWrite( DiskArchive *d, const Byte *del, const char *path,
+                     ArcCompProgress prog, void *user, const char **why )
+{
+    static char whyBuf[SZ_MAX_NAME + 160];
+    Byte       *dirty;
+    int         i, nDel = 0, done = 0, rc = SZ_OK, frc;
+
+    if ( d->mem )
+    {
+        *why = "This disk image is inside a .imz file, which is a zip.  "
+               "Files cannot be deleted from an image held that way.";
+        return SZ_ERR_UNSUPPORTED;
+    }
+    if ( !del ) return SZ_OK;
+
+    for ( i = 0; i < d->numEntries; i++ )
+    {
+        if ( !del[i] ) continue;
+        nDel++;
+        if ( d->entries[i].isDir && !FolderAllListed( d, &d->entries[i], del ) )
+        {
+            sprintf( whyBuf, "The folder %.*s holds entries that were not "
+                     "listed, so it cannot be deleted safely.  Check the "
+                     "image with SCANDISK.", SZ_MAX_NAME,
+                     d->entries[i].name );
+            *why = whyBuf;
+            return SZ_ERR_UNSUPPORTED;
+        }
+    }
+    if ( !path ) return SZ_OK;
+
+    /* Read and written through one handle from here on. */
+    fclose( d->fp );
+    d->fp = fopen( path, "r+b" );
+    if ( !d->fp )
+    {
+        d->fp = fopen( path, "rb" );
+        return SZ_ERR_WRITE;
+    }
+
+    dirty = (Byte *)calloc( (size_t)d->sectorsPerFAT + 1, 1 );
+    if ( !dirty ) return SZ_ERR_MEMORY;
+
+    for ( i = d->numEntries - 1; i >= 0; i-- )
+    {
+        if ( !del[i] ) continue;
+        if ( prog && !prog( user, done, nDel, d->entries[i].name,
+                            (UInt32)done, (UInt32)nDel ) )
+        {
+            rc = SZ_ERR_CANCEL;
+            break;
+        }
+        rc = DeleteOne( d, &d->entries[i], dirty );
+        if ( rc != SZ_OK ) break;
+        done++;
+    }
+
+    /* Whatever happened above, the clusters already let go of are written
+     * free, so that no record already marked deleted leaves a chain lost. */
+    frc = FatFlush( d, dirty );
+    free( dirty );
+    if ( rc == SZ_OK ) rc = frc;
+    if ( rc == SZ_OK && prog )
+        prog( user, done, nDel, "", (UInt32)nDel, (UInt32)nDel );
+    return rc;
 }

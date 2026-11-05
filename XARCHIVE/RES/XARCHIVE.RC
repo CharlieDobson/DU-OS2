@@ -48,6 +48,7 @@ BEGIN
     SUBMENU "~Archive", IDM_ARCHIVE
     BEGIN
         MENUITEM "~Extract...\tCtrl+E",     IDM_ARCHIVE_EXTRACT
+        MENUITEM "~Delete...\tDel",         IDM_ARCHIVE_DELETE
         MENUITEM "~Test integrity\tCtrl+T", IDM_ARCHIVE_TEST
         MENUITEM SEPARATOR
         /* Ticked at startup to match the default (folder names kept).  PM has
@@ -78,13 +79,16 @@ END
  * key left as 'O'), which no PM key event can ever match, and reports
  * nothing.
  *
- * F3 is the OS/2 convention for File / Exit.
+ * F3 is the OS/2 convention for File / Exit.  Del is Archive > Delete: the
+ * container is all the frame holds that takes keys, so this is the Del key
+ * in the list.
  *-------------------------------------------------------------------------*/
 
 ACCELTABLE ID_XARCHIVE
 BEGIN
     15,     IDM_FILE_OPEN,          CHAR, CONTROL    /* Ctrl+O */
     5,      IDM_ARCHIVE_EXTRACT,    CHAR, CONTROL    /* Ctrl+E */
+    VK_DELETE, IDM_ARCHIVE_DELETE,  VIRTUALKEY
     20,     IDM_ARCHIVE_TEST,       CHAR, CONTROL    /* Ctrl+T */
     9,      IDM_ARCHIVE_INFO,       CHAR, CONTROL    /* Ctrl+I */
     VK_F3,  IDM_FILE_EXIT,          VIRTUALKEY

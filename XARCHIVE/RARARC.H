@@ -77,4 +77,9 @@ UInt32 RarMemNeeded( RarArchive *r );
 
 void RarClose( RarArchive *r );
 
+/* Delete entries - ArcDeleteItems in ARCFILE.H; the arguments are set out
+ * in ARCFILE.C.  The blocks kept are copied across as they are. */
+int  RarDeleteWrite( RarArchive *r, const Byte *del, FILE *out,
+                     ArcCompProgress prog, void *user, const char **why );
+
 #endif /* RARARC_H */

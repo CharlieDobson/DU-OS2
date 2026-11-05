@@ -50,6 +50,7 @@
 #define IDM_ARCHIVE_PATHS               209   /* checkable: keep folder names */
 #define IDM_ARCHIVE_COMMENT             210
 #define IDM_FILE_COMPRESS               211
+#define IDM_ARCHIVE_DELETE              212   /* the Win32s tree's number */
 #define IDM_HELP_ABOUT                  301
 #define IDM_HELP_SUPPORT                302
 

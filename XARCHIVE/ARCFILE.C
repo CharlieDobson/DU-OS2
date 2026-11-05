@@ -17,9 +17,11 @@
 #include "diskarc.h"
 #include "cabarc.h"
 #include "mslzarc.h"
+#include "arccryp.h"      /* AC_MAX_PW */
 #include "volio.h"
 #include "platform.h"     /* ClearFileAttr */
 
+#define FMT_NONE  0      /* emptied: a reopen after a delete failed */
 #define FMT_7Z    1
 #define FMT_ZIP   2
 #define FMT_RAR   3      /* RAR 2.x/3.x (RAR4) */
@@ -37,6 +39,12 @@ struct ArcFile {
     DiskArchive *disk;
     CabArchive  *cab;
     MslzArchive *mslz;
+
+    /* Kept for ArcDeleteItems, which has to write the file again and then
+     * open what it wrote - with the same password, so that an archive whose
+     * names are encrypted does not ask for it a second time. */
+    char         path[SZ_MAX_NAME * 2];
+    char         pw[ AC_MAX_PW + 1 ];
 };
 
 static const unsigned char SIG_7Z[6]  = { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C };
@@ -646,6 +654,8 @@ int ArcOpenPw( const char *path, const char *pw, ArcFile **out )
      * do it means one password covers the archive whichever format it turned
      * out to be, which matters because the format is decided by sniffing and
      * the caller cannot know in advance which of these to call. */
+    lstrcpyn( a->path, path, sizeof( a->path ) );
+    if ( pw ) lstrcpyn( a->pw, pw, sizeof( a->pw ) );
     if ( pw && pw[0] && fmt == FMT_ZIP )
         ArcSetPassword( a, pw );
 
@@ -661,6 +671,8 @@ int ArcOpen( const char *path, ArcFile **out )
 void ArcSetPassword( ArcFile *a, const char *pw )
 {
     if ( !a ) return;
+    if ( pw ) lstrcpyn( a->pw, pw, sizeof( a->pw ) );
+    else      a->pw[0] = '\0';
     if ( a->fmt == FMT_7Z )   SzSetPassword( a->sz, pw );
     if ( a->fmt == FMT_ZIP )  ZipSetPassword( a->zip, pw );
     if ( a->fmt == FMT_RAR5 ) Rar5SetPassword( a->rar5, pw );
@@ -688,6 +700,7 @@ int ArcNumEntries( ArcFile *a )
     if ( a->fmt == FMT_DISK ) return DiskNumEntries( a->disk );
     if ( a->fmt == FMT_CAB )  return CabNumEntries( a->cab );
     if ( a->fmt == FMT_MSLZ ) return MslzNumEntries( a->mslz );
+    if ( a->fmt == FMT_NONE ) return 0;
     return ZipNumEntries( a->zip );
 }
 
@@ -1062,7 +1075,7 @@ int ArcExtractAll( ArcFile *a, const char *destDir,
     g_owAll   = -1;                        /* new operation: forget "all"   */
     g_names83 = NamesNeed83( destDir );    /* and re-read the destination   */
     ArcResetNames();                       /* and start the ~N count over   */
-    if ( !a ) return SZ_ERR_FORMAT;
+    if ( !a || a->fmt == FMT_NONE ) return SZ_ERR_FORMAT;
 
     /* BEFORE anything is opened for writing.  See ArcMemCheck: refusing here
      * costs the user a message, whereas discovering it half way through costs
@@ -1090,7 +1103,7 @@ int ArcExtractItems( ArcFile *a, const int *indices, int count,
     g_owAll   = -1;                        /* new operation: forget "all"   */
     g_names83 = NamesNeed83( destDir );    /* and re-read the destination   */
     ArcResetNames();                       /* and start the ~N count over   */
-    if ( !a ) return SZ_ERR_FORMAT;
+    if ( !a || a->fmt == FMT_NONE ) return SZ_ERR_FORMAT;
 
     rc = ArcMemCheck( a, NULL, NULL );
     if ( rc != SZ_OK ) return rc;
@@ -1120,7 +1133,7 @@ int ArcTestAll( ArcFile *a, SzProgress prog, void *user )
 {
     int rc;
 
-    if ( !a ) return SZ_ERR_FORMAT;
+    if ( !a || a->fmt == FMT_NONE ) return SZ_ERR_FORMAT;
 
     /* Testing decodes exactly what extracting decodes, so it costs exactly
      * the same and is refused on exactly the same grounds.  Leaving Test out
@@ -1234,7 +1247,7 @@ void ArcClose( ArcFile *a )
     else if ( a->fmt == FMT_DISK ) DiskClose( a->disk );
     else if ( a->fmt == FMT_CAB )  CabClose( a->cab );
     else if ( a->fmt == FMT_MSLZ ) MslzClose( a->mslz );
-    else                           ZipClose( a->zip );
+    else if ( a->fmt == FMT_ZIP )  ZipClose( a->zip );
     free( a );
 }
 
@@ -2181,4 +2194,330 @@ void ArcFsName( char *dst, int dstSize, const char *name, int isDir )
         else if ( dstSize > 1 ) dst[di++] = '_';
     }
     dst[di] = '\0';
+}
+
+/*===========================================================================
+ * Deleting entries (see ARCFILE.H)
+ *
+ * The per-format halves all take the same arguments:
+ *
+ *     XxxDeleteWrite( x, del, out, prog, user, &why )
+ *
+ *   del   one byte per entry, non-zero for the ones to go; already widened
+ *         here so that a folder's contents go with it.  NULL asks only
+ *         whether this archive can lose entries at all.
+ *   out   the new archive, opened "w+b" (a writer may seek back to patch a
+ *         header).  NULL asks whether THIS selection can go, writing
+ *         nothing.  A disk image is changed in place, so DiskDeleteWrite
+ *         takes the image's path here instead, and NULL means the same.
+ *   why   set to a sentence whenever the answer is SZ_ERR_UNSUPPORTED.
+ *
+ * Everything a front end sees goes through the three functions below, which
+ * own the temporary file, the swap and the reopen.
+ *===========================================================================*/
+
+static const char *g_delHint = NULL;
+
+const char *ArcDeleteHint( void )
+{
+    return g_delHint ? g_delHint
+                     : "Files cannot be deleted from this archive.";
+}
+
+static int DelRefuse( const char *why )
+{
+    g_delHint = why;
+    return SZ_ERR_UNSUPPORTED;
+}
+
+/* The format's own answer, for a whole archive (del NULL) or a selection. */
+static int DelCheck( ArcFile *a, const Byte *del )
+{
+    const char *why = NULL;
+    int         rc;
+
+    switch ( a->fmt )
+    {
+    case FMT_ZIP:  rc = ZipDeleteWrite( a->zip, del, NULL, NULL, NULL, &why );   break;
+    case FMT_7Z:   rc = SzDeleteWrite( a->sz, del, NULL, NULL, NULL, &why );     break;
+    case FMT_RAR:  rc = RarDeleteWrite( a->rar, del, NULL, NULL, NULL, &why );   break;
+    case FMT_RAR5: rc = Rar5DeleteWrite( a->rar5, del, NULL, NULL, NULL, &why ); break;
+    case FMT_CAB:  rc = CabDeleteWrite( a->cab, del, NULL, NULL, NULL, &why );   break;
+    case FMT_DISK: rc = DiskDeleteWrite( a->disk, del, NULL, NULL, NULL, &why ); break;
+    default:       return DelRefuse( NULL );
+    }
+    if ( rc == SZ_ERR_UNSUPPORTED ) g_delHint = why;
+    return rc;
+}
+
+int ArcCanDelete( ArcFile *a )
+{
+    g_delHint = NULL;
+    if ( !a || a->fmt == FMT_NONE ) return SZ_ERR_FORMAT;
+
+    if ( a->fmt == FMT_MSLZ )
+        return DelRefuse( "A file packed by COMPRESS.EXE holds only one "
+                          "file.  To delete that file, delete the packed "
+                          "file itself." );
+    if ( ArcVolumeCount( a ) > 1 )
+        return DelRefuse( "This archive is split into several volumes.  "
+                          "Files cannot be deleted from a multi-volume "
+                          "archive." );
+    return DelCheck( a, NULL );
+}
+
+/* The selection as one byte per entry, with each folder entry's contents
+ * added - an archive lists "SRC" and "SRC\MAIN.C" as two entries, and
+ * deleting the first alone would leave the second behind under a folder
+ * that is no longer listed.  NULL when out of memory. */
+static Byte *DelMarks( ArcFile *a, const int *indices, int count, int *nDel )
+{
+    int   n = ArcNumEntries( a );
+    int   i, k;
+    Byte *del = (Byte *)calloc( n > 0 ? (size_t)n : 1, 1 );
+
+    *nDel = 0;
+    if ( !del ) return NULL;
+
+    for ( k = 0; k < count; k++ )
+    {
+        int idx = indices[k];
+        if ( idx < 0 || idx >= n ) continue;
+        del[idx] = 1;
+    }
+    for ( k = 0; k < n; k++ )
+    {
+        const char *dir;
+        int         len;
+
+        if ( !del[k] || !ArcEntryIsDir( a, k ) ) continue;
+        dir = ArcEntryName( a, k );
+        if ( !dir ) continue;
+        len = (int)strlen( dir );
+        while ( len > 0 && ( dir[len - 1] == '\\' || dir[len - 1] == '/' ) )
+            len--;
+        if ( len == 0 ) continue;
+        for ( i = 0; i < n; i++ )
+        {
+            const char *name = ArcEntryName( a, i );
+            if ( del[i] || !name ) continue;
+            if ( strncmp( name, dir, (size_t)len ) == 0 &&
+                 ( name[len] == '\\' || name[len] == '/' ) )
+                del[i] = 1;
+        }
+    }
+    for ( k = 0; k < n; k++ )
+        if ( del[k] ) ( *nDel )++;
+    return del;
+}
+
+int ArcDeleteCheck( ArcFile *a, const int *indices, int count )
+{
+    Byte *del;
+    int   nDel, rc;
+
+    rc = ArcCanDelete( a );
+    if ( rc != SZ_OK ) return rc;
+    del = DelMarks( a, indices, count, &nDel );
+    if ( !del ) return SZ_ERR_MEMORY;
+    rc = nDel ? DelCheck( a, del ) : SZ_OK;
+    free( del );
+    return rc;
+}
+
+/* A file name beside 'target' that is not in use, for the new archive and
+ * then for the old one while the two change places.  Beside it, so that
+ * both renames stay on one drive. */
+static void DelTempName( const char *target, char *dst, int size )
+{
+    const char *leaf = target;
+    const char *p;
+    int         dirLen, i;
+
+    for ( p = target; *p; p++ )
+        if ( *p == '\\' || *p == '/' || *p == ':' ) leaf = p + 1;
+    dirLen = (int)( leaf - target );
+    if ( dirLen > size - 13 ) dirLen = size - 13;
+
+    for ( i = 0; i < 10000; i++ )
+    {
+        FILE *t;
+        memcpy( dst, target, (size_t)dirLen );
+        sprintf( dst + dirLen, "XDEL%04d.TMP", i );
+        t = fopen( dst, "rb" );
+        if ( !t ) return;
+        fclose( t );
+    }
+}
+
+/* Scratch files for the writers (ARCDEFS.H).  g_delPath is the archive being
+ * changed, set only while ArcDeleteItems runs. */
+#define DEL_SCRATCH_MAX 4
+
+static const char *g_delPath = NULL;
+static struct {
+    FILE *f;
+    char  name[SZ_MAX_NAME * 2];
+} g_scratch[DEL_SCRATCH_MAX];
+
+FILE *ArcDelScratch( void )
+{
+    int i;
+
+    if ( !g_delPath ) return NULL;
+    for ( i = 0; i < DEL_SCRATCH_MAX; i++ )
+    {
+        if ( g_scratch[i].f ) continue;
+        DelTempName( g_delPath, g_scratch[i].name, sizeof( g_scratch[i].name ) );
+        g_scratch[i].f = fopen( g_scratch[i].name, "w+b" );
+        return g_scratch[i].f;
+    }
+    return NULL;
+}
+
+void ArcDelScratchDone( FILE *f )
+{
+    int i;
+
+    if ( !f ) return;
+    for ( i = 0; i < DEL_SCRATCH_MAX; i++ )
+        if ( g_scratch[i].f == f )
+        {
+            fclose( f );
+            remove( g_scratch[i].name );
+            g_scratch[i].f = NULL;
+            return;
+        }
+}
+
+static void DelScratchAll( void )
+{
+    int i;
+
+    for ( i = 0; i < DEL_SCRATCH_MAX; i++ )
+        if ( g_scratch[i].f ) ArcDelScratchDone( g_scratch[i].f );
+    g_delPath = NULL;
+}
+
+/* Let go of the archive's files, so the one on disk can be replaced.  'a'
+ * is left empty (FMT_NONE) until DelReopen fills it again. */
+static void DelDropParts( ArcFile *a )
+{
+    if ( a->fmt == FMT_7Z )        SzClose( a->sz );
+    else if ( a->fmt == FMT_RAR )  RarClose( a->rar );
+    else if ( a->fmt == FMT_RAR5 ) Rar5Close( a->rar5 );
+    else if ( a->fmt == FMT_DISK ) DiskClose( a->disk );
+    else if ( a->fmt == FMT_CAB )  CabClose( a->cab );
+    else if ( a->fmt == FMT_MSLZ ) MslzClose( a->mslz );
+    else if ( a->fmt == FMT_ZIP )  ZipClose( a->zip );
+    a->sz   = NULL;  a->zip = NULL;  a->rar  = NULL;  a->rar5 = NULL;
+    a->disk = NULL;  a->cab = NULL;  a->mslz = NULL;
+    a->fmt  = FMT_NONE;
+}
+
+/* Open a->path again into 'a' itself, so the front end's handle stays
+ * good.  The path and password live in 'a' and come back unchanged. */
+static int DelReopen( ArcFile *a )
+{
+    ArcFile *n;
+    int      rc;
+
+    DelDropParts( a );
+    rc = ArcOpenPw( a->path, a->pw[0] ? a->pw : NULL, &n );
+    if ( rc != SZ_OK ) return rc;
+    *a = *n;
+    free( n );
+    return SZ_OK;
+}
+
+int ArcDeleteItems( ArcFile *a, const int *indices, int count,
+                    ArcCompProgress prog, void *user )
+{
+    char        temp[SZ_MAX_NAME * 2], old[SZ_MAX_NAME * 2];
+    const char *why = NULL;
+    Byte       *del;
+    FILE       *f;
+    int         nDel, rc;
+
+    rc = ArcCanDelete( a );
+    if ( rc != SZ_OK ) return rc;
+    del = DelMarks( a, indices, count, &nDel );
+    if ( !del ) return SZ_ERR_MEMORY;
+    if ( nDel == 0 ) { free( del ); return SZ_OK; }
+
+    /* A read-only archive is refused before any work is done rather than
+     * after it.  Asked of the directory, not by opening the file for
+     * writing: the archive is open already, and OS/2 may refuse a second
+     * handle to it.  One that another program holds open is found out at
+     * the rename instead, and is left as it was. */
+    {
+        PlatFind pf;
+        void    *fh = PlatFindFirst( a->path, &pf );
+
+        if ( fh )
+        {
+            PlatFindClose( fh );
+            if ( pf.attr & 0x01 ) { free( del ); return SZ_ERR_WRITE; }
+        }
+    }
+
+    if ( a->fmt == FMT_DISK )
+    {
+        /* In place.  Each file goes completely or not at all, so after an
+         * error or a cancel part way the image is still sound - but it may
+         * have changed, so it is read again whatever happened, except after
+         * a refusal, which comes before anything is written. */
+        int rr;
+
+        rc = DiskDeleteWrite( a->disk, del, a->path, prog, user, &why );
+        free( del );
+        if ( rc == SZ_ERR_UNSUPPORTED ) { g_delHint = why; return rc; }
+        rr = DelReopen( a );
+        return ( rc != SZ_OK ) ? rc : rr;
+    }
+
+    DelTempName( a->path, temp, sizeof( temp ) );
+    f = fopen( temp, "w+b" );
+    if ( !f ) { free( del ); return SZ_ERR_WRITE; }
+
+    g_delPath = a->path;
+    switch ( a->fmt )
+    {
+    case FMT_ZIP:  rc = ZipDeleteWrite( a->zip, del, f, prog, user, &why );   break;
+    case FMT_7Z:   rc = SzDeleteWrite( a->sz, del, f, prog, user, &why );     break;
+    case FMT_RAR:  rc = RarDeleteWrite( a->rar, del, f, prog, user, &why );   break;
+    case FMT_RAR5: rc = Rar5DeleteWrite( a->rar5, del, f, prog, user, &why ); break;
+    case FMT_CAB:  rc = CabDeleteWrite( a->cab, del, f, prog, user, &why );   break;
+    default:       rc = SZ_ERR_UNSUPPORTED;                                   break;
+    }
+    DelScratchAll();
+    free( del );
+    if ( fclose( f ) != 0 && rc == SZ_OK ) rc = SZ_ERR_WRITE;
+    if ( rc != SZ_OK )
+    {
+        remove( temp );
+        if ( rc == SZ_ERR_UNSUPPORTED ) g_delHint = why;
+        return rc;
+    }
+
+    /* Change places: the old archive moves aside, the new one takes its
+     * name, and only then does the old one go.  Whichever rename fails, the
+     * archive the user had is still there under its own name. */
+    DelDropParts( a );
+    DelTempName( a->path, old, sizeof( old ) );
+    if ( rename( a->path, old ) != 0 )
+    {
+        remove( temp );
+        DelReopen( a );
+        return SZ_ERR_WRITE;
+    }
+    if ( rename( temp, a->path ) != 0 )
+    {
+        rename( old, a->path );
+        remove( temp );
+        DelReopen( a );
+        return SZ_ERR_WRITE;
+    }
+    remove( old );
+    return DelReopen( a );
 }

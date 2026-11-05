@@ -112,13 +112,7 @@ typedef struct {
 /*===========================================================================
  * A growable byte buffer, for building the header
  *===========================================================================*/
-typedef struct {
-    Byte  *p;
-    UInt32 len, cap;
-    int    failed;
-} HBuf;
-
-static void HPut( HBuf *h, const void *data, UInt32 n )
+void HPut( HBuf *h, const void *data, UInt32 n )
 {
     if ( h->failed ) return;
     if ( h->len + n > h->cap )
@@ -135,9 +129,9 @@ static void HPut( HBuf *h, const void *data, UInt32 n )
     h->len += n;
 }
 
-static void HByte( HBuf *h, Byte b ) { HPut( h, &b, 1 ); }
+void HByte( HBuf *h, Byte b ) { HPut( h, &b, 1 ); }
 
-static void HUInt32( HBuf *h, UInt32 v )
+void HUInt32( HBuf *h, UInt32 v )
 {
     Byte b[4];
     b[0] = (Byte)v; b[1] = (Byte)( v >> 8 ); b[2] = (Byte)( v >> 16 ); b[3] = (Byte)( v >> 24 );
@@ -146,7 +140,7 @@ static void HUInt32( HBuf *h, UInt32 v )
 
 /* 7z's variable-length number: the leading 1 bits of the first byte say how
  * many little-endian bytes follow. */
-static void HNum( HBuf *h, UInt32 v )
+void HNum( HBuf *h, UInt32 v )
 {
     if ( v < 0x80UL )             HByte( h, (Byte)v );
     else if ( v < 0x4000UL )
@@ -175,7 +169,7 @@ static void HNum( HBuf *h, UInt32 v )
 }
 
 /* A bit vector, most significant bit first. */
-static void HBits( HBuf *h, const Byte *bits, UInt32 n )
+void HBits( HBuf *h, const Byte *bits, UInt32 n )
 {
     Byte   cur = 0;
     UInt32 i;
@@ -198,12 +192,7 @@ static void HBits( HBuf *h, const Byte *bits, UInt32 n )
  *===========================================================================*/
 #define Test86MSByte( b )  ( ( ( (b) + 1 ) & 0xFE ) == 0 )
 
-typedef struct {
-    UInt32 base;
-    UInt32 mask;
-} BcjEnc;
-
-static UInt32 BcjEncChunk( BcjEnc *b, Byte *data, UInt32 size )
+UInt32 BcjEncChunk( BcjEnc *b, Byte *data, UInt32 size )
 {
     UInt32 pos = 0, mask = b->mask, lim;
     const UInt32 ip = 5;
@@ -682,7 +671,7 @@ static UInt32 DictCap( void )
     return d;
 }
 
-static UInt32 DictFor( UInt32 bytes )
+UInt32 SzwDictFor( UInt32 bytes )
 {
     UInt32 d = SZW_DICT_MIN, cap = DictCap();
     while ( d < bytes && d < cap ) d <<= 1;
@@ -1126,7 +1115,7 @@ int SzWriteArchive( ArcCompJob *j, FILE *f )
             LzmaEncProps p;
             EncProg      ep;
 
-            fo[i].dictSize = DictFor( fo[i].planned );
+            fo[i].dictSize = SzwDictFor( fo[i].planned );
             if ( fo[i].dictSize > j->dictSize ) j->dictSize = fo[i].dictSize;
             LzmaEncPropsInit( &p, fo[i].dictSize );
             fo[i].lzma2    = 1;
@@ -1305,7 +1294,7 @@ int SzWriteArchive( ArcCompJob *j, FILE *f )
 
             memset( &hf, 0, sizeof( hf ) );
             m.p = h.p; m.len = h.len; m.pos = 0;
-            hf.dictSize = DictFor( hdrLen );
+            hf.dictSize = SzwDictFor( hdrLen );
             LzmaEncPropsInit( &p, hf.dictSize );
             LzmaEncPropsBytes( &p, hf.props );
             if ( LzmaEncode( &p, MemRead, &m, MemWrite, &packed, 0, 0, &inT, &outT ) == SZ_OK &&

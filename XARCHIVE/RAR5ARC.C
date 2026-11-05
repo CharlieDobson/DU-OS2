@@ -31,6 +31,7 @@
 #include "crc32.h"
 #include "volio.h"      /* volume naming + the one-handle volume set */
 #include "arccryp.h"    /* RAR5 key derivation + AES-256-CBC */
+#include "aes.h"        /* aes_cbc_encrypt, for an -hp main header */
 #include "platform.h"    /* SetFileMTime */
 
 /* header types */
@@ -200,6 +201,7 @@ struct Rar5Archive {
     VolFile   *fp;
     int        numEntries;
     int        cap;                   /* entries the tables can hold */
+    UInt32     arcFlags;              /* the first volume's main header    */
     Rar5Entry *entries;
     long      *dataOffset;
     Rar5Crypt *crypt;                 /* parallel to entries               */
@@ -709,6 +711,7 @@ int Rar5OpenPw( const char *path, const char *pw, Rar5Archive **out )
 
             if ( vol == 0 && !b.err && !( arcFlags & H5A_VOLUME ) )
                 z->volumes = 1;
+            if ( vol == 0 && !b.err ) z->arcFlags = arcFlags;
         }
 
         if ( type == H5_FILE )
@@ -1207,4 +1210,495 @@ int Rar5NeedsPassword( Rar5Archive *r )
         if ( r->crypt[i].encrypted )
             return 1;
     return 0;
+}
+
+/*===========================================================================
+ * Deleting entries (ArcDeleteItems in ARCFILE.H)
+ *
+ * The same plan as RarDeleteWrite in RARARC.C, which explains it at more
+ * length: the kept files' block chains (file header, data, and the service
+ * headers that follow - streams, ACLs) are copied byte for byte, nothing is
+ * packed again and no password is needed to copy encrypted data.
+ *
+ * Under -hp every block after the crypt header is enciphered with the one
+ * header key and its OWN 16-byte IV, written in front of the block (see
+ * Rar5ReadBlock), so a block decrypts wherever it lands and is copied as it
+ * lies.  The crypt header itself is in the clear and copied unchanged.
+ *
+ * What describes the archive as a whole is dropped, because it describes the
+ * old archive:
+ *
+ *   "QO" service header   quick open: copies of the headers with their old
+ *                         offsets.
+ *   "RR" service header   recovery record: parity over the old bytes.
+ *   locator record        an extra record in the MAIN header holding the
+ *                         offsets of those two.
+ *
+ * So when the main header has a locator, or claims a recovery record, it is
+ * written out again without - vints re-encoded, CRC32 worked out over the new
+ * header.  Under -hp that header has to be enciphered again, with the header
+ * key the open derived.  The block's own IV is reused for that: the new
+ * header begins with its new CRC, so its first cipher block already differs
+ * from the old one, and from there CBC chains on to unrelated ciphertext.
+ * There is no source of random numbers here to make a fresh IV with, and
+ * reusing this one tells a reader holding both archives nothing.
+ *
+ * Refused, as in RAR4: a locked archive (main header "locked" flag), and a
+ * selection that would strand a kept solid file - one whose compression info
+ * carries the solid bit, while a file with data has gone since the last file
+ * that started afresh.
+ *
+ * Self-extracting archives never get here: Rar5OpenPw wants the signature at
+ * offset 0.
+ *===========================================================================*/
+
+#define H5A_RECOVERY    0x0008   /* main header: a recovery record exists   */
+#define H5A_LOCKED      0x0010   /* main header: WinRAR's "lock archive"    */
+
+#define X5M_LOCATOR     1        /* main-header extra record: QO/RR offsets */
+#define C5_SOLID        0x0040   /* compression info: uses earlier files    */
+
+#define R5_DEL_BUF      32768U   /* copy buffer                             */
+#define R5_DEL_STEP     65536UL  /* progress every this many bytes copied   */
+#define R5_VINT_MAX     5        /* bytes in a vint of 32 bits              */
+
+typedef struct {
+    Rar5Archive    *z;
+    const Byte     *del;
+    FILE           *out;          /* NULL while deciding                    */
+    ArcCompProgress prog;
+    void           *user;
+    Byte           *buf;
+    long            fileLen;
+    int             keptN;        /* entries to write, from the first pass  */
+    int             kept;         /* entries met so far that stay           */
+    UInt32          total;        /* bytes to write, from the first pass    */
+    UInt32          done;         /* bytes written                          */
+    UInt32          nextTick;
+    const char     *name;         /* entry being copied, for the progress   */
+} Rar5Del;
+
+static char g_rar5DelWhy[400];
+
+/* A vint that must fit 32 bits: *big is set when one does not, which BrVint
+ * would quietly have cut short. */
+static UInt32 R5DelVint( BRd *b, int *big )
+{
+    UInt32 val   = 0;
+    int    shift = 0;
+
+    for ( ;; )
+    {
+        Byte c;
+
+        if ( b->p >= b->end ) { b->err = 1; break; }
+        c = *b->p++;
+        if ( shift < 32 )
+        {
+            val |= (UInt32)( c & 0x7F ) << shift;
+            if ( shift == 28 && ( c & 0x70 ) ) *big = 1;
+        }
+        else if ( c & 0x7F )
+            *big = 1;
+        shift += 7;
+        if ( !( c & 0x80 ) ) break;
+    }
+    return val;
+}
+
+static UInt32 R5PutVint( Byte *dst, UInt32 v )
+{
+    UInt32 n = 0;
+
+    while ( v >= 0x80 )
+    {
+        dst[n++] = (Byte)( ( v & 0x7F ) | 0x80 );
+        v >>= 7;
+    }
+    dst[n++] = (Byte)v;
+    return n;
+}
+
+static int Rar5DelTick( Rar5Del *d )
+{
+    if ( !d->out || !d->prog ) return SZ_OK;
+    if ( !d->prog( d->user, d->kept > 0 ? d->kept - 1 : 0, d->keptN,
+                   d->name ? d->name : "", d->done >> 10, d->total >> 10 ) )
+        return SZ_ERR_CANCEL;
+    return SZ_OK;
+}
+
+/* Bytes from memory to the new archive (or only counted, while deciding). */
+static int Rar5DelPut( Rar5Del *d, const Byte *src, UInt32 len )
+{
+    if ( !d->out ) { d->total += len; return SZ_OK; }
+    if ( fwrite( src, 1, (size_t)len, d->out ) != (size_t)len )
+        return SZ_ERR_WRITE;
+    d->done += len;
+    return SZ_OK;
+}
+
+/* Bytes [from, from + len) of the old archive to the new one, unchanged. */
+static int Rar5DelCopy( Rar5Del *d, long from, long len )
+{
+    if ( !d->out ) { d->total += (UInt32)len; return SZ_OK; }
+    if ( VolSeek( d->z->fp, from, SEEK_SET ) != 0 ) return SZ_ERR_READ;
+
+    while ( len > 0 )
+    {
+        UInt32 take = ( len > (long)R5_DEL_BUF ) ? R5_DEL_BUF : (UInt32)len;
+
+        if ( VolRead( d->buf, 1, take, d->z->fp ) != take ) return SZ_ERR_READ;
+        if ( fwrite( d->buf, 1, (size_t)take, d->out ) != (size_t)take )
+            return SZ_ERR_WRITE;
+        len     -= (long)take;
+        d->done += take;
+        if ( d->done >= d->nextTick )
+        {
+            int rc = Rar5DelTick( d );
+            if ( rc != SZ_OK ) return rc;
+            d->nextTick = d->done + R5_DEL_STEP;
+        }
+    }
+    return SZ_OK;
+}
+
+/* The main header, without its locator record and without the recovery-
+ * record flag - or copied as it is when it has neither.  hdr/headSize is the
+ * header body in the clear; [pos, body) is the block as it lies in the file.
+ *
+ * The body is laid out
+ *     type, flags, [extra size], [data size], archive flags, [volume number],
+ *     extra records
+ * and only the vints at the front change size, so everything between the
+ * archive flags and the extra area is carried across as bytes - the volume
+ * number, and whatever a later RAR puts there. */
+static int Rar5DelMain( Rar5Del *d, const Byte *hdr, UInt32 headSize,
+                        long pos, long body )
+{
+    Rar5Archive *z = d->z;
+    BRd          b, x;
+    UInt32       type, flags, extraSize = 0, dataSize = 0, arcFlags;
+    UInt32       newExtra, newSize, n, full, padded;
+    const Byte  *mid, *xStart;
+    const Byte  *loc = NULL, *locEnd = NULL;
+    Byte        *nb;
+    int          big = 0, rc;
+
+    b.p = hdr; b.end = hdr + headSize; b.err = 0;
+    type  = R5DelVint( &b, &big );
+    flags = R5DelVint( &b, &big );
+    if ( flags & H5F_EXTRA ) extraSize = R5DelVint( &b, &big );
+    if ( flags & H5F_DATA )  dataSize  = R5DelVint( &b, &big );
+    arcFlags = R5DelVint( &b, &big );
+    if ( b.err || big || extraSize > (UInt32)( b.end - b.p ) )
+        return SZ_ERR_FORMAT;
+    mid    = b.p;
+    xStart = hdr + headSize - extraSize;
+
+    /* Find the locator among the extra records. */
+    x.p = xStart; x.end = hdr + headSize; x.err = 0;
+    while ( x.p < x.end )
+    {
+        const Byte *recStart = x.p;
+        UInt32      recSize  = R5DelVint( &x, &big );
+        const Byte *recEnd;
+
+        if ( x.err || big || recSize == 0 ||
+             recSize > (UInt32)( x.end - x.p ) )
+            return SZ_ERR_FORMAT;
+        recEnd = x.p + recSize;
+        if ( R5DelVint( &x, &big ) == X5M_LOCATOR && !x.err && !loc )
+        {
+            loc    = recStart;
+            locEnd = recEnd;
+        }
+        x.p = recEnd;
+    }
+
+    if ( !loc && !( arcFlags & H5A_RECOVERY ) )
+        return Rar5DelCopy( d, pos, body - pos );
+
+    /* Room for the CRC, the size vint, the body (which only shrinks) and the
+     * cipher padding. */
+    nb = (Byte *)malloc( (size_t)headSize + 4 + R5_VINT_MAX + 16 );
+    if ( !nb ) return SZ_ERR_MEMORY;
+
+    newExtra = extraSize - ( loc ? (UInt32)( locEnd - loc ) : 0 );
+    flags    = newExtra ? ( flags | H5F_EXTRA ) : ( flags & ~(UInt32)H5F_EXTRA );
+
+    /* The body first, at an offset that leaves room in front for the CRC and
+     * the longest size vint; moved down once the size is known. */
+    n  = 4 + R5_VINT_MAX;
+    n += R5PutVint( nb + n, type );
+    n += R5PutVint( nb + n, flags );
+    if ( newExtra )          n += R5PutVint( nb + n, newExtra );
+    if ( flags & H5F_DATA )  n += R5PutVint( nb + n, dataSize );
+    n += R5PutVint( nb + n, arcFlags & ~(UInt32)H5A_RECOVERY );
+    memcpy( nb + n, mid, (size_t)( xStart - mid ) );
+    n += (UInt32)( xStart - mid );
+    if ( loc )
+    {
+        memcpy( nb + n, xStart, (size_t)( loc - xStart ) );
+        n += (UInt32)( loc - xStart );
+        memcpy( nb + n, locEnd, (size_t)( hdr + headSize - locEnd ) );
+        n += (UInt32)( hdr + headSize - locEnd );
+    }
+    else
+    {
+        memcpy( nb + n, xStart, (size_t)extraSize );
+        n += extraSize;
+    }
+    newSize = n - ( 4 + R5_VINT_MAX );
+
+    {
+        Byte   sz[R5_VINT_MAX];
+        UInt32 szLen = R5PutVint( sz, newSize );
+        UInt32 crc;
+
+        memmove( nb + 4 + szLen, nb + 4 + R5_VINT_MAX, (size_t)newSize );
+        memcpy( nb + 4, sz, (size_t)szLen );
+        full = 4 + szLen + newSize;
+        crc  = Crc32Calc( nb + 4, szLen + newSize );
+        nb[0] = (Byte)( crc & 0xFF );
+        nb[1] = (Byte)( ( crc >> 8 ) & 0xFF );
+        nb[2] = (Byte)( ( crc >> 16 ) & 0xFF );
+        nb[3] = (Byte)( ( crc >> 24 ) & 0xFF );
+    }
+
+    if ( !z->hdrEncrypted )
+    {
+        rc = Rar5DelPut( d, nb, full );
+        free( nb );
+        return rc;
+    }
+
+    /* -hp: [IV][header padded to 16, enciphered], with this block's own IV. */
+    padded = ( full + 15 ) & ~15UL;
+    memset( nb + full, 0, (size_t)( padded - full ) );
+    rc = SZ_OK;
+    if ( d->out )
+    {
+        Byte        iv[R5_IV_LEN];
+        AesCbcState cbc;
+
+        if ( VolSeek( z->fp, pos, SEEK_SET ) != 0 ||
+             VolRead( iv, 1, R5_IV_LEN, z->fp ) != R5_IV_LEN )
+            rc = SZ_ERR_READ;
+        else if ( AesCbcInit( &cbc, z->hdrKey, 32, iv ) != SZ_OK ||
+                  aes_cbc_encrypt( cbc.rk, cbc.nr, iv, nb, nb,
+                                   (int)padded ) != 0 )
+            rc = SZ_ERR_UNSUPPORTED;
+        if ( rc == SZ_OK ) rc = Rar5DelPut( d, iv, R5_IV_LEN );
+    }
+    else
+        rc = Rar5DelPut( d, nb, R5_IV_LEN );            /* counted only */
+    if ( rc == SZ_OK ) rc = Rar5DelPut( d, nb, padded );
+    free( nb );
+    return rc;
+}
+
+/* The name of a service header ("CMT", "QO", "RR", "ACL", "STM"), which sits
+ * where a file header keeps its name.  0 when the header is too short. */
+static int Rar5SubName( BRd *b, const Byte **name, UInt32 *nameLen )
+{
+    UInt32 fileFlags;
+
+    fileFlags = BrVint( b );
+    (void)BrVint( b );                                  /* unpacked size */
+    (void)BrVint( b );                                  /* attributes    */
+    if ( fileFlags & F5_MTIME ) (void)BrU32( b );
+    if ( fileFlags & F5_CRC )   (void)BrU32( b );
+    (void)BrVint( b );                                  /* compression   */
+    (void)BrVint( b );                                  /* host OS       */
+    *nameLen = BrVint( b );
+    if ( b->err || *nameLen > (UInt32)( b->end - b->p ) ) return 0;
+    *name = b->p;
+    return 1;
+}
+
+/* One pass over the block chain.  d->out NULL decides; otherwise copies. */
+static int Rar5DelWalk( Rar5Del *d, const char **why )
+{
+    Rar5Archive *z      = d->z;
+    int          wasEnc = z->hdrEncrypted;
+    long         pos    = 8;
+    int          entry  = 0;
+    int          drop   = 0;     /* the blocks passing belong to a deleted file */
+    int          broken = 0;     /* a file with data went since the run began   */
+    int          rc;
+
+    /* Replay the open: blocks are plain until the crypt header. */
+    z->hdrEncrypted = 0;
+    d->kept = 0;
+    rc = Rar5DelCopy( d, 0, 8 );                        /* the signature */
+
+    while ( rc == SZ_OK && pos < d->fileLen )
+    {
+        Byte  *hdr;
+        UInt32 headSize, type, flags, dataSize = 0;
+        long   body, end;
+        BRd    b;
+        int    big  = 0;
+        int    keep = !drop;
+        int    stop = 0;
+        int    brc;
+
+        brc = Rar5ReadBlock( z, pos, &hdr, &headSize, &body );
+        if ( brc == RAR5_BLK_END ) break;
+        if ( brc != SZ_OK ) { rc = brc; break; }
+
+        b.p = hdr; b.end = hdr + headSize; b.err = 0;
+        type  = R5DelVint( &b, &big );
+        flags = R5DelVint( &b, &big );
+        if ( flags & H5F_EXTRA ) (void)R5DelVint( &b, &big );
+        if ( flags & H5F_DATA )  dataSize = R5DelVint( &b, &big );
+        if ( b.err ) { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+        if ( big )
+        {
+            free( hdr );
+            *why = "This archive holds a file of 4 GB or more, which is "
+                   "too large to copy.";
+            rc = SZ_ERR_UNSUPPORTED;
+            break;
+        }
+
+        if ( dataSize > (UInt32)( 0x7FFFFFFFL - body ) )
+        { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+        end = body + (long)dataSize;
+        if ( end > d->fileLen ) { free( hdr ); rc = SZ_ERR_READ; break; }
+
+        if ( type == H5_ENCRYPT )
+        {
+            keep = 1;
+            z->hdrEncrypted = wasEnc;
+        }
+        else if ( type == H5_MAIN )
+        {
+            rc = Rar5DelMain( d, hdr, headSize, pos, body );
+            if ( rc == SZ_OK && end > body )
+                rc = Rar5DelCopy( d, body, end - body );
+            keep = 0;                                   /* written above */
+        }
+        else if ( type == H5_FILE )
+        {
+            const Rar5Entry *e;
+            UInt32           fileFlags, compInfo;
+            int              gone, hasData;
+
+            /* The reader made an entry of every file header in a single
+             * volume, in order; if one does not line up, the archive is not
+             * the one that was listed. */
+            if ( entry >= z->numEntries || z->dataOffset[entry] != body )
+            { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+
+            fileFlags = BrVint( &b );
+            (void)BrVint( &b );                         /* unpacked size */
+            (void)BrVint( &b );                         /* attributes    */
+            if ( fileFlags & F5_MTIME ) (void)BrU32( &b );
+            if ( fileFlags & F5_CRC )   (void)BrU32( &b );
+            compInfo = BrVint( &b );
+            if ( b.err ) { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+
+            e       = &z->entries[entry];
+            gone    = d->del[entry] != 0;
+            hasData = dataSize > 0 && !e->isDir;
+
+            if ( hasData && !( compInfo & C5_SOLID ) ) broken = 0;
+            if ( gone )
+            {
+                if ( hasData ) broken = 1;
+            }
+            else if ( hasData && ( compInfo & C5_SOLID ) && broken )
+            {
+                sprintf( g_rar5DelWhy,
+                         "This is a solid archive, and \"%.100s\" is unpacked "
+                         "using files that are selected for deleting.  Select "
+                         "\"%.100s\" and the files after that file as well, or "
+                         "keep the earlier files.", e->name, e->name );
+                *why = g_rar5DelWhy;
+                free( hdr );
+                rc = SZ_ERR_UNSUPPORTED;
+                break;
+            }
+
+            drop = gone;
+            keep = !gone;
+            if ( keep )
+            {
+                d->kept++;
+                d->name = e->name;
+                rc = Rar5DelTick( d );
+            }
+            entry++;
+        }
+        else if ( type == H5_SERVICE )
+        {
+            const Byte *name;
+            UInt32      nameLen;
+
+            if ( !Rar5SubName( &b, &name, &nameLen ) )
+            { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+            if ( nameLen == 2 && ( memcmp( name, "QO", 2 ) == 0 ||
+                                   memcmp( name, "RR", 2 ) == 0 ) )
+                keep = 0;
+        }
+        else if ( type == H5_ENDARC )
+        {
+            keep = 1;
+            stop = 1;
+        }
+
+        free( hdr );
+        if ( rc == SZ_OK && keep ) rc = Rar5DelCopy( d, pos, end - pos );
+        pos = end;
+        if ( stop ) break;
+    }
+
+    z->hdrEncrypted = wasEnc;
+    if ( rc == SZ_OK && entry != z->numEntries ) rc = SZ_ERR_FORMAT;
+    if ( rc == SZ_OK && !d->out ) d->keptN = d->kept;
+    return rc;
+}
+
+int Rar5DeleteWrite( Rar5Archive *r, const Byte *del, FILE *out,
+                     ArcCompProgress prog, void *user, const char **why )
+{
+    Rar5Del d;
+    int     rc;
+
+    if ( !r ) return SZ_ERR_FORMAT;
+
+    if ( r->arcFlags & H5A_LOCKED )
+    {
+        *why = "WinRAR has locked this archive, and a locked archive cannot "
+               "be changed.";
+        return SZ_ERR_UNSUPPORTED;
+    }
+    if ( r->volumes != 1 || ( r->arcFlags & H5A_VOLUME ) )
+    {
+        *why = "This archive is one volume of a set.  Files cannot be "
+               "deleted from a multi-volume archive.";
+        return SZ_ERR_UNSUPPORTED;
+    }
+    if ( !del ) return SZ_OK;
+
+    memset( &d, 0, sizeof( d ) );
+    d.z       = r;
+    d.del     = del;
+    d.fileLen = VolVolumeLen( r->fp, 0 );
+
+    rc = Rar5DelWalk( &d, why );
+    if ( rc != SZ_OK || !out ) return rc;
+
+    d.buf = (Byte *)malloc( R5_DEL_BUF );
+    if ( !d.buf ) return SZ_ERR_MEMORY;
+    d.out      = out;
+    d.prog     = prog;
+    d.user     = user;
+    d.nextTick = R5_DEL_STEP;
+    rc = Rar5DelWalk( &d, why );
+    if ( rc == SZ_OK ) rc = Rar5DelTick( &d );          /* the bar at 100% */
+    free( d.buf );
+    return rc;
 }

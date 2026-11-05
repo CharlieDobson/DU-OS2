@@ -185,4 +185,61 @@ int ArcVolumeCount( ArcFile *a );
  * "Cabinet", "SZDD".  Safe to call with a NULL archive (returns "?"). */
 const char *ArcFormatName( ArcFile *a );
 
+/*---- Deleting entries ----------------------------------------------------- *
+ * What it takes differs by format, and that is what the progress bar is for:
+ *
+ *   ZIP, RAR, RAR5  every entry stands alone, so the ones kept are copied
+ *                   across as they are and the directory is rebuilt.  No
+ *                   password is needed even for encrypted entries.  A solid
+ *                   RAR can only lose files from the END of a solid run - a
+ *                   file kept after one deleted would need it to decode.
+ *   7Z              a folder that keeps all its files is copied as it is, and
+ *                   one that keeps none is dropped.  A solid folder that keeps
+ *                   SOME is decoded and the kept files compressed again, in
+ *                   LZMA2 (an encrypted one needs the password, and is
+ *                   encrypted again with it).
+ *   CABINET         the same, except that a part-kept folder is compressed
+ *                   again as MSZIP.
+ *   DISK IMAGE      the files are deleted in the image as DOS deletes them:
+ *                   the directory entries are marked and the clusters freed.
+ *                   The image keeps its size.
+ *
+ * The zip, 7z, RAR and cabinet cases write a new archive beside the old one
+ * and replace it only when it is complete, so a failure or a cancel leaves
+ * the archive as it was.  A disk image is changed where it lies.
+ *
+ * Not possible at all: a multi-volume set, a COMPRESS.EXE file (which holds
+ * one file - delete the file itself), a disk image held inside a .imz, a
+ * cabinet inside a setup program, and a RAR archive that WinRAR has locked.
+ *
+ * ArcCanDelete    SZ_OK, or SZ_ERR_UNSUPPORTED when nothing can be deleted
+ *                 from this archive; ArcDeleteHint says why.  For greying a
+ *                 menu item.
+ * ArcDeleteCheck  the same for one selection, without writing anything -
+ *                 so a refusal (the solid RAR case) can come before the
+ *                 prompt instead of after it.
+ * ArcDeleteItems  delete the entries named by index.  A folder entry takes
+ *                 everything under it along.  Progress goes through the
+ *                 same callback ArcCompRun uses: fileIndex / fileCount count
+ *                 the entries being written, doneKB / totalKB the work.
+ *                 On SZ_OK the archive has been reopened in place and 'a'
+ *                 now describes what is left - list it again.  Any other
+ *                 result leaves both the file and 'a' as they were, except
+ *                 that a failure while reopening (the new archive is already
+ *                 in place) leaves 'a' empty: list it again, and close it.
+ *                 Returns SZ_ERR_PASSWORD / SZ_ERR_BADPASS when a 7z folder
+ *                 has to be decoded and the password is missing or wrong -
+ *                 set it with ArcSetPassword and call again.
+ * ArcDeleteHint   the reason for the last SZ_ERR_UNSUPPORTED from the three
+ *                 above.  Static text, or a static buffer good until the
+ *                 next call.
+ *-------------------------------------------------------------------------- */
+#include "arccomp.h"    /* ArcCompProgress */
+
+int  ArcCanDelete( ArcFile *a );
+int  ArcDeleteCheck( ArcFile *a, const int *indices, int count );
+int  ArcDeleteItems( ArcFile *a, const int *indices, int count,
+                     ArcCompProgress prog, void *user );
+const char *ArcDeleteHint( void );
+
 #endif /* ARCFILE_H */

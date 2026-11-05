@@ -7,6 +7,8 @@
 #ifndef ARCDEFS_H
 #define ARCDEFS_H
 
+#include <stdio.h>      /* FILE, for ArcDelScratch */
+
 /*---- Fixed-width integer types ------------------------------------------- *
  * MSVC 2.2 is a 32-bit compiler; int/long are 32 bits.  We deliberately do
  * NOT use __int64 (support is unreliable on this toolchain): the 7z format's
@@ -407,5 +409,16 @@ typedef int (*ArcOverwriteFn)( void *user, const char *path );
 
 void ArcSetOverwritePrompt( ArcOverwriteFn fn, void *user );
 int  ArcWantWrite( const char *path );
+
+/*---- A scratch file, for deleting ----------------------------------------- *
+ * A format that has to decode part of an archive before it can write it
+ * again - a solid 7z folder that keeps some of its files - needs somewhere to
+ * hold the bytes in between, and only ArcDeleteItems knows where the archive
+ * is.  ArcDelScratch opens a new file beside it ("w+b"), on the same drive as
+ * the archive being written; ArcDelScratchDone closes it and deletes it.
+ * NULL when no file can be made, and always NULL outside ArcDeleteItems.  A
+ * few may be open at once; ArcDeleteItems deletes any left open. */
+FILE *ArcDelScratch( void );
+void  ArcDelScratchDone( FILE *f );
 
 #endif /* ARCDEFS_H */

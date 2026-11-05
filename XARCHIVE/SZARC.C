@@ -15,6 +15,11 @@
 #include "arccryp.h"    /* AES-256-CBC + the 7z key derivation */
 #include "platform.h"   /* SetFileMTime */
 #include "volio.h"      /* .7z.001/.002/... joined into one stream */
+#include "arccompi.h"   /* HBuf, BcjEnc, SzwDictFor: deleting writes a header */
+#include "lzmaenc.h"    /* and can compress a folder again */
+#include "aes.h"
+#include "sha.h"
+#include <time.h>
 
 /*---- 7z property IDs ----------------------------------------------------- */
 #define k7zEnd                  0x00
@@ -69,6 +74,9 @@
  * byte, a sizes byte, then up to 16 bytes of salt and 16 of IV.  Coder props
  * used to be 8 bytes because LZMA needs 5. */
 #define SZ_MAX_CODER_PROPS  40
+
+/* A folder record: room for four coders with AES-sized properties. */
+#define SZ_FOLDER_RAW_MAX   256
 
 /*---- Internal structures ------------------------------------------------- *
  * A folder is a small graph of coders.  Every coder is parsed STRUCTURALLY,
@@ -143,6 +151,14 @@ typedef struct {
     int      isBcj2;
     int      bcj2Main, bcj2Call, bcj2Jump;
     UInt32   bcj2RcPack;
+
+    /* The folder's record as it stood in the header, and the size of every
+     * coder output, so that deleting can write a folder it keeps whole back
+     * exactly as it found it - including one it could not decode.  rawLen 0:
+     * the record was longer than raw[], and the folder cannot be copied. */
+    Byte     raw[SZ_FOLDER_RAW_MAX];
+    UInt32   rawLen;
+    UInt32   outSizes[SZ_MAX_FOLDER_STRMS];
 } SzFolder;
 
 struct SzArchive {
@@ -170,6 +186,16 @@ struct SzArchive {
      * repeat per entry. */
     char     password[ AC_MAX_PW + 1 ];
     int      havePw;
+
+    /* For deleting.  The names as the header had them, UTF-16 and each with
+     * its terminator, since the converted ones in 'entries' can have lost
+     * characters this code page lacks; nameOff[i] is entry i's start in
+     * nameBlob.  hdrEncrypted: the header was AES-encrypted (-mhe), so the
+     * one written in its place must be too. */
+    Byte    *nameBlob;
+    UInt32   nameBlobLen;
+    UInt32  *nameOff;
+    int      hdrEncrypted;
 };
 
 /* Declared here, defined down with the streaming reader: DecodeFolder needs it
@@ -697,9 +723,10 @@ static void ClassifyFolder( SzFolder *fo )
  *-------------------------------------------------------------------------- */
 static int ReadFolder( ParseState *ps, SzFolder *fo )
 {
-    CRdr   *r = &ps->rd;
-    UInt32  numCoders;
-    UInt32  c, totalIn = 0, totalOut = 0, i;
+    CRdr       *r = &ps->rd;
+    const Byte *recStart = r->p;
+    UInt32      numCoders;
+    UInt32      c, totalIn = 0, totalOut = 0, i;
 
     memset( fo, 0, sizeof( *fo ) );
     fo->method   = -1;
@@ -821,6 +848,12 @@ static int ReadFolder( ParseState *ps, SzFolder *fo )
     }
     if ( r->err ) return SZ_ERR_FORMAT;
 
+    if ( (UInt32)( r->p - recStart ) <= sizeof( fo->raw ) )
+    {
+        fo->rawLen = (UInt32)( r->p - recStart );
+        memcpy( fo->raw, recStart, fo->rawLen );
+    }
+
     /* The folder's result is the one out-stream no bind pair consumes.  This
      * is structural, so it is worked out here rather than during
      * classification: an unsupported folder still needs its output size, or
@@ -900,6 +933,7 @@ static int ReadUnpackInfo( ParseState *ps )
                 return SZ_ERR_TOOBIG;
             if ( sizes[o] > SZ_MAX_UNPACK_SIZE )
                 return SZ_ERR_TOOBIG;
+            fo->outSizes[o] = sizes[o];
         }
 
         n = ( fo->numCoders > SZ_MAX_CODERS ) ? SZ_MAX_CODERS : fo->numCoders;
@@ -1210,13 +1244,28 @@ static int ReadFilesInfo( ParseState *ps )
 
         case k7zName:
         {
-            Byte external = RdByte( r );
+            Byte        external = RdByte( r );
+            const Byte *blob;
+
             if ( external != 0 )
                 return SZ_ERR_UNSUPPORTED;
+
+            /* Kept raw as well, for deleting - see SzArchive. */
+            blob = r->p;
+            if ( a->nameBlob ) { free( a->nameBlob ); a->nameBlob = NULL; }
+            if ( a->nameOff )  { free( a->nameOff );  a->nameOff = NULL; }
+            a->nameBlobLen = (UInt32)( next - blob );
+            a->nameBlob = (Byte *)malloc( a->nameBlobLen ? a->nameBlobLen : 1 );
+            a->nameOff  = (UInt32 *)malloc( sizeof( UInt32 ) * ( numFiles ? numFiles : 1 ) );
+            if ( !a->nameBlob || !a->nameOff ) return SZ_ERR_MEMORY;
+            memcpy( a->nameBlob, blob, a->nameBlobLen );
+
             for ( i = 0; i < numFiles; i++ )
             {
                 WCHAR wbuf[SZ_MAX_NAME];
                 int   wn = 0;
+
+                a->nameOff[i] = (UInt32)( r->p - blob );
                 for ( ;; )
                 {
                     UInt32 ch = RdByte( r );
@@ -1897,7 +1946,10 @@ int SzOpenPw( const char *path, const char *pw, SzArchive **out )
             if ( tmp->numFolders != 1 )
                 rc = SZ_ERR_UNSUPPORTED;
             else
+            {
+                a->hdrEncrypted = tmp->folders[0].encrypted;
                 rc = DecodeFolder( tmp, 0, &hdr2 );
+            }
         }
 
         if ( rc == SZ_OK )
@@ -2043,8 +2095,10 @@ void SzClose( SzArchive *a )
 {
     if ( a )
     {
-        if ( a->fp )      VolClose( a->fp );
-        if ( a->entries ) free( a->entries );
+        if ( a->fp )       VolClose( a->fp );
+        if ( a->entries )  free( a->entries );
+        if ( a->nameBlob ) free( a->nameBlob );
+        if ( a->nameOff )  free( a->nameOff );
         free( a );
     }
 }
@@ -2760,6 +2814,14 @@ typedef struct {
     SzProgress  prog;
     void       *user;
     int         rc;           /* first error, reported by the caller      */
+
+    /* Deleting: the wanted entries' bytes, one after another, go to 'spill'
+     * instead of to files (destDir is NULL), still CRC-checked; 'tick' hears
+     * of every byte decoded, wanted or not, and may cancel. */
+    FILE       *spill;
+    int         curSpill;     /* the open entry goes to 'spill'           */
+    int       (*tick)( void *tickUser, UInt32 bytes );
+    void       *tickUser;
 } SzSink;
 
 static int SzSinkWanted( SzSink *s, int idx )
@@ -2778,10 +2840,12 @@ static int SzSinkOpen( SzSink *s )
     s->crc     = Crc32Init();
     s->out     = NULL;
     s->curSkip = 0;
+    s->curSpill = 0;
     s->next++;
 
     if ( !SzSinkWanted( s, idx ) )
         return 1;                       /* decode past it, write nothing */
+    s->curSpill = ( s->spill != NULL );
 
     if ( s->prog &&
          !s->prog( s->user, idx, s->a->numEntries, e->name ) )
@@ -2856,6 +2920,11 @@ static int SzSinkEmit( void *user, const Byte *data, UInt32 len )
     SzSink *s = (SzSink *)user;
 
     s->folderCrc = Crc32Update( s->folderCrc, data, len );
+    if ( s->tick && !s->tick( s->tickUser, len ) )
+    {
+        s->rc = SZ_ERR_CANCEL;
+        return 0;
+    }
 
     while ( len )
     {
@@ -2896,6 +2965,11 @@ static int SzSinkEmit( void *user, const Byte *data, UInt32 len )
             s->rc = SZ_ERR_WRITE;
             return 0;
         }
+        if ( s->curSpill && fwrite( data, 1, take, s->spill ) != take )
+        {
+            s->rc = SZ_ERR_WRITE;
+            return 0;
+        }
 
         s->pos += take; data += take; len -= take;
         if ( s->pos == s->curEnd && !SzSinkClose( s ) ) return 0;
@@ -2908,8 +2982,11 @@ static int SzSinkEmit( void *user, const Byte *data, UInt32 len )
  * = every entry in the folder); entries that are not wanted are decoded past
  * but not written, which is what a solid folder requires.
  */
-static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
-                           const Byte *want, SzProgress prog, void *user )
+static int SzStreamFolderEx( SzArchive *a, UInt32 fIdx, const char *destDir,
+                             const Byte *want, SzProgress prog, void *user,
+                             FILE *spill,
+                             int (*tick)( void *tickUser, UInt32 bytes ),
+                             void *tickUser )
 {
     SzFolder   *fo       = &a->folders[fIdx];
     UInt32      packOff, packSize;
@@ -2984,6 +3061,10 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
     sink.prog      = prog;
     sink.user      = user;
     sink.rc        = SZ_OK;
+    sink.spill     = spill;
+    sink.curSpill  = 0;
+    sink.tick      = tick;
+    sink.tickUser  = tickUser;
 
     bcj2.obuf = NULL;
     if ( fo->isBcj2 )
@@ -3221,6 +3302,13 @@ static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
     return rc;
 }
 
+static int SzStreamFolder( SzArchive *a, UInt32 fIdx, const char *destDir,
+                           const Byte *want, SzProgress prog, void *user )
+{
+    return SzStreamFolderEx( a, fIdx, destDir, want, prog, user,
+                             NULL, NULL, NULL );
+}
+
 int SzExtractAll( SzArchive *a, const char *destDir,
                   SzProgress prog, void *user )
 {
@@ -3375,4 +3463,969 @@ const char *SzErrorText( int code )
                                    "everything that matched was excluded.";
     default:                return "Unknown error.";
     }
+}
+
+/*===========================================================================
+ * Deleting entries (ArcDeleteItems in ARCFILE.H)
+ *
+ * A 7z keeps its files in folders - solid streams, often one for the whole
+ * archive - so what deleting costs depends on which folders the files to go
+ * are in:
+ *
+ *   a folder that keeps all its files is copied across byte for byte, its
+ *     header record too, whatever its coders are and whether or not this
+ *     program could decode them;
+ *   a folder that keeps none is left out;
+ *   a folder that keeps SOME is decoded into a scratch file beside the
+ *     archive (ArcDelScratch), only the files being kept written to it, and
+ *     those bytes are compressed again as a new folder: LZMA2, behind the
+ *     filter the old folder had (BCJ2 becomes BCJ, which needs no side
+ *     streams), or stored if the old one was stored.  If the old folder was
+ *     encrypted, the new one is encrypted again with the same password.
+ *
+ * The header is written anew - pack sizes, folders, substreams, the file
+ * list - from what SzOpen parsed, and packed with LZMA as 7-Zip packs its
+ * own; AES-encrypted as well when the old header was.  The names go out as
+ * the old header had them, in UTF-16, not as this code page shows them.
+ * Each file keeps its name, size, CRC, modification time and attributes;
+ * creation and access times, which 7-Zip only stores when asked to, are not
+ * carried over, and neither are folder-level CRCs (every file still has its
+ * own).
+ *
+ * A self-extracting archive keeps its stub: everything before the start
+ * header goes across first, so the offsets in the new header, which count
+ * from the end of the start header, come out the same way.
+ *===========================================================================*/
+
+#define SZD_BUF         32768U
+#define SZD_AES_CYCLES  19              /* 7-Zip's default key stretching */
+#define SZD_AES_PROPS   18              /* two bytes, then a 16-byte IV   */
+
+/* One folder of the new archive. */
+typedef struct {
+    UInt32   src;                       /* its folder in the old archive  */
+    int      rebuilt;                   /* compressed again, not copied   */
+
+    /* rebuilt only */
+    int      method;                    /* SZ_M_COPY or SZ_M_LZMA2        */
+    int      filter;                    /* SZ_F_NONE / _BCJ_X86 / _DELTA  */
+    unsigned delta;
+    Byte     lzProp;                    /* LZMA2's property byte          */
+    int      aes;
+    Byte     aesProps[SZD_AES_PROPS];
+    UInt32   unpack;                    /* the kept files' bytes          */
+    UInt32   mainPack;                  /* what the main coder produced   */
+    UInt32   packSize;                  /* what went into the archive     */
+} SzdFolder;
+
+typedef struct {
+    SzArchive      *a;
+    FILE           *out;
+    ArcCompProgress prog;
+    void           *user;
+    UInt32          done, total;        /* bytes of work                  */
+    int             fileIndex, fileCount;
+    const char     *name;
+    int             cancelled;
+
+    /* One key serves every folder this run encrypts, and the header: the
+     * derivation is the slow part, and only the IV changes per folder. */
+    int             haveKey;
+    Byte            rk[240];
+    Byte            ivSeed[32];
+    UInt32          ivCount;
+} SzdJob;
+
+static int SzdTick( SzdJob *j, UInt32 bytes )
+{
+    j->done += bytes;
+    if ( !j->prog ) return 1;
+    if ( !j->prog( j->user, j->fileIndex, j->fileCount, j->name ? j->name : "",
+                   j->done / 1024, j->total / 1024 ) )
+    {
+        j->cancelled = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static int SzdSinkTick( void *user, UInt32 bytes )
+{
+    return SzdTick( (SzdJob *)user, bytes );
+}
+
+/* The sink names each file kept as its bytes start to arrive. */
+static int SzdSinkEntry( void *user, int fileIndex, int fileCount,
+                         const char *name )
+{
+    SzdJob *j = (SzdJob *)user;
+
+    (void)fileIndex; (void)fileCount;
+    j->name = name;
+    j->fileIndex++;
+    return !j->cancelled;
+}
+
+/*---- AES-256-CBC, writing ------------------------------------------------- */
+
+/* A fresh IV.  It has only to differ from folder to folder and run to run,
+ * not to be secret, so the clock and a counter through SHA-256 will do. */
+static void SzdNewIv( SzdJob *j, Byte iv[16] )
+{
+    SHA256_CTX c;
+    Byte       d[32];
+    UInt32     v[4];
+
+    v[0] = (UInt32)time( NULL );
+    v[1] = j->ivCount++;
+    v[2] = (UInt32)ftell( j->out );
+    v[3] = j->done;
+    sha256_init( &c );
+    sha256_update( &c, j->ivSeed, sizeof( j->ivSeed ) );
+    sha256_update( &c, v, sizeof( v ) );
+    sha256_final( &c, d );
+    memcpy( j->ivSeed, d, sizeof( j->ivSeed ) );
+    memcpy( iv, d, 16 );
+}
+
+/* The key from the archive's password - no salt, as 7-Zip writes it - and
+ * the coder properties for a new IV. */
+static int SzdAesBegin( SzdJob *j, Byte props[SZD_AES_PROPS], Byte iv[16] )
+{
+    if ( !j->a->havePw ) return SZ_ERR_PASSWORD;
+    if ( !j->haveKey )
+    {
+        Byte key[32];
+        SzAesDeriveKey( j->a->password, SZD_AES_CYCLES, NULL, 0, key );
+        aes256_expand_key( key, j->rk );
+        memset( key, 0, sizeof( key ) );
+        j->haveKey = 1;
+    }
+    SzdNewIv( j, iv );
+    props[0] = (Byte)( 0x40 | SZD_AES_CYCLES );     /* an IV, no salt   */
+    props[1] = 0x0F;                                /* the IV: 16 bytes */
+    memcpy( props + 2, iv, 16 );
+    return SZ_OK;
+}
+
+/* Where a coder's output goes: the archive or a buffer, through AES-CBC
+ * when 'rk' is set.  'plain' counts what came in, 'written' what went out -
+ * the second rounded up to whole 16-byte blocks when encrypting. */
+typedef struct {
+    FILE       *f;
+    HBuf       *mem;
+    const Byte *rk;
+    Byte        iv[16];
+    Byte        blk[16];
+    unsigned    have;
+    UInt32      plain, written;
+} SzdOut;
+
+static int SzdRaw( SzdOut *o, const Byte *data, UInt32 len )
+{
+    o->written += len;
+    if ( o->mem )
+    {
+        HPut( o->mem, data, len );
+        return !o->mem->failed;
+    }
+    return fwrite( data, 1, (size_t)len, o->f ) == (size_t)len;
+}
+
+static void SzdBlock( SzdOut *o )
+{
+    unsigned k;
+
+    for ( k = 0; k < 16; k++ ) o->blk[k] ^= o->iv[k];
+    aes_encrypt( o->rk, 14, o->blk, o->blk );
+    memcpy( o->iv, o->blk, 16 );
+    o->have = 0;
+}
+
+static int SzdPut( void *user, const Byte *data, UInt32 len )
+{
+    SzdOut *o = (SzdOut *)user;
+
+    o->plain += len;
+    if ( !o->rk ) return SzdRaw( o, data, len );
+    while ( len > 0 )
+    {
+        unsigned take = 16 - o->have;
+        if ( take > len ) take = (unsigned)len;
+        memcpy( o->blk + o->have, data, take );
+        o->have += take;
+        data += take;
+        len  -= take;
+        if ( o->have == 16 )
+        {
+            SzdBlock( o );
+            if ( !SzdRaw( o, o->blk, 16 ) ) return 0;
+        }
+    }
+    return 1;
+}
+
+/* The last block, padded with zeros as 7-Zip pads it. */
+static int SzdPutEnd( SzdOut *o )
+{
+    if ( !o->rk || o->have == 0 ) return 1;
+    memset( o->blk + o->have, 0, 16 - o->have );
+    SzdBlock( o );
+    return SzdRaw( o, o->blk, 16 );
+}
+
+/*---- The kept bytes, back out of the scratch file ------------------------- */
+typedef struct {
+    FILE    *f;
+    SzdJob  *j;
+    int      err;
+    int      filter;
+    unsigned delta, dPos;
+    Byte     dHist[256];
+    BcjEnc   bcj;
+    Byte    *bbuf;
+    UInt32   bHave, bDone, bPos;
+    int      bEof;
+} SzdIn;
+
+static UInt32 SzdRawRead( SzdIn *in, Byte *buf, UInt32 len )
+{
+    size_t n = fread( buf, 1, (size_t)len, in->f );
+
+    if ( n == 0 && ferror( in->f ) ) in->err = SZ_ERR_READ;
+    return (UInt32)n;
+}
+
+/* What the encoder pulls: the spilled bytes through the folder's filter -
+ * the same stages SZWRITE.C runs over files read from disk. */
+static UInt32 SzdRead( void *user, Byte *buf, UInt32 len )
+{
+    SzdIn *in = (SzdIn *)user;
+    UInt32 n;
+
+    if ( in->err || in->j->cancelled ) return 0;
+    if ( in->filter == SZ_F_DELTA )
+    {
+        UInt32 i;
+        unsigned k = in->dPos;
+
+        n = SzdRawRead( in, buf, len );
+        for ( i = 0; i < n; i++ )
+        {
+            Byte cur = buf[i];
+            buf[i] = (Byte)( cur - in->dHist[k] );
+            in->dHist[k] = cur;
+            if ( ++k == in->delta ) k = 0;
+        }
+        in->dPos = k;
+        return n;
+    }
+    if ( in->filter != SZ_F_BCJ_X86 ) return SzdRawRead( in, buf, len );
+
+    if ( in->bPos == in->bDone )
+    {
+        UInt32 tail = in->bHave - in->bDone;
+        if ( tail ) memmove( in->bbuf, in->bbuf + in->bDone, tail );
+        in->bHave = tail;
+        in->bDone = in->bPos = 0;
+        while ( !in->bEof && in->bHave < SZD_BUF )
+        {
+            UInt32 got = SzdRawRead( in, in->bbuf + in->bHave, SZD_BUF - in->bHave );
+            if ( got == 0 ) in->bEof = 1;
+            in->bHave += got;
+        }
+        if ( in->bHave == 0 ) return 0;
+        in->bDone = BcjEncChunk( &in->bcj, in->bbuf, in->bHave );
+        if ( in->bEof ) in->bDone = in->bHave;      /* the tail as it is */
+        if ( in->bDone == 0 ) return 0;
+    }
+    n = in->bDone - in->bPos;
+    if ( n > len ) n = len;
+    memcpy( buf, in->bbuf + in->bPos, n );
+    in->bPos += n;
+    return n;
+}
+
+typedef struct {
+    SzdJob *j;
+    UInt32  last;
+} SzdEncProg;
+
+static int SzdEncProgress( void *user, UInt32 inDone, UInt32 outDone )
+{
+    SzdEncProg *p = (SzdEncProg *)user;
+    UInt32      step = inDone - p->last;
+
+    (void)outDone;
+    p->last = inDone;
+    return SzdTick( p->j, step );
+}
+
+/*---- Copying and rebuilding ----------------------------------------------- */
+
+/* 'len' bytes from 'from' in the old archive to the end of the new one. */
+static int SzdCopy( SzdJob *j, long from, UInt32 len, Byte *buf, int count )
+{
+    if ( VolSeek( j->a->fp, from, SEEK_SET ) != 0 ) return SZ_ERR_READ;
+    while ( len > 0 )
+    {
+        UInt32 part = ( len > SZD_BUF ) ? SZD_BUF : len;
+
+        if ( VolRead( buf, 1, part, j->a->fp ) != part ) return SZ_ERR_READ;
+        if ( fwrite( buf, 1, (size_t)part, j->out ) != (size_t)part )
+            return SZ_ERR_WRITE;
+        len -= part;
+        if ( count && !SzdTick( j, part ) ) return SZ_ERR_CANCEL;
+    }
+    return SZ_OK;
+}
+
+/* Decode folder fo->src keeping only what 'want' marks, then compress that
+ * into the new archive as the folder 'fo' describes. */
+static int SzdRebuild( SzdJob *j, SzdFolder *fo, const Byte *want, Byte *buf )
+{
+    SzArchive *a   = j->a;
+    SzFolder  *sf  = &a->folders[fo->src];
+    FILE      *spill;
+    SzdIn      in;
+    SzdOut     o;
+    Byte       iv[16];
+    UInt32     inT = 0, outT = 0;
+    int        rc;
+
+    spill = ArcDelScratch();
+    if ( !spill ) return SZ_ERR_WRITE;
+
+    rc = SzStreamFolderEx( a, fo->src, NULL, want, SzdSinkEntry, j,
+                           spill, SzdSinkTick, j );
+    if ( j->cancelled ) rc = SZ_ERR_CANCEL;
+    if ( rc == SZ_OK && ( fflush( spill ) != 0 || fseek( spill, 0L, SEEK_SET ) != 0 ) )
+        rc = SZ_ERR_WRITE;
+
+    fo->method = ( sf->method == SZ_M_COPY ) ? SZ_M_COPY : SZ_M_LZMA2;
+    fo->filter = SZ_F_NONE;
+    if ( fo->method == SZ_M_LZMA2 )
+    {
+        if ( sf->filter == SZ_F_BCJ_X86 || sf->isBcj2 ) fo->filter = SZ_F_BCJ_X86;
+        else if ( sf->filter == SZ_F_DELTA )
+        {
+            fo->filter = SZ_F_DELTA;
+            fo->delta  = sf->deltaDist;
+        }
+    }
+    fo->aes = sf->encrypted;
+
+    memset( &o, 0, sizeof( o ) );
+    o.f = j->out;
+    if ( rc == SZ_OK && fo->aes )
+    {
+        rc = SzdAesBegin( j, fo->aesProps, iv );
+        o.rk = j->rk;
+        memcpy( o.iv, iv, 16 );
+    }
+
+    memset( &in, 0, sizeof( in ) );
+    in.f      = spill;
+    in.j      = j;
+    in.filter = fo->filter;
+    in.delta  = fo->delta;
+    if ( rc == SZ_OK && fo->filter == SZ_F_BCJ_X86 )
+    {
+        in.bbuf = (Byte *)malloc( SZD_BUF );
+        if ( !in.bbuf ) rc = SZ_ERR_MEMORY;
+    }
+
+    if ( rc == SZ_OK && fo->method == SZ_M_LZMA2 )
+    {
+        LzmaEncProps p;
+        SzdEncProg   ep;
+
+        LzmaEncPropsInit( &p, SzwDictFor( fo->unpack ) );
+        fo->lzProp = Lzma2EncPropByte( &p );
+        ep.j = j;
+        ep.last = 0;
+        rc = Lzma2Encode( &p, SzdRead, &in, SzdPut, &o,
+                          SzdEncProgress, &ep, &inT, &outT );
+        if ( rc == SZ_OK && ep.last < inT ) SzdTick( j, inT - ep.last );
+    }
+    else if ( rc == SZ_OK )
+    {
+        for ( ;; )
+        {
+            UInt32 n = SzdRead( &in, buf, SZD_BUF );
+            if ( n == 0 ) break;
+            inT += n;
+            if ( !SzdPut( &o, buf, n ) ) { rc = SZ_ERR_WRITE; break; }
+            if ( !SzdTick( j, n ) ) { rc = SZ_ERR_CANCEL; break; }
+        }
+    }
+    if ( rc == SZ_OK && j->cancelled ) rc = SZ_ERR_CANCEL;
+    if ( rc == SZ_OK && in.err )       rc = in.err;
+    if ( rc == SZ_OK && inT != fo->unpack ) rc = SZ_ERR_DATA;
+    if ( rc == SZ_OK && !SzdPutEnd( &o ) ) rc = SZ_ERR_WRITE;
+
+    fo->mainPack = o.plain;
+    fo->packSize = o.written;
+    if ( in.bbuf ) free( in.bbuf );
+    ArcDelScratchDone( spill );
+    return rc;
+}
+
+/*---- The header ----------------------------------------------------------- */
+
+/* A rebuilt folder's record: the main coder, then the filter, then AES -
+ * the order SZWRITE.C writes them in - and the bind pairs between. */
+static void SzdCoders( HBuf *h, const SzdFolder *fo )
+{
+    UInt32 n = 1 + ( fo->filter != SZ_F_NONE ) + ( fo->aes != 0 );
+
+    HNum( h, n );
+    if ( fo->method == SZ_M_COPY )
+    {
+        HByte( h, 0x01 );                  /* Copy: 1-byte id, no props */
+        HByte( h, 0x00 );
+    }
+    else
+    {
+        HByte( h, 0x21 );                  /* LZMA2 */
+        HByte( h, 0x21 );
+        HNum( h, 1 );
+        HByte( h, fo->lzProp );
+    }
+    if ( fo->filter == SZ_F_BCJ_X86 )
+    {
+        HByte( h, 0x04 );
+        HByte( h, 0x03 ); HByte( h, 0x03 ); HByte( h, 0x01 ); HByte( h, 0x03 );
+    }
+    else if ( fo->filter == SZ_F_DELTA )
+    {
+        HByte( h, 0x21 );
+        HByte( h, 0x03 );
+        HNum( h, 1 );
+        HByte( h, (Byte)( fo->delta - 1 ) );
+    }
+    if ( fo->aes )
+    {
+        HByte( h, 0x24 );                  /* 4-byte id, has props */
+        HByte( h, 0x06 ); HByte( h, 0xF1 ); HByte( h, 0x07 ); HByte( h, 0x01 );
+        HNum( h, SZD_AES_PROPS );
+        HPut( h, fo->aesProps, SZD_AES_PROPS );
+    }
+    /* Bind pairs, (in, out): the filter reads the main coder's output, and
+     * the main coder reads what AES decrypts.  The one input left over -
+     * AES's, or the main coder's - is the packed stream. */
+    if ( fo->filter != SZ_F_NONE )
+    {
+        HNum( h, 1 );
+        HNum( h, 0 );
+    }
+    if ( fo->aes )
+    {
+        HNum( h, 0 );
+        HNum( h, n - 1 );
+    }
+}
+
+static void SzdUnpackSizes( HBuf *h, const SzdFolder *fo )
+{
+    HNum( h, fo->unpack );
+    if ( fo->filter != SZ_F_NONE ) HNum( h, fo->unpack );
+    if ( fo->aes )                 HNum( h, fo->mainPack );
+}
+
+/* An entry's name in nameBlob, with its terminator.  0 if it is not whole. */
+static UInt32 SzdNameLen( SzArchive *a, int i )
+{
+    UInt32 p = a->nameOff[i];
+
+    while ( p + 1 < a->nameBlobLen )
+    {
+        if ( a->nameBlob[p] == 0 && a->nameBlob[p + 1] == 0 )
+            return p + 2 - a->nameOff[i];
+        p += 2;
+    }
+    return 0;
+}
+
+/* A time or attribute property: [all defined][bits if not][external 0][values]. */
+static void SzdProp( HBuf *h, Byte id, const Byte *defined, UInt32 n,
+                     UInt32 nDef, UInt32 width )
+{
+    UInt32 size = 2 + nDef * width;
+
+    if ( nDef < n ) size += ( n + 7 ) / 8;
+    HByte( h, id );
+    HNum( h, size );
+    if ( nDef == n ) HByte( h, 1 );
+    else
+    {
+        HByte( h, 0 );
+        HBits( h, defined, n );
+    }
+    HByte( h, 0 );
+}
+
+static int SzdHeader( SzdJob *j, HBuf *h, const Byte *del, SzdFolder *ofo,
+                      int nOut, const UInt32 *packs, UInt32 nPacks,
+                      const int *keptN, Byte *bits )
+{
+    SzArchive *a = j->a;
+    UInt32     k, nKeep = 0, nEmpty = 0, nEmptyFile = 0, nData = 0, nCrc = 0;
+    UInt32     nMt = 0, nAt = 0, namesLen = 0;
+    int        i, f;
+
+    for ( i = 0; i < a->numEntries; i++ )
+    {
+        const SzEntry *e = &a->entries[i];
+        if ( del[i] ) continue;
+        nKeep++;
+        if ( e->folderIndex < 0 )
+        {
+            nEmpty++;
+            if ( !e->isDir ) nEmptyFile++;
+        }
+        else
+        {
+            nData++;
+            if ( e->hasCrc ) nCrc++;
+        }
+        if ( e->hasMtime )  nMt++;
+        if ( e->hasAttrib ) nAt++;
+        k = SzdNameLen( a, i );
+        if ( k == 0 ) return SZ_ERR_FORMAT;
+        namesLen += k;
+    }
+
+    HByte( h, k7zHeader );
+    if ( nOut > 0 )
+    {
+        HByte( h, k7zMainStreamsInfo );
+
+        HByte( h, k7zPackInfo );
+        HNum( h, 0 );
+        HNum( h, nPacks );
+        HByte( h, k7zSize );
+        for ( k = 0; k < nPacks; k++ ) HNum( h, packs[k] );
+        HByte( h, k7zEnd );
+
+        HByte( h, k7zUnpackInfo );
+        HByte( h, k7zFolder );
+        HNum( h, (UInt32)nOut );
+        HByte( h, 0 );                      /* not external */
+        for ( f = 0; f < nOut; f++ )
+        {
+            if ( ofo[f].rebuilt ) SzdCoders( h, &ofo[f] );
+            else
+            {
+                SzFolder *sf = &a->folders[ofo[f].src];
+                HPut( h, sf->raw, sf->rawLen );
+            }
+        }
+        HByte( h, k7zCodersUnpackSize );
+        for ( f = 0; f < nOut; f++ )
+        {
+            if ( ofo[f].rebuilt ) SzdUnpackSizes( h, &ofo[f] );
+            else
+            {
+                SzFolder *sf = &a->folders[ofo[f].src];
+                for ( k = 0; k < sf->numOutStreams; k++ ) HNum( h, sf->outSizes[k] );
+            }
+        }
+        HByte( h, k7zEnd );
+
+        /* Substreams: how many files each folder holds, every size but each
+         * folder's last, then the CRCs.  Files with data come in folder
+         * order in the file list, so walking the entries in order and
+         * picking out one folder's at a time lists them as the folders hold
+         * them. */
+        HByte( h, k7zSubStreamsInfo );
+        HByte( h, k7zNumUnpackStream );
+        for ( f = 0; f < nOut; f++ ) HNum( h, (UInt32)keptN[ofo[f].src] );
+        HByte( h, k7zSize );
+        for ( f = 0; f < nOut; f++ )
+        {
+            int left = keptN[ofo[f].src];
+            for ( i = 0; i < a->numEntries && left > 1; i++ )
+            {
+                if ( del[i] || a->entries[i].folderIndex != (int)ofo[f].src ) continue;
+                HNum( h, a->entries[i].size );
+                left--;
+            }
+        }
+        if ( nCrc > 0 )
+        {
+            HByte( h, k7zCRC );
+            if ( nCrc == nData ) HByte( h, 1 );
+            else
+            {
+                k = 0;
+                for ( f = 0; f < nOut; f++ )
+                    for ( i = 0; i < a->numEntries; i++ )
+                        if ( !del[i] && a->entries[i].folderIndex == (int)ofo[f].src )
+                            bits[k++] = (Byte)a->entries[i].hasCrc;
+                HByte( h, 0 );
+                HBits( h, bits, nData );
+            }
+            for ( f = 0; f < nOut; f++ )
+                for ( i = 0; i < a->numEntries; i++ )
+                    if ( !del[i] && a->entries[i].folderIndex == (int)ofo[f].src &&
+                         a->entries[i].hasCrc )
+                        HUInt32( h, a->entries[i].crc );
+        }
+        HByte( h, k7zEnd );
+        HByte( h, k7zEnd );
+    }
+
+    HByte( h, k7zFilesInfo );
+    HNum( h, nKeep );
+    if ( nEmpty > 0 )
+    {
+        k = 0;
+        for ( i = 0; i < a->numEntries; i++ )
+            if ( !del[i] ) bits[k++] = (Byte)( a->entries[i].folderIndex < 0 );
+        HByte( h, k7zEmptyStream );
+        HNum( h, ( nKeep + 7 ) / 8 );
+        HBits( h, bits, nKeep );
+        if ( nEmptyFile > 0 )
+        {
+            k = 0;
+            for ( i = 0; i < a->numEntries; i++ )
+                if ( !del[i] && a->entries[i].folderIndex < 0 )
+                    bits[k++] = (Byte)!a->entries[i].isDir;
+            HByte( h, k7zEmptyFile );
+            HNum( h, ( nEmpty + 7 ) / 8 );
+            HBits( h, bits, nEmpty );
+        }
+    }
+
+    HByte( h, k7zName );
+    HNum( h, namesLen + 1 );
+    HByte( h, 0 );                          /* not external */
+    for ( i = 0; i < a->numEntries; i++ )
+        if ( !del[i] )
+            HPut( h, a->nameBlob + a->nameOff[i], SzdNameLen( a, i ) );
+
+    if ( nMt > 0 )
+    {
+        k = 0;
+        for ( i = 0; i < a->numEntries; i++ )
+            if ( !del[i] ) bits[k++] = (Byte)a->entries[i].hasMtime;
+        SzdProp( h, k7zMTime, bits, nKeep, nMt, 8 );
+        for ( i = 0; i < a->numEntries; i++ )
+            if ( !del[i] && a->entries[i].hasMtime )
+            {
+                HUInt32( h, a->entries[i].mtimeLo );
+                HUInt32( h, a->entries[i].mtimeHi );
+            }
+    }
+    if ( nAt > 0 )
+    {
+        k = 0;
+        for ( i = 0; i < a->numEntries; i++ )
+            if ( !del[i] ) bits[k++] = (Byte)a->entries[i].hasAttrib;
+        SzdProp( h, k7zWinAttributes, bits, nKeep, nAt, 4 );
+        for ( i = 0; i < a->numEntries; i++ )
+            if ( !del[i] && a->entries[i].hasAttrib )
+                HUInt32( h, a->entries[i].attrib );
+    }
+    HByte( h, k7zEnd );
+    HByte( h, k7zEnd );
+    return h->failed ? SZ_ERR_MEMORY : SZ_OK;
+}
+
+typedef struct { const Byte *p; UInt32 len, pos; } SzdMemIn;
+
+static UInt32 SzdMemRead( void *user, Byte *buf, UInt32 len )
+{
+    SzdMemIn *m = (SzdMemIn *)user;
+    UInt32    n = m->len - m->pos;
+
+    if ( n > len ) n = len;
+    if ( n ) memcpy( buf, m->p + m->pos, n );
+    m->pos += n;
+    return n;
+}
+
+/* The header after the packed data, packed with LZMA (and AES if the old one
+ * was encrypted) unless that saves nothing, then the start header in front.
+ * 'base' is where the start header goes: past a self-extractor's stub. */
+static int SzdFinish( SzdJob *j, HBuf *h, long base )
+{
+    HBuf        packed, rec;
+    const Byte *hdr = h->p;
+    UInt32      hdrLen = h->len;
+    UInt32      nextOff, nextCrc, sc;
+    long        hdrPos = ftell( j->out );
+    Byte        start[32];
+    int         rc = SZ_OK;
+
+    memset( &packed, 0, sizeof( packed ) );
+    memset( &rec, 0, sizeof( rec ) );
+    if ( hdrPos < 0 ) return SZ_ERR_WRITE;
+
+    if ( hdrLen > 0 && ( hdrLen > 128 || j->a->hdrEncrypted ) )
+    {
+        LzmaEncProps p;
+        SzdMemIn     m;
+        SzdOut       o;
+        Byte         lzProps[5], aesProps[SZD_AES_PROPS], iv[16];
+        UInt32       inT = 0, outT = 0;
+
+        memset( &o, 0, sizeof( o ) );
+        o.mem = &packed;
+        if ( j->a->hdrEncrypted )
+        {
+            rc = SzdAesBegin( j, aesProps, iv );
+            o.rk = j->rk;
+            memcpy( o.iv, iv, 16 );
+        }
+        m.p = h->p; m.len = h->len; m.pos = 0;
+        LzmaEncPropsInit( &p, SzwDictFor( hdrLen ) );
+        LzmaEncPropsBytes( &p, lzProps );
+        if ( rc == SZ_OK )
+            rc = LzmaEncode( &p, SzdMemRead, &m, SzdPut, &o, 0, 0, &inT, &outT );
+        if ( rc == SZ_OK && !SzdPutEnd( &o ) ) rc = SZ_ERR_MEMORY;
+        if ( rc == SZ_OK && packed.failed )   rc = SZ_ERR_MEMORY;
+
+        /* Plain, a header has to be worth packing; encrypted, it is packed
+         * whatever the saving, since that is how it gets encrypted. */
+        if ( rc == SZ_OK && ( o.rk || o.written + 32 < hdrLen ) )
+        {
+            HByte( &rec, k7zEncodedHeader );
+            HByte( &rec, k7zPackInfo );
+            HNum( &rec, (UInt32)( hdrPos - base - 32 ) );
+            HNum( &rec, 1 );
+            HByte( &rec, k7zSize );
+            HNum( &rec, o.written );
+            HByte( &rec, k7zEnd );
+            HByte( &rec, k7zUnpackInfo );
+            HByte( &rec, k7zFolder );
+            HNum( &rec, 1 );
+            HByte( &rec, 0 );
+            HNum( &rec, o.rk ? 2 : 1 );
+            HByte( &rec, 0x23 );            /* LZMA: 3-byte id, has props */
+            HByte( &rec, 0x03 ); HByte( &rec, 0x01 ); HByte( &rec, 0x01 );
+            HNum( &rec, 5 );
+            HPut( &rec, lzProps, 5 );
+            if ( o.rk )
+            {
+                HByte( &rec, 0x24 );
+                HByte( &rec, 0x06 ); HByte( &rec, 0xF1 );
+                HByte( &rec, 0x07 ); HByte( &rec, 0x01 );
+                HNum( &rec, SZD_AES_PROPS );
+                HPut( &rec, aesProps, SZD_AES_PROPS );
+                HNum( &rec, 0 );            /* LZMA reads what AES gives */
+                HNum( &rec, 1 );
+            }
+            HByte( &rec, k7zCodersUnpackSize );
+            HNum( &rec, hdrLen );
+            if ( o.rk ) HNum( &rec, o.plain );
+            HByte( &rec, k7zCRC );
+            HByte( &rec, 1 );
+            HUInt32( &rec, Crc32Calc( h->p, h->len ) );
+            HByte( &rec, k7zEnd );
+            HByte( &rec, k7zEnd );
+            if ( rec.failed ) rc = SZ_ERR_MEMORY;
+            else if ( fwrite( packed.p, 1, packed.len, j->out ) != packed.len )
+                rc = SZ_ERR_WRITE;
+            else
+            {
+                hdrPos = ftell( j->out );
+                hdr = rec.p;
+                hdrLen = rec.len;
+            }
+        }
+    }
+    if ( rc == SZ_OK && hdrLen && fwrite( hdr, 1, hdrLen, j->out ) != hdrLen )
+        rc = SZ_ERR_WRITE;
+
+    if ( rc == SZ_OK )
+    {
+        nextOff = hdrLen ? (UInt32)( hdrPos - base - 32 ) : 0;
+        nextCrc = hdrLen ? Crc32Calc( hdr, hdrLen ) : 0;
+        memset( start, 0, sizeof( start ) );
+        memcpy( start, g_sig, 6 );
+        start[7] = 4;
+        start[12] = (Byte)nextOff;           start[13] = (Byte)( nextOff >> 8 );
+        start[14] = (Byte)( nextOff >> 16 ); start[15] = (Byte)( nextOff >> 24 );
+        start[20] = (Byte)hdrLen;            start[21] = (Byte)( hdrLen >> 8 );
+        start[22] = (Byte)( hdrLen >> 16 );  start[23] = (Byte)( hdrLen >> 24 );
+        start[28] = (Byte)nextCrc;           start[29] = (Byte)( nextCrc >> 8 );
+        start[30] = (Byte)( nextCrc >> 16 ); start[31] = (Byte)( nextCrc >> 24 );
+        sc = Crc32Calc( start + 12, 20 );
+        start[8]  = (Byte)sc;                start[9]  = (Byte)( sc >> 8 );
+        start[10] = (Byte)( sc >> 16 );      start[11] = (Byte)( sc >> 24 );
+        if ( fseek( j->out, base, SEEK_SET ) != 0 ||
+             fwrite( start, 1, 32, j->out ) != 32 || fflush( j->out ) != 0 )
+            rc = SZ_ERR_WRITE;
+    }
+    free( packed.p );
+    free( rec.p );
+    return rc;
+}
+
+/*---- The entry point ------------------------------------------------------ */
+int SzDeleteWrite( SzArchive *a, const Byte *del, FILE *out,
+                   ArcCompProgress prog, void *user, const char **why )
+{
+    SzdJob     j;
+    SzdFolder *ofo   = NULL;
+    int       *keptN = NULL, *delN = NULL;
+    UInt32    *keptBytes = NULL, *packs = NULL;
+    Byte      *want = NULL, *bits = NULL, *buf = NULL;
+    HBuf       h;
+    UInt32     f, k, nPacks = 0, nf = a->numFolders;
+    long       base = (long)a->baseOffset - 32;
+    int        i, nOut = 0, nKeep = 0, rc;
+
+    if ( !del ) return SZ_OK;
+    memset( &h, 0, sizeof( h ) );
+
+    rc = SZ_ERR_MEMORY;
+    keptN     = (int *)calloc( nf + 1, sizeof( int ) );
+    delN      = (int *)calloc( nf + 1, sizeof( int ) );
+    keptBytes = (UInt32 *)calloc( nf + 1, sizeof( UInt32 ) );
+    if ( !keptN || !delN || !keptBytes ) goto done;
+
+    for ( i = 0; i < a->numEntries; i++ )
+    {
+        int fi = a->entries[i].folderIndex;
+
+        if ( !del[i] ) nKeep++;
+        if ( fi < 0 ) continue;
+        if ( (UInt32)fi >= nf ) { rc = SZ_ERR_FORMAT; goto done; }
+        if ( del[i] ) delN[fi]++;
+        else
+        {
+            keptN[fi]++;
+            keptBytes[fi] += a->entries[i].size;
+        }
+    }
+
+    /* What cannot be done, before anything is written. */
+    rc = SZ_ERR_UNSUPPORTED;
+    if ( nKeep > 0 && !a->nameBlob )
+    {
+        *why = "This archive's file list has no names in it, so the files "
+               "kept could not be listed again.";
+        goto done;
+    }
+    for ( f = 0; f < nf; f++ )
+    {
+        SzFolder *sf = &a->folders[f];
+
+        if ( keptN[f] && delN[f] && sf->unsupported )
+        {
+            *why = "Some of the files to delete are packed together with "
+                   "files to keep, in a block that uses a compression "
+                   "method this program cannot decode.";
+            goto done;
+        }
+        if ( keptN[f] && !delN[f] && sf->rawLen == 0 )
+        {
+            *why = "This archive has a compressed block whose description "
+                   "is too long for this program to copy.";
+            goto done;
+        }
+    }
+    rc = SZ_OK;
+    if ( !out ) goto done;
+
+    memset( &j, 0, sizeof( j ) );
+    j.a = a;
+    j.out = out;
+    j.prog = prog;
+    j.user = user;
+    for ( f = 0; f < nf; f++ )
+    {
+        if ( !keptN[f] ) continue;
+        j.fileCount += keptN[f];
+        if ( !delN[f] )
+        {
+            SzFolder *sf = &a->folders[f];
+            for ( k = 0; k < sf->numPackStreams; k++ )
+                j.total += a->packSizes[sf->firstPackStream + k];
+        }
+        else
+        {
+            j.total += a->folders[f].unpackSize + keptBytes[f];
+            /* Decoding needs the password, and so does encrypting again. */
+            if ( a->folders[f].encrypted && !a->havePw )
+            {
+                rc = SZ_ERR_PASSWORD;
+                goto done;
+            }
+        }
+    }
+
+    rc = SZ_ERR_MEMORY;
+    ofo   = (SzdFolder *)calloc( nf + 1, sizeof( SzdFolder ) );
+    packs = (UInt32 *)malloc( sizeof( UInt32 ) * ( a->numPackStreams + nf + 1 ) );
+    want  = (Byte *)calloc( (size_t)a->numEntries + 1, 1 );
+    bits  = (Byte *)calloc( (size_t)a->numEntries + 1, 1 );
+    buf   = (Byte *)malloc( SZD_BUF );
+    if ( !ofo || !packs || !want || !bits || !buf ) goto done;
+
+    /* The stub, if any, and room for the start header. */
+    rc = SzdCopy( &j, 0L, (UInt32)base, buf, 0 );
+    if ( rc != SZ_OK ) goto done;
+    memset( buf, 0, 32 );
+    if ( fwrite( buf, 1, 32, out ) != 32 ) { rc = SZ_ERR_WRITE; goto done; }
+
+    for ( f = 0; f < nf && rc == SZ_OK; f++ )
+    {
+        SzFolder  *sf = &a->folders[f];
+        SzdFolder *fo = &ofo[nOut];
+
+        if ( !keptN[f] ) continue;
+        fo->src = f;
+        for ( i = 0; i < a->numEntries; i++ )
+            if ( a->entries[i].folderIndex == (int)f && !del[i] )
+            {
+                j.name = a->entries[i].name;
+                break;
+            }
+
+        if ( !delN[f] )
+        {
+            for ( k = 0; k < sf->numPackStreams && rc == SZ_OK; k++ )
+            {
+                UInt32 p = sf->firstPackStream + k;
+                rc = SzdCopy( &j, (long)( a->baseOffset + a->packOffset[p] ),
+                              a->packSizes[p], buf, 1 );
+                packs[nPacks++] = a->packSizes[p];
+            }
+            j.fileIndex += keptN[f];
+        }
+        else
+        {
+            for ( i = 0; i < a->numEntries; i++ )
+                want[i] = (Byte)( a->entries[i].folderIndex == (int)f && !del[i] );
+            fo->rebuilt = 1;
+            fo->unpack  = keptBytes[f];
+            rc = SzdRebuild( &j, fo, want, buf );
+            packs[nPacks++] = fo->packSize;
+        }
+        nOut++;
+    }
+    if ( rc != SZ_OK ) goto done;
+
+    if ( nKeep > 0 )
+    {
+        rc = SzdHeader( &j, &h, del, ofo, nOut, packs, nPacks, keptN, bits );
+        if ( rc != SZ_OK ) goto done;
+    }
+    rc = SzdFinish( &j, &h, base );
+
+done:
+    free( keptN );
+    free( delN );
+    free( keptBytes );
+    free( ofo );
+    free( packs );
+    free( want );
+    free( bits );
+    free( buf );
+    free( h.p );
+    return rc;
 }

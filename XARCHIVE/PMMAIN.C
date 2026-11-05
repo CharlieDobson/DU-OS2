@@ -4,7 +4,9 @@
  * Front end only: open an archive, list its contents, extract all of it or a
  * selection, test its integrity, summarise it - and, with nothing open, make
  * a new .zip or .7z from files and folders (File > Compress; the work is
- * ARCCOMP.H's, run on the worker like an extraction).  Every format backend
+ * ARCCOMP.H's, run on the worker like an extraction) - and take entries out
+ * of the open archive (Archive > Delete, or Del; ArcDeleteItems, run on the
+ * worker the same way).  Every format backend
  * (ARCFILE / SZARC / ZIPARC / RARARC / RAR3DEC / RAR5ARC / DISKARC /
  * LZMADEC / CRC32) is the Win32s source BYTE-FOR-BYTE, reading its handful of
  * Win32 calls out of the local windows.h shim.  Those files must stay
@@ -149,6 +151,7 @@ static char          g_progName[CCHMAXPATH + 1];
 #define ARCJOB_TEST         2
 #define ARCJOB_OPEN         3
 #define ARCJOB_COMPRESS     4
+#define ARCJOB_DELETE       5
 
 #define TID_ARCPROGRESS     1
 #define ARC_TIMER_MS        150
@@ -191,6 +194,11 @@ static struct {
                                         /*   on this thread, run on the     */
                                         /*   worker, freed in ArcOnDone     */
     char     compArchive[CCHMAXPATH];   /* ARCJOB_COMPRESS: where it goes   */
+    int     *delSel;                    /* ARCJOB_DELETE: the entries.  The */
+    int      delCount;                  /*   UI thread's, not the worker's, */
+                                        /*   so a password retry can run    */
+                                        /*   the job again; DeleteOnDone    */
+                                        /*   frees it                       */
     int      rc;
 } g_job;
 
@@ -270,6 +278,9 @@ static int  CompressProgress( void *user, int i, int n, const char *name,
                               UInt32 doneKB, UInt32 totalKB );
 static void CompressReport ( HWND hwnd, ArcCompJob *j, int rc );
 static void DoCompress     ( HWND hwnd );
+static int  DeleteProgress ( void *user, int fileIndex, int fileCount,
+                             const char *name, UInt32 doneKB, UInt32 totalKB );
+static void DeleteOnDone   ( HWND hwnd, int rc );
 MRESULT EXPENTRY CompressDlgProc( HWND, ULONG, MPARAM, MPARAM );
 
 /*===========================================================================
@@ -957,6 +968,25 @@ static int CompressProgress( void *user, int i, int n, const char *name,
     return PmWorkerCancelled( &g_worker ) ? 0 : 1;
 }
 
+/* Progress for a delete.  WORKER THREAD.  The bar in kilobytes of work, the
+ * line the name of the entry being written (which may be ""). */
+static int DeleteProgress( void *user, int fileIndex, int fileCount,
+                           const char *name, UInt32 doneKB, UInt32 totalKB )
+{
+    LONG pct = 0;
+
+    (void)user;
+    (void)fileIndex;
+    (void)fileCount;
+    if ( totalKB )
+    {
+        double done = (double)doneKB * 100.0 / (double)totalKB;
+        pct = ( done >= 100.0 ) ? 100 : (LONG)done;
+    }
+    ProgressSet( pct, name ? name : "" );
+    return PmWorkerCancelled( &g_worker ) ? 0 : 1;
+}
+
 /* Overwrite prompt hook (ArcOverwriteFn), registered once in main().
  * WORKER THREAD - no PM calls here.  Park the path where the UI thread's
  * dialog can read it, then block in PmWorkerAsk until ArcOnAsk answers.
@@ -1165,6 +1195,14 @@ static void ArcWorkerBody( void *arg )
             g_job.rc = ArcCompRun( g_job.comp, g_job.compArchive,
                                    CompressProgress, NULL );
         break;
+
+    case ARCJOB_DELETE:
+        /* Writes the archive again and reopens it into g_arc.  The
+           container was emptied before this started (DoDelete), since its
+           records point into the entries being replaced. */
+        g_job.rc = ArcDeleteItems( g_arc, g_job.delSel, g_job.delCount,
+                                   DeleteProgress, NULL );
+        break;
     }
 
     if ( g_job.sel )
@@ -1255,6 +1293,14 @@ static void ArcOnDone( HWND hwnd, BOOL cancelled )
     (void)cancelled;
 
     WinStopTimer( g_hab, g_hwndClient, TID_ARCPROGRESS );
+
+    /* A delete keeps its selection, so a password problem goes round again
+       instead of being reported the way the other jobs' are below. */
+    if ( kind == ARCJOB_DELETE )
+    {
+        DeleteOnDone( hwnd, rc );
+        return;
+    }
 
     /* ARCJOB_OPEN does its PM half here: the header parse ran on the worker,
        but filling the container has to happen on this thread.  The progress
@@ -1816,6 +1862,198 @@ static void DoExtractTo( HWND hwnd )
        function now, so the selection cannot be freed on the way out. */
     if ( count > 0 ) RunExtraction( hwnd, sel, count, g_extractPath );
     else             RunExtraction( hwnd, NULL, 0, g_extractPath );
+}
+
+/*===========================================================================
+ * Delete: the selected entries out of the open archive
+ *
+ * ArcDeleteItems writes the archive again without them (a disk image is
+ * changed where it lies) and reopens it in place: g_arc stays the same
+ * pointer, but its entries are new.  The container's records point into the
+ * old entries (pszName), so the container is emptied BEFORE the job starts
+ * and filled again after it ends - after every attempt, because a reopen
+ * that fails leaves the archive with no entries at all.
+ *
+ * The job runs on the worker like an extraction.  Unlike an extraction it
+ * keeps its selection on this thread (g_job.delSel), so when a 7z solid
+ * folder turns out to need the password, DeleteOnDone asks for it and runs
+ * the same job again - asking up front, as RunExtraction does, would ask
+ * for a zip's password too, and a zip never needs one to delete.
+ *===========================================================================*/
+
+/* A message box titled for this command. */
+static ULONG SayDelete( HWND hwnd, const char *text, ULONG flags )
+{
+    return WinMessageBox( HWND_DESKTOP, hwnd, (PCSZ)text, (PCSZ)"Delete",
+                          0, flags | MB_MOVEABLE );
+}
+
+/* A delete that failed, in words.  Not for a cancel: the archive is as it
+ * was, and the user knows why. */
+static void DeleteReport( HWND hwnd, int rc )
+{
+    char        msg[768];
+    const char *hint = NULL;
+
+    switch ( rc )
+    {
+    case SZ_ERR_UNSUPPORTED: hint = ArcDeleteHint();   break;
+    case SZ_ERR_NORAM:       hint = ArcNoRamHint();    break;
+    case SZ_ERR_MEMORY:      hint = ArcMemFailHint();  break;
+    case SZ_ERR_WRITE:
+        hint = "The archive could not be written.  It may be read-only, "
+               "open in another program, or on a full disk.";
+        break;
+    }
+    if ( hint ) sprintf( msg, "%.200s\n\n%.500s", ArcErrorText( rc ), hint );
+    else        sprintf( msg, "%.200s", ArcErrorText( rc ) );
+    SayDelete( hwnd, msg, MB_OK | MB_ICONEXCLAMATION );
+}
+
+/* Archive > Delete, and the Del key (an accelerator) in the list.
+ *
+ * ASYNCHRONOUS once confirmed: DeleteOnDone finishes the job. */
+static void DoDelete( HWND hwnd )
+{
+    char  msg[SZ_MAX_NAME * 2 + 128];
+    char  num[NUM_FMT_U32_MAX];
+    int  *sel;
+    int   count, i, hasDir = 0, rc;
+
+    if ( !g_arc )
+    {
+        SayDelete( hwnd, "Open an archive first.", MB_OK | MB_INFORMATION );
+        return;
+    }
+    if ( ArcBusy() )
+    {
+        Say( hwnd, "Another operation is still running.",
+             MB_OK | MB_INFORMATION );
+        return;
+    }
+
+    /* The whole archive first: when nothing at all can go, choosing what
+     * to delete is wasted effort. */
+    if ( ArcCanDelete( g_arc ) != SZ_OK )
+    {
+        SayDelete( hwnd, ArcDeleteHint(), MB_OK | MB_INFORMATION );
+        return;
+    }
+
+    count = CnrSelectedCount( g_hwndCnr );
+    if ( count <= 0 )
+    {
+        SayDelete( hwnd, "Select the files to delete first.",
+                   MB_OK | MB_INFORMATION );
+        return;
+    }
+    sel = (int *)malloc( (size_t)count * sizeof( int ) );
+    if ( !sel )
+    {
+        SayDelete( hwnd, "Not enough memory for the selection.",
+                   MB_OK | MB_ICONEXCLAMATION );
+        return;
+    }
+    count = CnrSelectedIndices( g_hwndCnr, sel, count );
+    if ( count <= 0 ) { free( sel ); return; }
+
+    /* 1. Can this selection go?  A solid RAR, for one, can lose files only
+     *    from the end of a solid run - better said now than after Yes. */
+    rc = ArcDeleteCheck( g_arc, sel, count );
+    if ( rc == SZ_ERR_UNSUPPORTED )
+    {
+        SayDelete( hwnd, ArcDeleteHint(), MB_OK | MB_INFORMATION );
+        free( sel );
+        return;
+    }
+    if ( rc != SZ_OK )
+    {
+        DeleteReport( hwnd, rc );
+        free( sel );
+        return;
+    }
+
+    /* 2. Confirm, with No as the default. */
+    for ( i = 0; i < count && !hasDir; i++ )
+    {
+        if ( ArcEntryIsDir( g_arc, sel[i] ) ) hasDir = 1;
+    }
+    if ( count == 1 )
+    {
+        const char *name = ArcEntryName( g_arc, sel[0] );
+        sprintf( msg, "Delete %.260s from %.260s?", name ? name : "",
+                 FileNamePart( g_arcPath ) );
+    }
+    else
+    {
+        sprintf( msg, "Delete these %s items from %.260s?",
+                 NumFmt( (UInt32)count, num ), FileNamePart( g_arcPath ) );
+    }
+    if ( hasDir ) strcat( msg, "\n\nA folder is deleted with everything in it." );
+    if ( SayDelete( hwnd, msg, MB_YESNO | MB_QUERY | MB_DEFBUTTON2 ) != MBID_YES )
+    {
+        free( sel );
+        return;
+    }
+
+    /* 3. The records go before the entries they point into do. */
+    CnrClear( g_hwndCnr );
+
+    g_job.sel      = NULL;
+    g_job.delSel   = sel;
+    g_job.delCount = count;
+    if ( !ArcStartJob( hwnd, ARCJOB_DELETE, "Delete", "Deleting:", TRUE ) )
+    {
+        free( g_job.delSel );               /* ArcStartJob has said why */
+        g_job.delSel   = NULL;
+        g_job.delCount = 0;
+        PopulateList();
+    }
+}
+
+/* A delete finished (UI THREAD, from ArcOnDone). */
+static void DeleteOnDone( HWND hwnd, int rc )
+{
+    g_job.kind = 0;
+
+    /* 4. A 7z solid folder had to be decoded.  Ask, and run the same job
+     *    again; Cancel at the prompt stops, and leaves the archive as it
+     *    was.  The stored password is dropped then, as after any other
+     *    password failure (ArcOnDone). */
+    if ( rc == SZ_ERR_PASSWORD || rc == SZ_ERR_BADPASS )
+    {
+        ProgressEnd( hwnd );
+        if ( g_arc && AskPassword( hwnd, rc == SZ_ERR_BADPASS ) )
+        {
+            ArcSetPassword( g_arc, g_password );
+            if ( ArcStartJob( hwnd, ARCJOB_DELETE, "Delete", "Deleting:", TRUE ) )
+            {
+                return;
+            }
+        }
+        else
+        {
+            g_password[0] = '\0';
+            if ( g_arc ) ArcSetPassword( g_arc, NULL );
+        }
+        rc = SZ_ERR_CANCEL;       /* a failed restart has said why itself */
+    }
+
+    if ( g_job.delSel )
+    {
+        free( g_job.delSel );
+        g_job.delSel = NULL;
+    }
+    g_job.delCount = 0;
+
+    /* 5. List what is left, whatever happened. */
+    PopulateList();
+    ProgressEnd( hwnd );
+    UpdateTitle();
+    UpdateToolbarState();
+
+    /* 6. Nothing to say after success or a cancel. */
+    if ( rc != SZ_OK && rc != SZ_ERR_CANCEL ) DeleteReport( hwnd, rc );
 }
 
 /*===========================================================================
@@ -2818,6 +3056,10 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
         else if ( SHORT1FROMMP( mp1 ) == IDM_ARCHIVE )
         {
             MenuEnable( hwndMenu, IDM_ARCHIVE_EXTRACT, have );
+            /* Greyed, too, for an archive nothing can be deleted from: a
+             * multi-volume set, a COMPRESS.EXE file, an image in a .imz. */
+            MenuEnable( hwndMenu, IDM_ARCHIVE_DELETE,
+                        (BOOL)( have && ArcCanDelete( g_arc ) == SZ_OK ) );
             MenuEnable( hwndMenu, IDM_ARCHIVE_TEST,    have );
             MenuEnable( hwndMenu, IDM_ARCHIVE_INFO,    have );
             /* Greyed unless there is actually something to show: only
@@ -2849,6 +3091,9 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
             break;
         case IDM_ARCHIVE_EXTRACT:
             DoExtractTo( hwnd );
+            break;
+        case IDM_ARCHIVE_DELETE:
+            DoDelete( hwnd );
             break;
         case IDM_ARCHIVE_INFO:
             DoInfo( hwnd );
@@ -2977,6 +3222,13 @@ MRESULT EXPENTRY ClientWndProc( HWND hwnd, ULONG msg, MPARAM mp1, MPARAM mp2 )
 
         WinStopTimer( g_hab, g_hwndClient, TID_ARCPROGRESS );
         ProgressEnd( hwnd );
+
+        /* A delete stopped here never reaches DeleteOnDone. */
+        if ( g_job.delSel )
+        {
+            free( g_job.delSel );
+            g_job.delSel = NULL;
+        }
 
         CloseArchive();
         WinPostMsg( hwnd, WM_QUIT, MPVOID, MPVOID );

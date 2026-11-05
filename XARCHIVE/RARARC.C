@@ -126,6 +126,7 @@ struct RarArchive {
     int       numEntries;
     int       cap;                       /* entries the tables can hold      */
     int       solid;                     /* archive uses solid compression   */
+    UInt16    mainFlags;                 /* the first volume's main header   */
     RarEntry *entries;
     long     *dataOffset;                /* file offset of the data area     */
     UInt16   *headFlags;                 /* file-header flags                */
@@ -862,6 +863,7 @@ int RarOpenPw( const char *path, const char *pw, RarArchive **out )
         if ( type == RAR_MAIN )
         {
             z->solid = ( flags & MHD_SOLID ) ? 1 : 0;
+            if ( vol == 0 ) z->mainFlags = flags;
 
             /* The names found a candidate set; THIS is what confirms it.  An
              * ordinary archive sitting next to an unrelated file that happens
@@ -888,6 +890,11 @@ int RarOpenPw( const char *path, const char *pw, RarArchive **out )
             UInt32 packSize, unpSize, ftime, attr;
             UInt16 nameSize;
             int    nameOff;
+
+            /* The fixed part of a file header is 32 bytes, and every field
+             * below is read from it - a shorter block would be read past the
+             * end of the buffer that holds it. */
+            if ( headSize < 32 ) { free( hdr ); rc = SZ_ERR_FORMAT; break; }
 
             packSize = Rd32( hdr + 7 );
             unpSize  = Rd32( hdr + 11 );
@@ -929,6 +936,7 @@ int RarOpenPw( const char *path, const char *pw, RarArchive **out )
                 int g = RarGrow( z );
                 if ( g <= 0 )
                 {
+                    free( hdr );
                     rc = ( g < 0 )
                        ? ArcCheckEntryCount( (UInt32)z->numEntries + 1 )
                        : SZ_ERR_MEMORY;
@@ -1689,4 +1697,355 @@ void RarClose( RarArchive *r )
         if ( r->comment )    free( r->comment );
         free( r );
     }
+}
+
+/*===========================================================================
+ * Deleting entries (ArcDeleteItems in ARCFILE.H)
+ *
+ * NOTHING IS PACKED AGAIN.  Every RAR entry is a chain of blocks - the file
+ * header, its data, and whatever sub-blocks follow it (NTFS streams, ACLs,
+ * the old 2.x EA blocks) - so the new archive is the old one's blocks copied
+ * byte for byte, less the chains of the files that go.  That needs neither a
+ * RAR packer, which this program does not have, nor the password: encrypted
+ * data is copied as it lies, and under -hp each block is enciphered on its
+ * own with the salt written in front of it (see RarReadBlock), so a block
+ * moved to a new offset still decrypts.
+ *
+ * What cannot be copied is anything that describes the archive as a whole,
+ * because the archive is no longer the one it described:
+ *
+ *   recovery record    old PROTECT_HEAD (0x78) or a NEWSUB called "RR".
+ *                      Its parity covers the old bytes, so kept it would
+ *                      "repair" the new archive into garbage.
+ *   authenticity       old AV_HEAD (0x76), SIGN_HEAD (0x79), NEWSUB "AV".
+ *                      A signature over contents that have changed.
+ *
+ * Both go, and the main header's MHD_PROTECT / MHD_AV bits go with them so
+ * that the header does not promise what is no longer there.  The main header
+ * is never enciphered, even under -hp, so it can be patched and its CRC
+ * worked out again without the key.
+ *
+ * Refused:
+ *   a locked archive  WinRAR will not change one (MHD_LOCK), and neither will
+ *                     this.  Locking is how its owner said so.
+ *   a solid break     in a solid run each file is unpacked from the window
+ *                     the files before it left behind.  Deleting a file with
+ *                     data strands every later solid file of that run, up to
+ *                     the next file that starts afresh (no LHD_SOLID).  Losing
+ *                     the tail of a run is harmless.  Files without data -
+ *                     folders, empty files - add nothing to the window and
+ *                     never break the run.
+ *
+ * Self-extracting RARs never get here: RarOpenPw wants the marker at offset 0,
+ * so one with a stub in front is not opened as a RAR at all.
+ *
+ * Two passes over the block chain: the first decides (refusals, the size of
+ * the job for the progress bar) and writes nothing; the second copies.  Asked
+ * only about a selection, the first pass is the whole answer.
+ *===========================================================================*/
+
+#define RAR_AV_OLD      0x76     /* authenticity verification, RAR 2.x      */
+#define RAR_PROTECT     0x78     /* recovery record, RAR 2.x                */
+#define RAR_SIGN        0x79     /* authenticity verification, RAR 3.x      */
+
+#define MHD_LOCK        0x0004   /* WinRAR's "lock archive"                 */
+#define MHD_AV          0x0020   /* authenticity information present        */
+#define MHD_PROTECT     0x0040   /* recovery record present                 */
+#define MHD_ENCRYPTVER  0x0200   /* an EncryptVer byte ends the main header */
+
+#define RAR_MAIN_FIXED  13       /* main header without EncryptVer          */
+#define RAR_DEL_BUF     32768U   /* copy buffer                             */
+#define RAR_DEL_STEP    65536UL  /* progress every this many bytes copied   */
+
+typedef struct {
+    RarArchive     *z;
+    const Byte     *del;
+    FILE           *out;          /* NULL while deciding                    */
+    ArcCompProgress prog;
+    void           *user;
+    Byte           *buf;
+    long            fileLen;
+    int             keptN;        /* entries to write, from the first pass  */
+    int             kept;         /* entries met so far that stay           */
+    UInt32          total;        /* bytes to write, from the first pass    */
+    UInt32          done;         /* bytes written                          */
+    UInt32          nextTick;
+    const char     *name;         /* entry being copied, for the progress   */
+} RarDel;
+
+static char g_rarDelWhy[400];
+
+static int RarDelTick( RarDel *d )
+{
+    if ( !d->out || !d->prog ) return SZ_OK;
+    if ( !d->prog( d->user, d->kept > 0 ? d->kept - 1 : 0, d->keptN,
+                   d->name ? d->name : "", d->done >> 10, d->total >> 10 ) )
+        return SZ_ERR_CANCEL;
+    return SZ_OK;
+}
+
+/* Bytes from memory to the new archive (or only counted, while deciding). */
+static int RarDelPut( RarDel *d, const Byte *src, UInt32 len )
+{
+    if ( !d->out ) { d->total += len; return SZ_OK; }
+    if ( fwrite( src, 1, (size_t)len, d->out ) != (size_t)len )
+        return SZ_ERR_WRITE;
+    d->done += len;
+    return SZ_OK;
+}
+
+/* Bytes [from, from + len) of the old archive to the new one, unchanged. */
+static int RarDelCopy( RarDel *d, long from, long len )
+{
+    if ( !d->out ) { d->total += (UInt32)len; return SZ_OK; }
+    if ( VolSeek( d->z->fp, from, SEEK_SET ) != 0 ) return SZ_ERR_READ;
+
+    while ( len > 0 )
+    {
+        UInt32 take = ( len > (long)RAR_DEL_BUF ) ? RAR_DEL_BUF : (UInt32)len;
+
+        if ( VolRead( d->buf, 1, take, d->z->fp ) != take ) return SZ_ERR_READ;
+        if ( fwrite( d->buf, 1, (size_t)take, d->out ) != (size_t)take )
+            return SZ_ERR_WRITE;
+        len     -= (long)take;
+        d->done += take;
+        if ( d->done >= d->nextTick )
+        {
+            int rc = RarDelTick( d );
+            if ( rc != SZ_OK ) return rc;
+            d->nextTick = d->done + RAR_DEL_STEP;
+        }
+    }
+    return SZ_OK;
+}
+
+/* The main header with the recovery-record and authenticity bits cleared and
+ * its CRC made good, or copied as it is when neither bit is set.
+ *
+ * WHICH BYTES THE CRC COVERS is taken from the header itself rather than
+ * assumed.  A RAR 3 main header covers all of headSize; one from RAR 2.x with
+ * a comment inside (MHD_COMMENT) is understood by some readers to cover only
+ * the fixed 13 or 14 bytes.  Whichever span the old CRC matches is the span
+ * the new one is computed over, so the archive stays the shape its own
+ * readers expect. */
+static int RarDelMain( RarDel *d, Byte *hdr, UInt16 headSize, long pos )
+{
+    UInt16 flags = (UInt16)Rd16( hdr + 3 );
+    UInt16 stored = (UInt16)Rd16( hdr );
+    UInt32 fixed, span = 0, crc;
+
+    if ( !( flags & ( MHD_PROTECT | MHD_AV ) ) )
+        return RarDelCopy( d, pos, (long)headSize );
+
+    fixed = ( flags & MHD_ENCRYPTVER ) ? RAR_MAIN_FIXED + 1 : RAR_MAIN_FIXED;
+    if ( (UInt16)( Crc32Calc( hdr + 2, (UInt32)headSize - 2 ) & 0xFFFF ) == stored )
+        span = headSize;
+    else if ( fixed < headSize &&
+              (UInt16)( Crc32Calc( hdr + 2, fixed - 2 ) & 0xFFFF ) == stored )
+        span = fixed;
+    if ( span == 0 ) return SZ_ERR_CRC;
+
+    /* HighPosAV / PosAV point at the authenticity block, which is gone. */
+    if ( ( flags & MHD_AV ) && headSize >= RAR_MAIN_FIXED )
+        memset( hdr + 7, 0, 6 );
+
+    flags = (UInt16)( flags & ~( MHD_PROTECT | MHD_AV ) );
+    hdr[3] = (Byte)( flags & 0xFF );
+    hdr[4] = (Byte)( flags >> 8 );
+
+    crc = Crc32Calc( hdr + 2, span - 2 );
+    hdr[0] = (Byte)( crc & 0xFF );
+    hdr[1] = (Byte)( ( crc >> 8 ) & 0xFF );
+    return RarDelPut( d, hdr, headSize );
+}
+
+/* Does a NEWSUB block carry this name?  The name sits where a file header
+ * keeps one, and is not terminated. */
+static int RarSubIs( const Byte *hdr, UInt16 headSize, UInt16 flags,
+                     const char *name )
+{
+    UInt32 nameSize = Rd16( hdr + 26 );
+    UInt32 nameOff  = ( flags & LHD_LARGE ) ? 40 : 32;
+    UInt32 len      = (UInt32)strlen( name );
+
+    if ( nameSize != len || nameOff + len > (UInt32)headSize ) return 0;
+    return memcmp( hdr + nameOff, name, (size_t)len ) == 0;
+}
+
+/* One pass over the block chain.  d->out NULL decides; otherwise copies. */
+static int RarDelWalk( RarDel *d, const char **why )
+{
+    RarArchive *z      = d->z;
+    int         wasEnc = z->hdrEncrypted;
+    long        pos    = 7;
+    int         entry  = 0;
+    int         drop   = 0;      /* the blocks passing belong to a deleted file */
+    int         broken = 0;      /* a file with data went since the run began   */
+    int         rc;
+
+    /* Replay the open: blocks are plain until the main header says -hp. */
+    z->hdrEncrypted = 0;
+    d->kept = 0;
+    rc = RarDelCopy( d, 0, 7 );                         /* the marker */
+
+    while ( rc == SZ_OK && pos < d->fileLen )
+    {
+        Byte  *hdr;
+        Byte   type;
+        UInt16 flags, headSize;
+        UInt32 dataSize = 0;
+        long   body, end;
+        int    keep = !drop;
+        int    stop = 0;
+        int    brc;
+
+        brc = RarReadBlock( z, pos, &hdr, &headSize, &body );
+        if ( brc == RAR_BLK_END ) break;
+        if ( brc != SZ_OK ) { rc = brc; break; }
+
+        type  = hdr[2];
+        flags = (UInt16)Rd16( hdr + 3 );
+
+        if ( type == RAR_FILE || type == RAR_NEWSUB )
+        {
+            if ( headSize < 32 ) { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+            dataSize = Rd32( hdr + 7 );
+
+            /* 64-bit sizes: the high half has to be zero, or the data runs
+             * past what a long offset can reach. */
+            if ( ( flags & LHD_LARGE ) &&
+                 ( headSize < 40 || Rd32( hdr + 32 ) != 0 ) )
+            {
+                free( hdr );
+                *why = "This archive holds a file of 4 GB or more, which is "
+                       "too large to copy.";
+                rc = SZ_ERR_UNSUPPORTED;
+                break;
+            }
+        }
+        else if ( ( flags & LONG_BLOCK ) && headSize >= 11 )
+            dataSize = Rd32( hdr + 7 );
+
+        if ( dataSize > (UInt32)( 0x7FFFFFFFL - body ) )
+        { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+        end = body + (long)dataSize;
+        if ( end > d->fileLen ) { free( hdr ); rc = SZ_ERR_READ; break; }
+
+        if ( type == RAR_MAIN )
+        {
+            if ( flags & MHD_PASSWORD ) z->hdrEncrypted = wasEnc;
+            rc = RarDelMain( d, hdr, headSize, pos );
+            if ( rc == SZ_OK && end > pos + (long)headSize )
+                rc = RarDelCopy( d, pos + (long)headSize,
+                                 end - ( pos + (long)headSize ) );
+            keep = 0;                                   /* written above */
+        }
+        else if ( type == RAR_FILE )
+        {
+            const RarEntry *e;
+            int             gone, hasData;
+
+            /* The reader made an entry of every file header in a single
+             * volume, in order, so the two must line up.  If one does not,
+             * the archive is not the one that was listed. */
+            if ( entry >= z->numEntries || z->dataOffset[entry] != body )
+            { free( hdr ); rc = SZ_ERR_FORMAT; break; }
+
+            e       = &z->entries[entry];
+            gone    = d->del[entry] != 0;
+            hasData = dataSize > 0 && !e->isDir;
+
+            if ( hasData && !( flags & LHD_SOLID ) ) broken = 0;
+            if ( gone )
+            {
+                if ( hasData ) broken = 1;
+            }
+            else if ( hasData && ( flags & LHD_SOLID ) && broken )
+            {
+                sprintf( g_rarDelWhy,
+                         "This is a solid archive, and \"%.100s\" is unpacked "
+                         "using files that are selected for deleting.  Select "
+                         "\"%.100s\" and the files after that file as well, or "
+                         "keep the earlier files.", e->name, e->name );
+                *why = g_rarDelWhy;
+                free( hdr );
+                rc = SZ_ERR_UNSUPPORTED;
+                break;
+            }
+
+            drop = gone;
+            keep = !gone;
+            if ( keep )
+            {
+                d->kept++;
+                d->name = e->name;
+                rc = RarDelTick( d );
+            }
+            entry++;
+        }
+        else if ( type == RAR_PROTECT || type == RAR_AV_OLD ||
+                  type == RAR_SIGN )
+            keep = 0;
+        else if ( type == RAR_NEWSUB &&
+                  ( RarSubIs( hdr, headSize, flags, "RR" ) ||
+                    RarSubIs( hdr, headSize, flags, "AV" ) ) )
+            keep = 0;
+        else if ( type == RAR_ENDARC )
+        {
+            keep = 1;
+            stop = 1;
+        }
+
+        free( hdr );
+        if ( rc == SZ_OK && keep ) rc = RarDelCopy( d, pos, end - pos );
+        pos = end;
+        if ( stop ) break;
+    }
+
+    z->hdrEncrypted = wasEnc;
+    if ( rc == SZ_OK && entry != z->numEntries ) rc = SZ_ERR_FORMAT;
+    if ( rc == SZ_OK && !d->out ) d->keptN = d->kept;
+    return rc;
+}
+
+int RarDeleteWrite( RarArchive *r, const Byte *del, FILE *out,
+                    ArcCompProgress prog, void *user, const char **why )
+{
+    RarDel d;
+    int    rc;
+
+    if ( !r ) return SZ_ERR_FORMAT;
+
+    if ( r->mainFlags & MHD_LOCK )
+    {
+        *why = "WinRAR has locked this archive, and a locked archive cannot "
+               "be changed.";
+        return SZ_ERR_UNSUPPORTED;
+    }
+    if ( r->volumes != 1 || ( r->mainFlags & MHD_VOLUME ) )
+    {
+        *why = "This archive is one volume of a set.  Files cannot be "
+               "deleted from a multi-volume archive.";
+        return SZ_ERR_UNSUPPORTED;
+    }
+    if ( !del ) return SZ_OK;
+
+    memset( &d, 0, sizeof( d ) );
+    d.z       = r;
+    d.del     = del;
+    d.fileLen = VolVolumeLen( r->fp, 0 );
+
+    rc = RarDelWalk( &d, why );
+    if ( rc != SZ_OK || !out ) return rc;
+
+    d.buf = (Byte *)malloc( RAR_DEL_BUF );
+    if ( !d.buf ) return SZ_ERR_MEMORY;
+    d.out      = out;
+    d.prog     = prog;
+    d.user     = user;
+    d.nextTick = RAR_DEL_STEP;
+    rc = RarDelWalk( &d, why );
+    if ( rc == SZ_OK ) rc = RarDelTick( &d );            /* the bar at 100% */
+    free( d.buf );
+    return rc;
 }
